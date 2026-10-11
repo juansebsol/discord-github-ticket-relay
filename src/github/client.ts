@@ -1,0 +1,322 @@
+import { createSign } from 'node:crypto';
+import type { GitHubAppConfig } from '../config.js';
+import { fetchWithTimeout, type FetchLike } from '../lib/http.js';
+
+const API = 'https://api.github.com';
+const API_VERSION = '2022-11-28';
+const USER_AGENT = 'discord-github-ticket-relay';
+
+export class GitHubApiError extends Error {
+  constructor(
+    readonly status: number,
+    readonly githubMessage: string,
+    readonly retryAfterSeconds: number | null,
+    readonly isRateLimit: boolean,
+    readonly details: unknown,
+  ) {
+    super(`GitHub API ${status}: ${githubMessage}`);
+    this.name = 'GitHubApiError';
+  }
+}
+
+export interface InstallationInfo {
+  id: number;
+  accountLogin: string;
+  accountType: string;
+  accountAvatarUrl: string | null;
+  repositorySelection: string;
+  suspended: boolean;
+}
+
+export interface RepoInfo {
+  id: number;
+  owner: string;
+  name: string;
+  fullName: string;
+  private: boolean;
+  visibility: string;
+  hasIssues: boolean;
+  archived: boolean;
+  htmlUrl: string;
+}
+
+export interface CreatedIssue {
+  number: number;
+  url: string;
+}
+
+function base64url(input: Buffer | string): string {
+  return Buffer.from(input).toString('base64url');
+}
+
+/** Installation accounts are users/organizations (login) or enterprises (slug/name, no login). */
+function accountName(account: any): string {
+  return account?.login ?? account?.slug ?? account?.name ?? 'unknown';
+}
+
+function toRepo(r: any): RepoInfo {
+  return {
+    id: r.id,
+    owner: r.owner?.login,
+    name: r.name,
+    fullName: r.full_name,
+    private: Boolean(r.private),
+    visibility: r.visibility ?? (r.private ? 'private' : 'public'),
+    hasIssues: Boolean(r.has_issues),
+    archived: Boolean(r.archived),
+    htmlUrl: r.html_url,
+  };
+}
+
+/**
+ * Thin GitHub REST client for a GitHub App. Uses short-lived installation access
+ * tokens; nothing long-lived is stored besides the app private key in deployment config.
+ */
+export class GitHubClient {
+  private readonly tokenCache = new Map<number, { token: string; expiresAt: number }>();
+
+  constructor(
+    private readonly config: GitHubAppConfig,
+    private readonly fetchImpl: FetchLike = fetch,
+    private readonly timeouts: { request: number; createIssue: number } = { request: 10_000, createIssue: 15_000 },
+  ) {}
+
+  private get timeoutMs(): number {
+    return this.timeouts.request;
+  }
+
+  get appSlug(): string {
+    return this.config.slug;
+  }
+
+  installUrl(state: string): string {
+    return `https://github.com/apps/${encodeURIComponent(this.config.slug)}/installations/new?state=${encodeURIComponent(state)}`;
+  }
+
+  /** GitHub user authorization URL, used to prove the admin can access an installation. */
+  authorizeUrl(state: string, redirectUri: string): string {
+    const params = new URLSearchParams({ client_id: this.config.clientId, state, redirect_uri: redirectUri });
+    return `https://github.com/login/oauth/authorize?${params}`;
+  }
+
+  appJwt(now = Date.now()): string {
+    const iat = Math.floor(now / 1000) - 60;
+    const header = base64url(JSON.stringify({ alg: 'RS256', typ: 'JWT' }));
+    const payload = base64url(JSON.stringify({ iat, exp: iat + 540, iss: this.config.clientId || this.config.appId }));
+    const signer = createSign('RSA-SHA256');
+    signer.update(`${header}.${payload}`);
+    return `${header}.${payload}.${base64url(signer.sign(this.config.privateKey))}`;
+  }
+
+  private async request(
+    method: string,
+    path: string,
+    auth: string,
+    body?: unknown,
+    timeoutMs = this.timeoutMs,
+  ): Promise<{ status: number; data: any; headers: Headers }> {
+    const url = path.startsWith('https://') ? path : `${API}${path}`;
+    const res = await fetchWithTimeout(
+      this.fetchImpl,
+      url,
+      {
+        method,
+        headers: {
+          Accept: 'application/vnd.github+json',
+          'X-GitHub-Api-Version': API_VERSION,
+          'User-Agent': USER_AGENT,
+          Authorization: auth,
+          ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+        },
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+      },
+      timeoutMs,
+    );
+    const text = await res.text();
+    let data: any = null;
+    if (text) {
+      try {
+        data = JSON.parse(text);
+      } catch {
+        data = { message: text.slice(0, 200) };
+      }
+    }
+    if (!res.ok) {
+      const message = typeof data?.message === 'string' ? data.message : res.statusText || 'Request failed';
+      const retryAfterHeader = res.headers.get('retry-after');
+      const remaining = res.headers.get('x-ratelimit-remaining');
+      const reset = res.headers.get('x-ratelimit-reset');
+      let retryAfter: number | null = retryAfterHeader ? Number(retryAfterHeader) : null;
+      const isRateLimit =
+        res.status === 429 ||
+        (res.status === 403 && (remaining === '0' || retryAfterHeader !== null || /rate limit/i.test(message)));
+      if (isRateLimit && retryAfter === null) {
+        retryAfter = remaining === '0' && reset ? Math.max(1, Number(reset) - Math.floor(Date.now() / 1000)) : 60;
+      }
+      throw new GitHubApiError(res.status, message, retryAfter, isRateLimit, data?.errors ?? null);
+    }
+    return { status: res.status, data, headers: res.headers };
+  }
+
+  async installationToken(installationId: number): Promise<string> {
+    const cached = this.tokenCache.get(installationId);
+    if (cached && cached.expiresAt - Date.now() > 5 * 60_000) return cached.token;
+    const { data } = await this.request('POST', `/app/installations/${installationId}/access_tokens`, `Bearer ${this.appJwt()}`, {});
+    this.tokenCache.set(installationId, { token: data.token, expiresAt: Date.parse(data.expires_at) });
+    return data.token;
+  }
+
+  invalidateToken(installationId: number): void {
+    this.tokenCache.delete(installationId);
+  }
+
+  private async asInstallation(installationId: number) {
+    return `token ${await this.installationToken(installationId)}`;
+  }
+
+  async getInstallation(installationId: number): Promise<InstallationInfo> {
+    const { data } = await this.request('GET', `/app/installations/${installationId}`, `Bearer ${this.appJwt()}`);
+    return {
+      id: data.id,
+      accountLogin: accountName(data.account),
+      accountType: data.account?.type ?? 'User',
+      accountAvatarUrl: data.account?.avatar_url ?? null,
+      repositorySelection: data.repository_selection ?? 'selected',
+      suspended: Boolean(data.suspended_at),
+    };
+  }
+
+  async listInstallationRepos(installationId: number, maxPages = 20): Promise<RepoInfo[]> {
+    const auth = await this.asInstallation(installationId);
+    const repos: RepoInfo[] = [];
+    for (let page = 1; page <= maxPages; page++) {
+      const { data } = await this.request('GET', `/installation/repositories?per_page=100&page=${page}`, auth);
+      const batch = (data.repositories ?? []).map(toRepo);
+      repos.push(...batch);
+      if (batch.length < 100) break;
+    }
+    return repos.sort((a, b) => a.fullName.localeCompare(b.fullName));
+  }
+
+  async getRepoById(installationId: number, repoId: number): Promise<RepoInfo> {
+    const { data } = await this.request('GET', `/repositories/${repoId}`, await this.asInstallation(installationId));
+    return toRepo(data);
+  }
+
+  async listLabels(installationId: number, owner: string, repo: string): Promise<string[]> {
+    const auth = await this.asInstallation(installationId);
+    const labels: string[] = [];
+    for (let page = 1; page <= 10; page++) {
+      const { data } = await this.request(
+        'GET',
+        `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/labels?per_page=100&page=${page}`,
+        auth,
+      );
+      labels.push(...(data as any[]).map((l) => l.name as string));
+      if ((data as any[]).length < 100) break;
+    }
+    return labels;
+  }
+
+  async createIssue(
+    installationId: number,
+    owner: string,
+    repo: string,
+    issue: { title: string; body: string; labels: string[] },
+    timeoutMs = this.timeouts.createIssue,
+  ): Promise<CreatedIssue> {
+    const { data } = await this.request(
+      'POST',
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues`,
+      await this.asInstallation(installationId),
+      issue.labels.length ? issue : { title: issue.title, body: issue.body },
+      timeoutMs,
+    );
+    return { number: data.number, url: data.html_url };
+  }
+
+  async getIssue(installationId: number, owner: string, repo: string, issueNumber: number): Promise<CreatedIssue & { isPullRequest: boolean }> {
+    const { data } = await this.request(
+      'GET',
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/${issueNumber}`,
+      await this.asInstallation(installationId),
+    );
+    return { number: data.number, url: data.html_url, isPullRequest: Boolean(data.pull_request) };
+  }
+
+  /**
+   * Looks for an issue whose body contains the submission marker. Used to reconcile
+   * submissions whose create request had an unknown outcome. Lists recently updated
+   * issues (strongly consistent) and falls back to search (eventually consistent).
+   */
+  async findIssueByMarker(
+    installationId: number,
+    owner: string,
+    repo: string,
+    marker: string,
+    since: Date,
+  ): Promise<CreatedIssue | null> {
+    const auth = await this.asInstallation(installationId);
+    const base = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues`;
+    const sinceIso = new Date(since.getTime() - 5 * 60_000).toISOString();
+    for (let page = 1; page <= 5; page++) {
+      const { data } = await this.request(
+        'GET',
+        `${base}?state=all&sort=created&direction=desc&per_page=100&page=${page}&since=${encodeURIComponent(sinceIso)}`,
+        auth,
+      );
+      const items = data as any[];
+      const match = items.find((i) => !i.pull_request && typeof i.body === 'string' && i.body.includes(marker));
+      if (match) return { number: match.number, url: match.html_url };
+      if (items.length < 100) return null;
+    }
+    const q = `"${marker}" repo:${owner}/${repo} is:issue in:body`;
+    const { data } = await this.request('GET', `/search/issues?q=${encodeURIComponent(q)}&per_page=5`, auth);
+    const hit = (data.items as any[] | undefined)?.find((i) => typeof i.body === 'string' && i.body.includes(marker));
+    return hit ? { number: hit.number, url: hit.html_url } : null;
+  }
+
+  async exchangeOAuthCode(code: string, redirectUri: string): Promise<string> {
+    const res = await fetchWithTimeout(
+      this.fetchImpl,
+      'https://github.com/login/oauth/access_token',
+      {
+        method: 'POST',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'User-Agent': USER_AGENT },
+        body: JSON.stringify({
+          client_id: this.config.clientId,
+          client_secret: this.config.clientSecret,
+          code,
+          redirect_uri: redirectUri,
+        }),
+      },
+      this.timeoutMs,
+    );
+    const data: any = await res.json().catch(() => ({}));
+    if (!res.ok || !data.access_token) {
+      throw new GitHubApiError(res.status, data.error_description ?? data.error ?? 'OAuth exchange failed', null, false, null);
+    }
+    return data.access_token;
+  }
+
+  /** Installations of this app that the authorizing GitHub user can access. */
+  async listUserInstallations(userToken: string): Promise<InstallationInfo[]> {
+    const out: InstallationInfo[] = [];
+    for (let page = 1; page <= 10; page++) {
+      const { data } = await this.request('GET', `/user/installations?per_page=100&page=${page}`, `Bearer ${userToken}`);
+      const batch = (data.installations ?? []) as any[];
+      for (const i of batch) {
+        out.push({
+          id: i.id,
+          accountLogin: accountName(i.account),
+          accountType: i.account?.type ?? (i.account?.slug ? 'Enterprise' : 'User'),
+          accountAvatarUrl: i.account?.avatar_url ?? null,
+          repositorySelection: i.repository_selection ?? 'selected',
+          suspended: Boolean(i.suspended_at),
+        });
+      }
+      if (batch.length < 100) break;
+    }
+    return out;
+  }
+}
