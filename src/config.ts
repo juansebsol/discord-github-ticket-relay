@@ -27,7 +27,8 @@ export interface Config {
   host: string;
   port: number;
   publicUrl: string;
-  databaseUrl: string;
+  /** SQLite database file. */
+  databasePath: string;
   encryptionKey: Buffer;
   discord: DiscordAppConfig | null;
   github: GitHubAppConfig | null;
@@ -55,8 +56,7 @@ function readPrivateKey(env: NodeJS.ProcessEnv): string | undefined {
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const nodeEnv = (env.NODE_ENV === 'production' || env.NODE_ENV === 'test' ? env.NODE_ENV : 'development') as Config['nodeEnv'];
 
-  const databaseUrl = env.DATABASE_URL;
-  if (!databaseUrl) throw new ConfigError('DATABASE_URL is required.');
+  const databasePath = env.DATABASE_PATH || './data/ticket-relay.db';
 
   const port = Number(env.PORT ?? 3000);
   const publicUrl = (env.PUBLIC_URL ?? `http://localhost:${port}`).replace(/\/+$/, '');
@@ -111,7 +111,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     host: env.HOST ?? '0.0.0.0',
     port,
     publicUrl,
-    databaseUrl,
+    databasePath,
     encryptionKey,
     discord,
     github,

@@ -44,7 +44,7 @@ export function registerDiscordRoutes(app: FastifyInstance, web: Web): void {
       let claimed = new Set<string>();
       if (mine?.length) {
         const { rows } = await deps.db.query<{ guild_id: string }>(
-          'SELECT guild_id FROM discord_connections WHERE guild_id = ANY($1) AND workspace_id <> $2',
+          'SELECT guild_id FROM discord_connections WHERE guild_id IN (SELECT value FROM json_each($1)) AND workspace_id <> $2',
           [mine.map((g) => g.id), ctx.workspace.id],
         );
         claimed = new Set(rows.map((r) => r.guild_id));

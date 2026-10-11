@@ -2,13 +2,13 @@ import { generateKeyPairSync, sign } from 'node:crypto';
 import type { InjectOptions } from 'fastify';
 import { createApp, type AppInstance } from '../src/app.js';
 import { loadConfig, type Config } from '../src/config.js';
-import { createPool, type Db } from '../src/db/pool.js';
+import { openDatabase, type Db } from '../src/db/database.js';
 import { createApp as createAppRow, saveDiscordGuild, saveGitHubConnection, setTicketsChannel } from '../src/domain/store.js';
 import type { AppRow, UserRow, WorkspaceRow } from '../src/domain/types.js';
 import { createWorkspace, upsertUser } from '../src/domain/workspaces.js';
 import { createSession } from '../src/web/session.js';
 import { FakeDiscord, FakeGitHub, fakeFetch } from './fakes.js';
-import { TEST_DATABASE_URL } from './global-setup.js';
+import { TEST_DATABASE_PATH } from './global-setup.js';
 
 const rsa = generateKeyPairSync('rsa', { modulusLength: 2048 });
 export const GITHUB_PRIVATE_KEY = rsa.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
@@ -21,7 +21,7 @@ export const ENCRYPTION_KEY = Buffer.alloc(32, 7).toString('base64');
 export function testConfig(env: Record<string, string> = {}): Config {
   return loadConfig({
     NODE_ENV: 'test',
-    DATABASE_URL: TEST_DATABASE_URL,
+    DATABASE_PATH: TEST_DATABASE_PATH,
     PUBLIC_URL: 'https://relay.example.test',
     ENCRYPTION_KEY,
     DISCORD_APPLICATION_ID: '900000000000000001',
@@ -40,12 +40,12 @@ export function testConfig(env: Record<string, string> = {}): Config {
 
 let sharedDb: Db | null = null;
 export function testDb(): Db {
-  sharedDb ??= createPool(TEST_DATABASE_URL, 10);
+  sharedDb ??= openDatabase(TEST_DATABASE_PATH);
   return sharedDb;
 }
 
 export async function resetDb(db: Db = testDb()): Promise<void> {
-  await db.query(`TRUNCATE users, workspaces, sessions, oauth_states, submissions, submission_events RESTART IDENTITY CASCADE`);
+  db.exec('DELETE FROM sessions; DELETE FROM oauth_states; DELETE FROM workspaces; DELETE FROM users;');
 }
 
 export interface TestEnv extends AppInstance {

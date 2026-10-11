@@ -54,6 +54,8 @@ export class FakeGitHub {
   tokenFailures: { status: number; message: string }[] = [];
   nextIssueNumber = 100;
   invalidToken: string | null = null;
+  /** Artificial latency for create-issue calls (to make workers overlap in tests). */
+  createDelayMs = 0;
 
   addInstallation(id: number, login: string, repos: Partial<FakeRepo>[], type = 'Organization') {
     const ids: number[] = [];
@@ -161,6 +163,7 @@ export class FakeGitHub {
         return json(200, items);
       }
       this.createCalls++;
+      if (this.createDelayMs) await new Promise((r) => setTimeout(r, this.createDelayMs));
       const behavior = this.createQueue.shift() ?? 'ok';
       if (behavior === 'refused') throw netError('ECONNREFUSED');
       if (behavior === 'timeout_before_create') return hang(init.signal);

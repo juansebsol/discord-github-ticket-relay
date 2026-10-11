@@ -1,4 +1,5 @@
-import type { Queryable } from '../db/pool.js';
+import { randomUUID } from 'node:crypto';
+import { isUniqueViolation, type Queryable } from '../db/database.js';
 import { randomCode } from '../lib/crypto.js';
 import {
   UserFacingError,
@@ -29,7 +30,7 @@ export async function saveGitHubConnection(
        account_login = EXCLUDED.account_login, account_type = EXCLUDED.account_type,
        account_avatar_url = EXCLUDED.account_avatar_url, repository_selection = EXCLUDED.repository_selection,
        status = EXCLUDED.status, status_detail = NULL, connected_by = EXCLUDED.connected_by,
-       connected_at = now(), updated_at = now()`,
+       connected_at = now_ms(), updated_at = now_ms()`,
     [workspaceId, c.installationId, c.accountLogin, c.accountType, c.accountAvatarUrl, c.repositorySelection, c.suspended ? 'suspended' : 'active', userId],
   );
 }
@@ -41,14 +42,14 @@ export async function setGitHubStatusByInstallation(
   detail: string | null,
 ): Promise<number> {
   const res = await q.query(
-    'UPDATE github_connections SET status = $2, status_detail = $3, updated_at = now() WHERE installation_id = $1',
+    'UPDATE github_connections SET status = $2, status_detail = $3, updated_at = now_ms() WHERE installation_id = $1',
     [installationId, status, detail],
   );
   return res.rowCount ?? 0;
 }
 
 export async function setGitHubStatus(q: Queryable, workspaceId: string, status: GitHubConnectionRow['status'], detail: string | null) {
-  await q.query('UPDATE github_connections SET status = $2, status_detail = $3, updated_at = now() WHERE workspace_id = $1', [
+  await q.query('UPDATE github_connections SET status = $2, status_detail = $3, updated_at = now_ms() WHERE workspace_id = $1', [
     workspaceId,
     status,
     detail,
@@ -95,11 +96,11 @@ export async function saveDiscordGuild(
          guild_icon = EXCLUDED.guild_icon, status = 'active', status_detail = NULL,
          tickets_channel_id = CASE WHEN $6 THEN discord_connections.tickets_channel_id ELSE NULL END,
          tickets_channel_name = CASE WHEN $6 THEN discord_connections.tickets_channel_name ELSE NULL END,
-         connected_by = EXCLUDED.connected_by, connected_at = now(), updated_at = now()`,
+         connected_by = EXCLUDED.connected_by, connected_at = now_ms(), updated_at = now_ms()`,
       [workspaceId, guild.id, guild.name, guild.icon, userId, sameGuild],
     );
   } catch (err) {
-    if (uniqueViolation(err)) {
+    if (isUniqueViolation(err)) {
       throw new UserFacingError('That Discord server is already connected to another workspace. Disconnect it there first.', 409);
     }
     throw err;
@@ -108,13 +109,13 @@ export async function saveDiscordGuild(
 
 export async function setTicketsChannel(q: Queryable, workspaceId: string, channel: { id: string; name: string }): Promise<void> {
   await q.query(
-    `UPDATE discord_connections SET tickets_channel_id = $2, tickets_channel_name = $3, updated_at = now() WHERE workspace_id = $1`,
+    `UPDATE discord_connections SET tickets_channel_id = $2, tickets_channel_name = $3, updated_at = now_ms() WHERE workspace_id = $1`,
     [workspaceId, channel.id, channel.name],
   );
 }
 
 export async function setDiscordStatus(q: Queryable, workspaceId: string, status: DiscordConnectionRow['status'], detail: string | null) {
-  await q.query('UPDATE discord_connections SET status = $2, status_detail = $3, updated_at = now() WHERE workspace_id = $1', [
+  await q.query('UPDATE discord_connections SET status = $2, status_detail = $3, updated_at = now_ms() WHERE workspace_id = $1', [
     workspaceId,
     status,
     detail,
@@ -151,22 +152,18 @@ export interface AppInput {
   enabled: boolean;
 }
 
-function uniqueViolation(err: unknown): boolean {
-  return (err as { code?: string }).code === '23505';
-}
-
 export async function createApp(q: Queryable, workspaceId: string, input: AppInput): Promise<AppRow> {
   try {
     const { rows } = await q.query<AppRow>(
-      `INSERT INTO apps (workspace_id, public_id, name, description, repo_id, repo_owner, repo_name, repo_private, labels, enabled, position)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+      `INSERT INTO apps (id, workspace_id, public_id, name, description, repo_id, repo_owner, repo_name, repo_private, labels, enabled, position)
+       VALUES ($11, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
          COALESCE((SELECT max(position) + 1 FROM apps WHERE workspace_id = $1), 0))
        RETURNING *`,
-      [workspaceId, randomCode(10), input.name, input.description, input.repo.id, input.repo.owner, input.repo.name, input.repo.private, input.labels, input.enabled],
+      [workspaceId, randomCode(10), input.name, input.description, input.repo.id, input.repo.owner, input.repo.name, input.repo.private, input.labels, input.enabled, randomUUID()],
     );
     return rows[0]!;
   } catch (err) {
-    if (uniqueViolation(err)) throw new UserFacingError(`An app named “${input.name}” already exists.`, 409);
+    if (isUniqueViolation(err)) throw new UserFacingError(`An app named “${input.name}” already exists.`, 409);
     throw err;
   }
 }
@@ -175,18 +172,18 @@ export async function updateApp(q: Queryable, workspaceId: string, appId: string
   try {
     await q.query(
       `UPDATE apps SET name = $3, description = $4, repo_id = $5, repo_owner = $6, repo_name = $7, repo_private = $8,
-         labels = $9, enabled = $10, updated_at = now()
+         labels = $9, enabled = $10, updated_at = now_ms()
        WHERE workspace_id = $1 AND id = $2`,
       [workspaceId, appId, input.name, input.description, input.repo.id, input.repo.owner, input.repo.name, input.repo.private, input.labels, input.enabled],
     );
   } catch (err) {
-    if (uniqueViolation(err)) throw new UserFacingError(`An app named “${input.name}” already exists.`, 409);
+    if (isUniqueViolation(err)) throw new UserFacingError(`An app named “${input.name}” already exists.`, 409);
     throw err;
   }
 }
 
 export async function setAppEnabled(q: Queryable, workspaceId: string, appId: string, enabled: boolean): Promise<void> {
-  await q.query('UPDATE apps SET enabled = $3, updated_at = now() WHERE workspace_id = $1 AND id = $2', [workspaceId, appId, enabled]);
+  await q.query('UPDATE apps SET enabled = $3, updated_at = now_ms() WHERE workspace_id = $1 AND id = $2', [workspaceId, appId, enabled]);
 }
 
 export async function deleteApp(q: Queryable, workspaceId: string, appId: string): Promise<void> {
@@ -207,7 +204,7 @@ export async function moveApp(q: Queryable, workspaceId: string, appId: string, 
 /** Refreshes repository names/visibility after a rename or transfer (matched by stable repo ID). */
 export async function refreshAppRepo(q: Queryable, workspaceId: string, repo: { id: number; owner: string; name: string; private: boolean }) {
   await q.query(
-    `UPDATE apps SET repo_owner = $3, repo_name = $4, repo_private = $5, updated_at = now()
+    `UPDATE apps SET repo_owner = $3, repo_name = $4, repo_private = $5, updated_at = now_ms()
      WHERE workspace_id = $1 AND repo_id = $2 AND (repo_owner <> $3 OR repo_name <> $4 OR repo_private <> $5)`,
     [workspaceId, repo.id, repo.owner, repo.name, repo.private],
   );
@@ -228,16 +225,16 @@ export async function savePanel(
 ): Promise<void> {
   await q.query(
     `INSERT INTO panels (workspace_id, channel_id, message_id, content_hash, status, published_by, last_checked_at)
-     VALUES ($1, $2, $3, $4, 'published', $5, now())
+     VALUES ($1, $2, $3, $4, 'published', $5, now_ms())
      ON CONFLICT (workspace_id) DO UPDATE SET channel_id = EXCLUDED.channel_id, message_id = EXCLUDED.message_id,
        content_hash = EXCLUDED.content_hash, status = 'published', published_by = EXCLUDED.published_by,
-       published_at = now(), last_checked_at = now(), last_error = NULL`,
+       published_at = now_ms(), last_checked_at = now_ms(), last_error = NULL`,
     [workspaceId, p.channelId, p.messageId, p.contentHash, userId],
   );
 }
 
 export async function markPanel(q: Queryable, workspaceId: string, status: PanelRow['status'], error: string | null): Promise<void> {
-  await q.query('UPDATE panels SET status = $2, last_error = $3, last_checked_at = now() WHERE workspace_id = $1', [
+  await q.query('UPDATE panels SET status = $2, last_error = $3, last_checked_at = now_ms() WHERE workspace_id = $1', [
     workspaceId,
     status,
     error,

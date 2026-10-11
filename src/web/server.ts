@@ -54,7 +54,7 @@ export async function computeProgress(deps: Deps, workspaceId: string): Promise<
     getDiscordConnection(deps.db, workspaceId),
     listApps(deps.db, workspaceId),
     getPanel(deps.db, workspaceId),
-    deps.db.query<{ n: number }>(`SELECT count(*)::int AS n FROM submissions WHERE workspace_id = $1 AND status IN ('failed', 'uncertain')`, [workspaceId]),
+    deps.db.query<{ n: number }>(`SELECT count(*) AS n FROM submissions WHERE workspace_id = $1 AND status IN ('failed', 'uncertain')`, [workspaceId]),
   ]);
   return {
     github: !gh ? 'todo' : gh.status === 'active' ? 'done' : 'problem',

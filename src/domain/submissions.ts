@@ -1,4 +1,5 @@
-import { withTransaction, type Queryable } from '../db/pool.js';
+import { randomUUID } from 'node:crypto';
+import { withTransaction, type Queryable } from '../db/database.js';
 import { newSubmissionRef, type SecretBox } from '../lib/crypto.js';
 import type { AppRow, Deps, SubmissionRow, SubmissionStatus, TicketPayload, WorkspaceRow } from './types.js';
 
@@ -41,16 +42,15 @@ export type AcceptResult =
 
 /**
  * Records a new submission and freezes its routing (repository, labels, installation).
- * Runs under a per-reporter advisory lock so concurrent submissions from the same person
- * are checked for duplicates and rate limits one at a time; the unique interaction ID
- * makes repeated deliveries of the same Discord interaction a no-op.
+ * Runs in a write transaction, which SQLite serializes across every process using the
+ * database, so concurrent submissions are checked for duplicates and rate limits one at a
+ * time; the unique interaction ID makes repeated deliveries of the same Discord
+ * interaction a no-op.
  */
 export async function acceptSubmission(deps: Pick<Deps, 'db' | 'box'>, input: AcceptInput): Promise<AcceptResult> {
   const { box } = deps;
   const hash = contentHash(box, input.title, input.description);
   return withTransaction(deps.db, async (c) => {
-    await c.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`submit:${input.workspace.id}:${input.reporter.id}`]);
-
     if (input.interactionId) {
       const { rows } = await c.query<SubmissionRow>('SELECT * FROM submissions WHERE discord_interaction_id = $1', [input.interactionId]);
       if (rows[0]) return { kind: 'duplicate_delivery', submission: rows[0] };
@@ -61,20 +61,20 @@ export async function acceptSubmission(deps: Pick<Deps, 'db' | 'box'>, input: Ac
         const { rows } = await c.query<SubmissionRow>(
           `SELECT * FROM submissions
            WHERE workspace_id = $1 AND reporter_discord_id = $2 AND app_id = $3 AND content_hash = $4
-             AND status NOT IN ('failed', 'dismissed') AND created_at > now() - make_interval(mins => $5)
+             AND status NOT IN ('failed', 'dismissed') AND created_at > now_ms() - ($5 * 60000)
            ORDER BY created_at DESC LIMIT 1`,
           [input.workspace.id, input.reporter.id, input.app.id, hash, input.workspace.duplicate_window_minutes],
         );
         if (rows[0]) return { kind: 'duplicate_content', existing: rows[0] };
       }
 
-      const { rows } = await c.query<{ count: number; oldest: Date | null }>(
-        `SELECT count(*)::int AS count, min(created_at) AS oldest FROM submissions
+      const { rows } = await c.query<{ count: number; oldest_at: Date | null }>(
+        `SELECT count(*) AS count, min(created_at) AS oldest_at FROM submissions
          WHERE workspace_id = $1 AND reporter_discord_id = $2 AND source = 'discord'
-           AND created_at > now() - make_interval(mins => $3)`,
+           AND created_at > now_ms() - ($3 * 60000)`,
         [input.workspace.id, input.reporter.id, input.workspace.rate_limit_window_minutes],
       );
-      const { count, oldest } = rows[0]!;
+      const { count, oldest_at: oldest } = rows[0]!;
       if (count >= input.workspace.rate_limit_count && oldest) {
         const resetAt = oldest.getTime() + input.workspace.rate_limit_window_minutes * 60_000;
         return { kind: 'rate_limited', retryAfterSeconds: Math.max(1, Math.ceil((resetAt - Date.now()) / 1000)) };
@@ -84,11 +84,11 @@ export async function acceptSubmission(deps: Pick<Deps, 'db' | 'box'>, input: Ac
     const payload: TicketPayload = { title: input.title, description: input.description };
     const { rows } = await c.query<SubmissionRow>(
       `INSERT INTO submissions (
-         workspace_id, ref, source, app_id, app_name, installation_id, repo_id, repo_owner, repo_name, repo_private, labels,
+         id, workspace_id, ref, source, app_id, app_name, installation_id, repo_id, repo_owner, repo_name, repo_private, labels,
          discord_interaction_id, discord_guild_id, discord_guild_name, discord_channel_id,
          reporter_discord_id, reporter_display_name, reporter_username,
          payload_enc, content_hash, status, next_attempt_at, interaction_token_enc, interaction_token_expires_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, 'pending', now(), $21, $22)
+       VALUES ($23, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, 'pending', now_ms(), $21, $22)
        ON CONFLICT (discord_interaction_id) DO NOTHING
        RETURNING *`,
       [
@@ -114,6 +114,7 @@ export async function acceptSubmission(deps: Pick<Deps, 'db' | 'box'>, input: Ac
         hash,
         input.interactionToken ? box.encrypt(input.interactionToken) : null,
         input.interactionToken ? new Date(Date.now() + INTERACTION_TOKEN_TTL_MS - 30_000) : null,
+        randomUUID(),
       ],
     );
     if (!rows[0]) {
@@ -132,40 +133,38 @@ export async function acceptSubmission(deps: Pick<Deps, 'db' | 'box'>, input: Ac
 // ---- Work queue ---------------------------------------------------------------------------
 
 const CLAIMABLE = `(
-  (status = 'pending' AND next_attempt_at <= now())
-  OR (status = 'uncertain' AND next_attempt_at IS NOT NULL AND next_attempt_at <= now())
-  OR (status = 'processing' AND lease_until < now())
+  (status = 'pending' AND next_attempt_at <= now_ms())
+  OR (status = 'uncertain' AND next_attempt_at IS NOT NULL AND next_attempt_at <= now_ms())
+  OR (status = 'processing' AND lease_until_at < now_ms())
 )`;
 
 /**
- * Atomically claims the next due submission. FOR UPDATE SKIP LOCKED plus the lease make
- * this safe with many workers: each row is processed by one worker at a time, and a row
- * whose worker died becomes claimable again once its lease expires.
+ * Atomically claims the next due submission. The single UPDATE runs under SQLite's write
+ * lock, so concurrent workers (threads or processes) can never claim the same row; the
+ * lease makes a row whose worker died claimable again once it expires.
  */
 export async function claimNext(q: Queryable, owner: string): Promise<SubmissionRow | null> {
   const { rows } = await q.query<SubmissionRow>(
-    `WITH next AS (
+    `UPDATE submissions SET status = 'processing', lease_owner = $1,
+       lease_until_at = now_ms() + ($2 * 1000), updated_at = now_ms()
+     WHERE id = (
        SELECT id FROM submissions WHERE ${CLAIMABLE}
        ORDER BY next_attempt_at NULLS FIRST, created_at
-       LIMIT 1 FOR UPDATE SKIP LOCKED
-     )
-     UPDATE submissions s SET status = 'processing', lease_owner = $1,
-       lease_until = now() + make_interval(secs => $2), updated_at = now()
-     FROM next WHERE s.id = next.id
-     RETURNING s.*`,
+       LIMIT 1
+     ) AND ${CLAIMABLE}
+     RETURNING *`,
     [owner, LEASE_SECONDS],
   );
   return rows[0] ?? null;
 }
 
 export async function claimById(q: Queryable, id: string, owner: string, opts: { force?: boolean } = {}): Promise<SubmissionRow | null> {
-  const condition = opts.force ? `status IN ('pending', 'uncertain', 'failed') OR (status = 'processing' AND lease_until < now())` : CLAIMABLE;
+  const condition = opts.force ? `status IN ('pending', 'uncertain', 'failed') OR (status = 'processing' AND lease_until_at < now_ms())` : CLAIMABLE;
   const { rows } = await q.query<SubmissionRow>(
-    `WITH next AS (SELECT id FROM submissions WHERE id = $3 AND (${condition}) FOR UPDATE SKIP LOCKED)
-     UPDATE submissions s SET status = 'processing', lease_owner = $1,
-       lease_until = now() + make_interval(secs => $2), updated_at = now()
-     FROM next WHERE s.id = next.id
-     RETURNING s.*`,
+    `UPDATE submissions SET status = 'processing', lease_owner = $1,
+       lease_until_at = now_ms() + ($2 * 1000), updated_at = now_ms()
+     WHERE id = $3 AND (${condition})
+     RETURNING *`,
     [owner, LEASE_SECONDS, id],
   );
   return rows[0] ?? null;
@@ -183,9 +182,9 @@ export async function updateLeased(
   releaseLease: boolean,
 ): Promise<boolean> {
   const entries = Object.entries(fields);
-  if (releaseLease) entries.push(['lease_owner', null], ['lease_until', null]);
+  if (releaseLease) entries.push(['lease_owner', null], ['lease_until_at', null]);
   const sets = entries.map(([k], i) => `${k} = $${i + 3}`);
-  sets.push('updated_at = now()');
+  sets.push('updated_at = now_ms()');
   const res = await q.query(
     `UPDATE submissions SET ${sets.join(', ')} WHERE id = $1 AND lease_owner = $2 AND status = 'processing'`,
     [sub.id, owner, ...entries.map(([, v]) => v)],
@@ -216,10 +215,11 @@ export async function listSubmissions(
   if (opts.search) {
     params.push(`%${opts.search.replace(/[%_\\]/g, '\\$&')}%`);
     const p = `$${params.length}`;
-    where.push(`(ref ILIKE ${p} OR reporter_display_name ILIKE ${p} OR reporter_username ILIKE ${p} OR reporter_discord_id ILIKE ${p} OR app_name ILIKE ${p})`);
+    const like = (col: string) => `${col} LIKE ${p} ESCAPE '\\'`;
+    where.push(`(${['ref', 'reporter_display_name', 'reporter_username', 'reporter_discord_id', 'app_name'].map(like).join(' OR ')})`);
   }
   const clause = where.join(' AND ');
-  const total = (await q.query<{ n: number }>(`SELECT count(*)::int AS n FROM submissions WHERE ${clause}`, params)).rows[0]!.n;
+  const total = (await q.query<{ n: number }>(`SELECT count(*) AS n FROM submissions WHERE ${clause}`, params)).rows[0]!.n;
   params.push(opts.limit, opts.offset);
   const { rows } = await q.query<SubmissionRow>(
     `SELECT * FROM submissions WHERE ${clause} ORDER BY created_at DESC LIMIT $${params.length - 1} OFFSET $${params.length}`,
@@ -230,7 +230,7 @@ export async function listSubmissions(
 
 export async function countByStatus(q: Queryable, workspaceId: string): Promise<Record<SubmissionStatus, number>> {
   const { rows } = await q.query<{ status: SubmissionStatus; n: number }>(
-    'SELECT status, count(*)::int AS n FROM submissions WHERE workspace_id = $1 GROUP BY status',
+    'SELECT status, count(*) AS n FROM submissions WHERE workspace_id = $1 GROUP BY status',
     [workspaceId],
   );
   const out = { pending: 0, processing: 0, created: 0, failed: 0, uncertain: 0, dismissed: 0 };

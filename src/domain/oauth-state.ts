@@ -1,4 +1,4 @@
-import type { Queryable } from '../db/pool.js';
+import type { Queryable } from '../db/database.js';
 import { randomToken, sha256 } from '../lib/crypto.js';
 
 export type StatePurpose = 'discord_login' | 'discord_bot' | 'github_install';
@@ -22,7 +22,7 @@ export async function createState(
   const token = randomToken(24);
   await q.query(
     `INSERT INTO oauth_states (state_hash, purpose, session_id, workspace_id, data, expires_at)
-     VALUES ($1, $2, $3, $4, $5, now() + make_interval(mins => $6))`,
+     VALUES ($1, $2, $3, $4, $5, now_ms() + ($6 * 60000))`,
     [sha256(token), purpose, sessionId, workspaceId, data, ttlMinutes],
   );
   return token;
@@ -32,8 +32,8 @@ export async function createState(
 export async function consumeState(q: Queryable, token: string | undefined, purposes: StatePurpose[]): Promise<StateRow | null> {
   if (!token || token.length > 200) return null;
   const { rows } = await q.query<StateRow>(
-    `UPDATE oauth_states SET used_at = now()
-     WHERE state_hash = $1 AND used_at IS NULL AND expires_at > now() AND purpose = ANY($2)
+    `UPDATE oauth_states SET used_at = now_ms()
+     WHERE state_hash = $1 AND used_at IS NULL AND expires_at > now_ms() AND purpose IN (SELECT value FROM json_each($2))
      RETURNING purpose, session_id, workspace_id, data`,
     [sha256(token), purposes],
   );

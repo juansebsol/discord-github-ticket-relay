@@ -1,0 +1,137 @@
+# Architecture
+
+Internals of Ticket Relay: runtime, ticket lifecycle, endpoints, schema and security model.
+
+## Runtime
+
+Long-running Node.js processes sharing one SQLite database: a web process (admin console,
+Discord endpoint, OAuth) and one or more queue workers.
+
+```
+                ┌───────────────────────────── ticket-relay ─────────────────────────────┐
+ Discord ──────▶│ POST /discord/interactions   verify Ed25519 → accept → ack (≤3s)       │
+                │                                       │                                 │
+ Admins ───────▶│ Admin console (SSR, sessions, CSRF)   ▼                                 │
+                │                               submissions (queue) ◀── worker ──────────┼──▶ GitHub REST
+ GitHub ───────▶│ POST /github/webhook (optional)       │            create / retry /     │    (installation token)
+                │                                       │            reconcile            │
+                └───────────────────────────────────────┼─────────────────────────────────┘
+                                                         ▼
+                                                  SQLite (WAL)
+```
+
+- **No Discord gateway.** The bot is driven entirely by Discord's HTTP interactions endpoint and
+  REST API. It needs no privileged intents and no slash-command registration.
+- **GitHub App auth.** Short-lived installation tokens are minted from the app's private key
+  (RS256 JWT). Required permissions: `Issues: read & write`, `Metadata: read`.
+- **SQLite-backed queue.** Submissions are the jobs. Workers in any number of processes claim
+  them with one atomic `UPDATE … RETURNING` under SQLite's write lock, plus a 90s lease.
+  WAL mode and a busy timeout let processes share the file on one host.
+- **Server-rendered admin UI.** No frontend build. A small progressive-enhancement script, a
+  strict CSP, and no credentials in the browser.
+
+### Tenancy
+
+- All data is scoped to a **workspace**: one GitHub App installation and one Discord server.
+- A Discord server maps to exactly one workspace, because interactions are routed by `guild_id`.
+  This is enforced by a unique constraint.
+- Admins authenticate with Discord OAuth and hold an `owner` or `admin` role per workspace.
+  Non-members receive 404 on workspace routes.
+- Workspace creation is limited to `PLATFORM_ADMIN_DISCORD_IDS`. If that list is empty, only the
+  first user of a fresh deployment can create one. `OPEN_WORKSPACE_CREATION=true` lifts the limit.
+
+## Ticket lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> pending: modal submitted (validated, deduped, rate-limited, routing frozen)
+    pending --> processing: worker claims (lease)
+    processing --> created: 201 from GitHub
+    processing --> pending: definite, retryable failure (rate limit, unreachable, 401)
+    processing --> failed: definite failure (403, 404, 410, uninstalled)
+    processing --> uncertain: outcome unknown (timeout after send, reset, 5xx)
+    uncertain --> processing: reconcile (20s, 1m, 5m, 15m)
+    processing --> created: marker found on GitHub
+    failed --> pending: admin retry
+    uncertain --> created: admin links issue / retry finds existing
+    failed --> dismissed: admin closes
+    uncertain --> dismissed: admin closes
+```
+
+| Guarantee | Mechanism |
+|---|---|
+| Discord 3s deadline | Validation and persistence in one short transaction, then a deferred ephemeral response. GitHub work starts after the response is flushed. |
+| Redelivery safety | `discord_interaction_id` is unique, so a repeated interaction is processed once. |
+| Accidental duplicates | Keyed HMAC of normalized title and description per reporter and app, within a configurable window. |
+| Concurrency | Accept runs in a `BEGIN IMMEDIATE` transaction (serialized across processes). Claims are atomic single-statement updates with leases. Writes are guarded by lease owner. |
+| No blind retries | `github_request_started_at` is persisted before the create call. Unknown outcomes and crashed workers are reconciled by searching for the hidden marker `<!-- ticket-relay:submission=TR-… -->`, never by re-sending. |
+| Stable routing | Repository, labels and installation are snapshotted at acceptance. Config changes never redirect queued tickets. |
+| Label integrity | Labels are checked against the repository before creating, so GitHub never auto-creates them. A `422` triggers one retry without labels. |
+| Retention | The description is dropped once the issue exists. Titles are purged after the workspace retention period (default 30d). Unresolved tickets keep their text for at least 90d. |
+
+### Issue format
+
+```
+Title:  [App Name] Submitted title
+
+### Description
+<member's text, GitHub @-mentions neutralized>
+
+### Ticket details
+| App | Reported by | Submitted | Discord server | Submitted from channel | Submission ID |
+
+<sub>Submitted through Discord by <member> and created by the Ticket Relay integration…</sub>
+<!-- ticket-relay:submission=TR-7KQ2M9XA4D -->
+```
+
+The issue author is `<app-slug>[bot]`. The reporter's Discord display name, username and
+stable user ID are recorded in the body.
+
+## HTTP endpoints
+
+| Route | Caller | Auth |
+|---|---|---|
+| `POST /discord/interactions` | Discord | Ed25519 signature, 5-minute timestamp window |
+| `GET /oauth/discord/callback` | Browser | One-time state, bound to session (bot install) or nonce cookie (sign-in) |
+| `GET /oauth/github/callback` | Browser | One-time state. Installation verified via `GET /user/installations`. |
+| `POST /github/webhook` | GitHub | HMAC-SHA256 (`X-Hub-Signature-256`). 404 when no secret is configured. |
+| `GET /healthz` | Load balancer | none (DB ping) |
+| `/w/:workspaceId/*` | Admins | Session cookie, workspace membership, CSRF on POST |
+
+## Data model
+
+| Table | Purpose |
+|---|---|
+| `workspaces` | Tenant root, with rate-limit, duplicate-window, retention and panel-copy settings |
+| `users`, `workspace_members`, `workspace_invites` | Admin identities (Discord), roles, one-time invites |
+| `sessions`, `oauth_states` | Hashed session tokens with CSRF token, and single-use OAuth state |
+| `github_connections` | Installation ID, account and status per workspace |
+| `discord_connections` | Guild (globally unique), tickets channel and status per workspace |
+| `apps` | Member-facing name/description → repository ID and labels |
+| `panels` | Published panel message ID, channel and content hash (detects stale or deleted panels) |
+| `submissions` | Tickets, routing snapshot, queue state, lease, reconcile counters, encrypted payload |
+| `submission_events` | Append-only timeline for investigation |
+
+Migrations live in [`src/db/migrations`](../src/db/migrations) and are applied inside one write
+transaction, so concurrent boots are safe. Storage conventions: UUID text IDs, epoch-ms
+`*_at` columns, JSON text for arrays and objects.
+
+## Security
+
+- **Secrets:** server-side only. Provider credentials come from env. Stored tokens and ticket
+  text are encrypted at rest. Session tokens are stored hashed.
+- **Inbound verification:** Discord Ed25519 signatures, GitHub webhook HMAC, single-use OAuth
+  state bound to the browser session.
+- **Ownership checks:** the Discord guild is taken from the OAuth token response, not redirect
+  parameters. The GitHub installation must appear in the authorizing user's installations.
+- **Server-side allowlists:** repositories are restricted to the workspace installation (Issues
+  enabled, not archived). Labels must exist. Channels must belong to the connected guild and
+  pass a permission check.
+- **Output safety:** `allowed_mentions: { parse: [] }` on all Discord messages, Discord
+  markdown escaped in echoes, GitHub @-mentions neutralized in issue bodies.
+- **Web hardening:** strict CSP with no inline script or style, `frame-ancestors 'none'`,
+  `Referrer-Policy: same-origin`, `SameSite=Lax` and `HttpOnly` cookies (`Secure` on HTTPS).
+- **Logging:** structured JSON. Query strings, auth headers and cookies are stripped, and
+  ticket text is never logged.
+- **Error exposure:** members see generic messages. Provider error details are shown only to
+  workspace admins.

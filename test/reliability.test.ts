@@ -1,12 +1,15 @@
+import { execFile } from 'node:child_process';
+import path from 'node:path';
+import { promisify } from 'node:util';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
-import { createPool } from '../src/db/pool.js';
+import { openDatabase } from '../src/db/database.js';
 import { getGitHubConnection, updateApp } from '../src/domain/store.js';
 import { acceptSubmission, getSubmission } from '../src/domain/submissions.js';
 import type { AppRow, SubmissionRow } from '../src/domain/types.js';
 import { runMaintenance } from '../src/domain/worker.js';
 import { submissionMarker } from '../src/github/issue-content.js';
 import { makeApp, makeWorkspace, resetDb, testDb, type ConfiguredWorkspace, type TestEnv } from './helpers.js';
-import { TEST_DATABASE_URL } from './global-setup.js';
+import { TEST_DATABASE_PATH } from './global-setup.js';
 
 let env: TestEnv;
 let ws: ConfiguredWorkspace;
@@ -46,7 +49,7 @@ async function reload(sub: SubmissionRow): Promise<SubmissionRow> {
 }
 
 async function makeDue(sub: SubmissionRow) {
-  await env.db.query('UPDATE submissions SET next_attempt_at = now() WHERE id = $1', [sub.id]);
+  await env.db.query('UPDATE submissions SET next_attempt_at = now_ms() WHERE id = $1', [sub.id]);
 }
 
 function lastEditTitle(token: string) {
@@ -218,7 +221,7 @@ describe('uncertain outcomes', () => {
     const repo = env.github.repos.get(ws.repoIds[0]!)!;
     repo.issues.push({ number: 55, title: 't', body: `body\n${submissionMarker(sub.ref)}`, labels: [], created_at: '', user: 'ticket-relay[bot]' });
     await env.db.query(
-      `UPDATE submissions SET status = 'processing', lease_owner = 'dead-worker', lease_until = now() - interval '1 second', github_request_started_at = now() WHERE id = $1`,
+      `UPDATE submissions SET status = 'processing', lease_owner = 'dead-worker', lease_until_at = now_ms() - 1000, github_request_started_at = now_ms() WHERE id = $1`,
       [sub.id],
     );
     await env.worker.drain();
@@ -230,8 +233,8 @@ describe('uncertain outcomes', () => {
 describe('persistence, concurrency and routing snapshots', () => {
   it('survives a restart: a new process picks up queued work', async () => {
     const sub = await submit();
-    // "Restart": a brand-new app instance with its own pool and identity, same database.
-    const db2 = createPool(TEST_DATABASE_URL, 3);
+    // "Restart": a brand-new app instance with its own connection and identity, same database file.
+    const db2 = openDatabase(TEST_DATABASE_PATH);
     const env2 = await makeApp({ db: db2, github: env.github, discord: env.discord, instanceId: 'restarted' });
     await env2.worker.drain();
     expect(await reload(sub)).toMatchObject({ status: 'created' });
@@ -241,14 +244,14 @@ describe('persistence, concurrency and routing snapshots', () => {
   it('never processes a submission twice with several workers running', async () => {
     const subs = [];
     for (let i = 0; i < 12; i++) subs.push(await submit());
-    const db2 = createPool(TEST_DATABASE_URL, 5);
+    const db2 = openDatabase(TEST_DATABASE_PATH);
     const env2 = await makeApp({ db: db2, github: env.github, discord: env.discord, instanceId: 'worker-b' });
     await Promise.all([env.worker.drain(), env.worker.drain(), env2.worker.drain(), env2.worker.drain()]);
     await db2.end();
     expect(env.github.createCalls).toBe(12);
     const refs = env.github.allIssues().map((i) => /submission=(TR-\w+)/.exec(i.body)![1]);
     expect(new Set(refs).size).toBe(12);
-    const { rows } = await env.db.query(`SELECT count(*)::int AS n FROM submissions WHERE status = 'created'`);
+    const { rows } = await env.db.query(`SELECT count(*) AS n FROM submissions WHERE status = 'created'`);
     expect(rows[0].n).toBe(12);
   });
 
@@ -266,10 +269,31 @@ describe('persistence, concurrency and routing snapshots', () => {
     await env.worker.drain();
     const created = await reload(sub);
     expect(env.deps.box.decryptJson(created.payload_enc!)).toEqual({ title: `Problem number ${counter}` });
-    await env.db.query(`UPDATE submissions SET updated_at = now() - interval '31 days' WHERE id = $1`, [sub.id]);
+    await env.db.query(`UPDATE submissions SET updated_at = now_ms() - 31 * 86400000 WHERE id = $1`, [sub.id]);
     await runMaintenance(env.deps);
     const purged = await reload(sub);
     expect(purged.payload_enc).toBeNull();
     expect(purged.payload_purged_at).not.toBeNull();
   });
+
+  it('never files a ticket twice with several worker processes on one database file', async () => {
+    const total = 60;
+    for (let i = 0; i < total; i++) await submit();
+    const repo = env.github.repos.get(ws.repoIds[0]!)!;
+    const script = path.join(__dirname, 'fixtures', 'worker-process.ts');
+    const tsx = path.join(__dirname, '..', 'node_modules', '.bin', 'tsx');
+    const startAt = String(Date.now() + 2500);
+    const outputs = await Promise.all(
+      [1, 2, 3].map(() =>
+        promisify(execFile)(tsx, [script, TEST_DATABASE_PATH, String(ws.installationId), JSON.stringify({ ...repo, issues: [] }), startAt], { timeout: 30_000 }),
+      ),
+    );
+    const perProcess = outputs.map((o) => JSON.parse(o.stdout) as string[]);
+    const all = perProcess.flat();
+    expect(all).toHaveLength(total);
+    expect(new Set(all).size).toBe(total);
+    expect(perProcess.filter((refs) => refs.length > 0).length).toBeGreaterThan(1);
+    const { rows } = await env.db.query(`SELECT count(*) AS n FROM submissions WHERE status = 'created'`);
+    expect(rows[0].n).toBe(total);
+  }, 40_000);
 });

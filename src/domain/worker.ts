@@ -73,17 +73,16 @@ export class Worker {
  */
 export async function runMaintenance(deps: Pick<Deps, 'db' | 'log'>): Promise<void> {
   const { db } = deps;
-  await db.query(`DELETE FROM oauth_states WHERE expires_at < now() - interval '1 day'`);
-  await db.query(`DELETE FROM sessions WHERE expires_at < now()`);
+  await db.query(`DELETE FROM oauth_states WHERE expires_at < now_ms() - 86400000`);
+  await db.query(`DELETE FROM sessions WHERE expires_at < now_ms()`);
   await db.query(
-    `UPDATE submissions SET interaction_token_enc = NULL WHERE interaction_token_enc IS NOT NULL AND interaction_token_expires_at < now()`,
+    `UPDATE submissions SET interaction_token_enc = NULL WHERE interaction_token_enc IS NOT NULL AND interaction_token_expires_at < now_ms()`,
   );
   const purged = await db.query(
-    `UPDATE submissions s SET payload_enc = NULL, payload_purged_at = now()
-     FROM workspaces w
-     WHERE s.workspace_id = w.id AND s.payload_enc IS NOT NULL AND (
-       (s.status IN ('created', 'dismissed') AND s.updated_at < now() - make_interval(days => w.retention_days))
-       OR (s.status IN ('failed', 'uncertain') AND s.updated_at < now() - make_interval(days => GREATEST(w.retention_days, 90)))
+    `UPDATE submissions SET payload_enc = NULL, payload_purged_at = now_ms()
+     WHERE payload_enc IS NOT NULL AND (
+       (status IN ('created', 'dismissed') AND updated_at < now_ms() - (SELECT retention_days FROM workspaces w WHERE w.id = workspace_id) * 86400000)
+       OR (status IN ('failed', 'uncertain') AND updated_at < now_ms() - max((SELECT retention_days FROM workspaces w WHERE w.id = workspace_id), 90) * 86400000)
      )`,
   );
   if (purged.rowCount) deps.log.info({ count: purged.rowCount }, 'purged stored ticket text past retention');

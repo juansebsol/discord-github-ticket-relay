@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs';
 import { createApp } from './app.js';
 import { ConfigError, loadConfig } from './config.js';
 import { migrate } from './db/migrate.js';
-import { createPool } from './db/pool.js';
+import { openDatabase } from './db/database.js';
 import { loggerOptions } from './logging.js';
 
 if (existsSync('.env')) process.loadEnvFile('.env');
@@ -18,7 +18,7 @@ try {
   throw err;
 }
 
-const db = createPool(config.databaseUrl);
+const db = openDatabase(config.databasePath);
 const { server, worker } = await createApp({ config, db, logger: loggerOptions(config.nodeEnv) });
 
 if (process.env.AUTO_MIGRATE !== 'false') await migrate(db, (m) => server.log.info(m));

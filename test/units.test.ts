@@ -187,7 +187,7 @@ describe('GitHub error classification', () => {
 });
 
 describe('deployment config', () => {
-  const base = { DATABASE_URL: 'postgres://x/y', ENCRYPTION_KEY: Buffer.alloc(32).toString('base64') };
+  const base = { ENCRYPTION_KEY: Buffer.alloc(32).toString('base64') };
   it('reports missing provider variables instead of crashing', () => {
     const c = loadConfig(base);
     expect(c.discord).toBeNull();

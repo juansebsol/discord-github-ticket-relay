@@ -1,41 +1,28 @@
 import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { Db } from './pool.js';
+import type { Db } from './database.js';
 
 const MIGRATIONS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'migrations');
 
 /**
- * Applies pending SQL migrations in filename order. Safe to run from several instances
- * at once: a transaction-scoped advisory lock serializes runners.
+ * Applies pending SQL migrations in filename order. Safe when several processes start at
+ * once: the whole run happens inside one write transaction (BEGIN IMMEDIATE).
  */
 export async function migrate(db: Db, log: (msg: string) => void = () => {}): Promise<string[]> {
-  const client = await db.connect();
-  const applied: string[] = [];
-  try {
-    await client.query('BEGIN');
-    await client.query('SELECT pg_advisory_xact_lock(727274001)');
-    await client.query(
-      'CREATE TABLE IF NOT EXISTS schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())',
-    );
-    const done = new Set(
-      (await client.query<{ name: string }>('SELECT name FROM schema_migrations')).rows.map((r) => r.name),
-    );
-    const files = (await readdir(MIGRATIONS_DIR)).filter((f) => f.endsWith('.sql')).sort();
-    for (const file of files) {
+  const files = (await readdir(MIGRATIONS_DIR)).filter((f) => f.endsWith('.sql')).sort();
+  const scripts = await Promise.all(files.map(async (f) => [f, await readFile(path.join(MIGRATIONS_DIR, f), 'utf8')] as const));
+  return db.transaction(async (tx) => {
+    await tx.query('CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY, applied_at INTEGER NOT NULL DEFAULT (now_ms()))');
+    const done = new Set((await tx.query<{ name: string }>('SELECT name FROM schema_migrations')).rows.map((r) => r.name));
+    const applied: string[] = [];
+    for (const [file, sql] of scripts) {
       if (done.has(file)) continue;
-      const sql = await readFile(path.join(MIGRATIONS_DIR, file), 'utf8');
-      await client.query(sql);
-      await client.query('INSERT INTO schema_migrations (name) VALUES ($1)', [file]);
+      db.exec(sql);
+      await tx.query('INSERT INTO schema_migrations (name) VALUES ($1)', [file]);
       applied.push(file);
       log(`applied migration ${file}`);
     }
-    await client.query('COMMIT');
     return applied;
-  } catch (err) {
-    await client.query('ROLLBACK').catch(() => {});
-    throw err;
-  } finally {
-    client.release();
-  }
+  });
 }

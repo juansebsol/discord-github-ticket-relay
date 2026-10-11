@@ -1,159 +1,113 @@
 # Deployment
 
-## What runs
+Runs on a single Linux host with Node.js, PM2 and a TLS reverse proxy. State lives in one
+SQLite file. No external database or container runtime is required.
 
-The app is a single Node.js service: `node dist/index.js`, or the Docker image. One process:
+## Processes
 
-- serves the admin web interface
-- receives Discord interactions over HTTPS (no gateway/websocket connection, so nothing has
-  to stay connected)
-- runs the background worker that files issues, retries and reconciles (disable with
-  `RUN_WORKER=false`)
-- applies database migrations on startup (disable with `AUTO_MIGRATE=false` and run
-  `npm run migrate:prod` yourself)
+| PM2 app | Entry | Instances | Role |
+|---|---|---|---|
+| `ticket-relay-web` | `dist/index.js` | 1 | Admin console, Discord interactions endpoint, OAuth callbacks. Binds `PORT`. Makes the first filing attempt right after acknowledging Discord. |
+| `ticket-relay-worker` | `dist/worker.js` | 2 (configurable) | Claims queued submissions, retries, reconciles uncertain results, housekeeping. No port. |
 
-It needs **PostgreSQL 13+** and **Node.js 22+**.
+All processes share `DATABASE_PATH`. Every process applies pending migrations on boot; the
+runner holds SQLite's write lock, so simultaneous starts are safe.
+
+**Requirements:** Node.js ≥ 22 (with build tools for `better-sqlite3` if no prebuilt binary
+matches), PM2, a domain with TLS, local disk for the database. Network filesystems are not
+supported by SQLite.
+
+## Install
 
 ```bash
-docker compose up --build     # app + Postgres on one host, reads .env
-# or
-npm ci && npm run build && npm start
+git clone <repo> ticket-relay && cd ticket-relay
+npm ci
+npm run build
+cp .env.example .env          # see Configuration
+npm install -g pm2
+pm2 start ecosystem.config.cjs
+pm2 save
+pm2 startup                   # run the printed command to start on boot
 ```
 
-## Public endpoints
+### Reverse proxy
 
-Serve the app over **HTTPS** at `PUBLIC_URL`. Discord and GitHub require public HTTPS for
-callbacks.
+Terminate TLS and forward to `127.0.0.1:3000`. Caddy example (automatic certificates):
 
-| Path | Caller | Purpose |
-|---|---|---|
-| `POST /discord/interactions` | Discord | Panel menu, form submissions. Ed25519 signature verified on every request. |
-| `GET /oauth/discord/callback` | Browser (from Discord) | Admin sign-in and bot installation. One-time state checked. |
-| `GET /oauth/github/callback` | Browser (from GitHub) | GitHub App installation / authorization. One-time state checked; installation verified against the user's accessible installations. |
-| `POST /github/webhook` | GitHub (optional) | Uninstall/suspend events. HMAC-SHA256 signature verified. 404 when `GITHUB_WEBHOOK_SECRET` is unset. |
-| `GET /healthz` | Load balancer | Returns 200 when the database is reachable. |
-| everything else | Admins' browsers | Admin UI (Discord sign-in required). |
+```
+tickets.example.com {
+    reverse_proxy 127.0.0.1:3000
+}
+```
 
-Behind a reverse proxy or load balancer, set `TRUST_PROXY=true`. Session cookies are
-`Secure` whenever `PUBLIC_URL` is `https://`.
+Set `HOST=127.0.0.1` and `TRUST_PROXY=true` in `.env`. Verify with `curl https://tickets.example.com/healthz`.
+
+### Public endpoints
+
+| Route | Caller |
+|---|---|
+| `POST /discord/interactions` | Discord (Ed25519-signed) |
+| `GET /oauth/discord/callback` | Browser, after Discord OAuth |
+| `GET /oauth/github/callback` | Browser, after GitHub App install/authorize |
+| `POST /github/webhook` | GitHub (HMAC-signed, optional) |
+| `GET /healthz` | Monitoring |
+| `/*` | Admin console |
 
 ## Configuration
 
-See [`.env.example`](../.env.example). Only deployment secrets live in environment
-variables:
+`.env` in the app directory (see [`.env.example`](../.env.example)):
 
-- `DATABASE_URL`, `PUBLIC_URL`
-- `ENCRYPTION_KEY`
-- Discord application credentials
-- GitHub App credentials
-
-Workspace settings, connections, apps, labels, limits, panels and submissions are stored in
-the database and managed in the UI.
-
-`ENCRYPTION_KEY` encrypts the following at rest with AES-256-GCM:
-
-- admins' Discord access tokens, used only to list the servers they manage
-- Discord interaction tokens, kept for at most 15 minutes so the member's reply can be updated
-- the recoverable copy of ticket text
-
-Keep the key in your secret manager and don't change it. If it changes, existing encrypted
-values can't be read: pending tickets can't be re-sent and admins must sign in again.
-
-## Scaling and reliability
-
-- **Several instances are safe.** Work is claimed from the `submissions` table with
-  `FOR UPDATE SKIP LOCKED` and a 90-second lease, so each submission is processed by one
-  worker at a time. If a worker dies, its lease expires and another worker picks the
-  submission up. Any number of web instances can receive interactions.
-- **Optional split:** run web instances with `RUN_WORKER=false` plus one or more
-  `npm run start:worker` processes.
-- **Discord's 3-second deadline:** a form submission is validated and saved in one short
-  transaction. The app then answers with a private deferred response, and the GitHub call
-  starts only after the response is sent. The member's reply is edited with the result (the
-  interaction token stays valid for 15 minutes).
-- **Duplicates:**
-  - The Discord interaction ID is unique in the database, so a repeated delivery is
-    processed once.
-  - Identical tickets from the same member for the same app within the duplicate window
-    (default 10 minutes) are rejected with a pointer to the first one.
-  - A per-member rate limit (default 5 tickets per 10 minutes) applies. Both are
-    configurable per workspace under Settings.
-  - These checks run under a per-member advisory lock, so concurrent submissions are
-    handled correctly.
-- **Routing is frozen** when a ticket is accepted. The repository, labels and installation
-  are copied into the submission, so later configuration changes never redirect it. If an
-  app's repository changes while a member has the form open, the submission is refused and
-  the member's text is echoed back for them to resubmit.
-
-### Submission states
-
-| State | Meaning |
+| Variable | Notes |
 |---|---|
-| `pending` | Saved and queued (new, or waiting for a scheduled retry after a definite failure such as a rate limit or GitHub being unreachable). |
-| `processing` | A worker holds the lease. |
-| `created` | The issue exists; the member was told. |
-| `failed` | Definitely not created (missing permission, Issues disabled, repository gone, app uninstalled). The admin sees the cause; the member is told the team has it. Can be retried after fixing. |
-| `uncertain` | The create request may have reached GitHub (timeout after sending, dropped connection, 5xx). **Never retried blindly.** |
-| `dismissed` | Closed by an admin without filing. |
+| `DATABASE_PATH` | SQLite file. Default `./data/ticket-relay.db`; directory is created. |
+| `PUBLIC_URL` | `https://tickets.example.com` |
+| `ENCRYPTION_KEY` | `openssl rand -base64 32`. Encrypts stored tokens and ticket text (AES-256-GCM). Changing it makes existing encrypted data unreadable. |
+| `DISCORD_*`, `GITHUB_*` | Provider credentials, see [PROVIDER_SETUP.md](PROVIDER_SETUP.md) |
+| `PLATFORM_ADMIN_DISCORD_IDS` | Your Discord user ID, so nobody else can claim the deployment |
+| `HOST`, `TRUST_PROXY` | `127.0.0.1`, `true` behind a proxy |
+| `WORKER_CONCURRENCY` | Parallel filings per worker process (set in `ecosystem.config.cjs`, default 2) |
 
-Every issue body contains a hidden marker with the stable submission ID, e.g.
-`<!-- ticket-relay:submission=TR-7KQ2M9XA4D -->`. For `uncertain` submissions the worker
-searches the repository for that marker:
+All other configuration is stored in the database and managed in the console.
 
-- It checks after 20 s, then again after 1, 5 and 15 minutes.
-- If the issue is found, the submission becomes `created` and the member's reply is updated.
-- If the issue is still not found after the last check, an admin decides on the
-  submission's page. They can:
-  - **Check now**
-  - **Retry**, which checks again first and only creates the issue if none exists
-  - **Link an existing issue**
-  - **Close**
+## Operations
 
-  Each submission's page has a full event timeline. A worker that died mid-request is
-  handled the same way: the request start is recorded before sending, so it is reconciled,
-  not re-sent.
+| Task | Command |
+|---|---|
+| Deploy update | `git pull && npm ci && npm run build && pm2 reload ecosystem.config.cjs` |
+| Status | `pm2 status` |
+| Logs | `pm2 logs ticket-relay-web` / `pm2 logs ticket-relay-worker` |
+| Scale workers | `pm2 scale ticket-relay-worker 4` |
+| Backup (online) | `sqlite3 data/ticket-relay.db ".backup 'backups/relay-$(date +%F).db'"` |
+| Restore | `pm2 stop all`, replace the database file (remove `-wal`/`-shm`), `pm2 start all` |
 
-### Retention
+Keep the `.env` (especially `ENCRYPTION_KEY`) alongside database backups. A backup can't be
+decrypted without it.
 
-- When an issue is created, the stored copy of the description is dropped right away,
-  because it now lives on GitHub. Only the title is kept for the history view.
-- Created and closed submissions lose their stored text after the workspace's retention
-  period (default 30 days).
-- Failed and uncertain ones keep it for at least 90 days so they can still be recovered.
-- Interaction tokens are discarded once they expire.
-- Housekeeping runs in the worker every 10 minutes.
+## Scaling
+
+- **Queue safety.** Workers claim a submission with a single atomic `UPDATE … RETURNING`
+  under SQLite's write lock and hold a 90s lease, so a ticket is filed by exactly one process.
+  A crashed worker's ticket is picked up after the lease expires and reconciled, never
+  re-sent blindly.
+- **Throughput.** GitHub limits issue creation per app to roughly 80/min and 500/h, with
+  about 1s spacing recommended. Two workers with concurrency 2 already exceed what GitHub
+  accepts; more workers add redundancy, not speed. Over the limit, tickets wait in the queue
+  and retry automatically.
+- **Single host.** SQLite needs local disk, so all processes run on one machine. Keep exactly
+  one `ticket-relay-web` instance (it owns the port); scale `ticket-relay-worker` freely.
+
+## Data retention
+
+Housekeeping runs in every worker every 10 minutes:
+
+- The description is dropped once the issue exists; only the title stays for history.
+- Created and closed submissions lose stored text after the workspace retention period
+  (default 30 days). Failed and uncertain ones keep it for at least 90 days.
+- Expired sessions, OAuth states and Discord interaction tokens are deleted.
 
 ## Logging
 
-- Logs are JSON (pino).
-- Request URLs are logged without query strings, so OAuth codes and state values don't
-  appear.
-- Authorization and cookie headers are removed.
-- Ticket text and tokens are never logged.
-- Processing logs carry the submission reference, repository, outcome code and HTTP status,
-  which is enough to trace a ticket with the admin UI's timeline.
-
-## Security notes
-
-- Admin pages require a Discord sign-in. Every state-changing form uses a per-session CSRF
-  token, and workspace pages check membership on every request.
-- Browser hardening: a strict Content Security Policy (no inline scripts or styles),
-  `frame-ancestors 'none'`, and `Referrer-Policy: same-origin` so invitation links and OAuth
-  codes don't leak.
-- Repository and channel allowlists are enforced on the server:
-  - An app can only be mapped to a repository the workspace's installation can access, with
-    Issues enabled and not archived.
-  - Labels must exist in that repository.
-  - The tickets channel must belong to the connected server, and the bot must have the
-    required permissions there.
-- Every message the bot sends uses `allowed_mentions: { parse: [] }`, so ticket text can't
-  ping anyone.
-- In the issue body, GitHub @-mentions in user text are neutralized (outside code blocks).
-- Members only ever see friendly messages. Provider error details are shown only to admins
-  of the workspace.
-
-## Backups and upgrades
-
-- Back up the PostgreSQL database. It holds all configuration and history.
-- Upgrades are a redeploy. Migrations run automatically, and the migration runner takes an
-  advisory lock, so concurrent instances starting at the same time is fine.
+pino JSON to stdout, collected by PM2. Request URLs are logged without query strings, auth
+and cookie headers are stripped, and ticket text and tokens are never logged. Processing
+logs include the submission reference, repository, outcome code and HTTP status, so you can
+trace a ticket alongside its timeline in the console.

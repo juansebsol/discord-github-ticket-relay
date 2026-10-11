@@ -1,4 +1,5 @@
-import { withTransaction, type Db, type Queryable } from '../db/pool.js';
+import { withTransaction, type Db, type Queryable } from '../db/database.js';
+import { randomUUID } from 'node:crypto';
 import { randomToken, sha256 } from '../lib/crypto.js';
 import type { Config } from '../config.js';
 import { UserFacingError, type Role, type UserRow, type WorkspaceRow } from './types.js';
@@ -8,13 +9,13 @@ export async function upsertUser(
   u: { discordUserId: string; username: string; displayName: string | null; avatar: string | null },
 ): Promise<UserRow> {
   const { rows } = await q.query<UserRow>(
-    `INSERT INTO users (discord_user_id, username, display_name, avatar)
-     VALUES ($1, $2, $3, $4)
+    `INSERT INTO users (id, discord_user_id, username, display_name, avatar)
+     VALUES ($5, $1, $2, $3, $4)
      ON CONFLICT (discord_user_id) DO UPDATE
        SET username = EXCLUDED.username, display_name = EXCLUDED.display_name,
-           avatar = EXCLUDED.avatar, last_login_at = now()
+           avatar = EXCLUDED.avatar, last_login_at = now_ms()
      RETURNING *`,
-    [u.discordUserId, u.username, u.displayName, u.avatar],
+    [u.discordUserId, u.username, u.displayName, u.avatar, randomUUID()],
   );
   return rows[0]!;
 }
@@ -65,12 +66,11 @@ export async function canCreateWorkspace(q: Queryable, config: Config, user: Use
 
 export async function createWorkspace(db: Db, config: Config, user: UserRow, name: string): Promise<WorkspaceRow> {
   return withTransaction(db, async (c) => {
-    // Serialize bootstrap so two first users can't both claim a fresh deployment.
-    await c.query('SELECT pg_advisory_xact_lock(727274002)');
+    // The write transaction serializes bootstrap, so two first users can't both claim a fresh deployment.
     if (!(await canCreateWorkspace(c, config, user))) {
       throw new UserFacingError('You need an invitation from an existing workspace owner to get access.', 403);
     }
-    const { rows } = await c.query<WorkspaceRow>('INSERT INTO workspaces (name) VALUES ($1) RETURNING *', [name]);
+    const { rows } = await c.query<WorkspaceRow>('INSERT INTO workspaces (id, name) VALUES ($1, $2) RETURNING *', [randomUUID(), name]);
     await c.query(`INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'owner')`, [rows[0]!.id, user.id]);
     return rows[0]!;
   });
@@ -89,7 +89,7 @@ export interface WorkspaceSettingsInput {
 export async function updateWorkspaceSettings(q: Queryable, workspaceId: string, s: WorkspaceSettingsInput): Promise<void> {
   await q.query(
     `UPDATE workspaces SET name = $2, rate_limit_count = $3, rate_limit_window_minutes = $4,
-       duplicate_window_minutes = $5, retention_days = $6, panel_title = $7, panel_intro = $8, updated_at = now()
+       duplicate_window_minutes = $5, retention_days = $6, panel_title = $7, panel_intro = $8, updated_at = now_ms()
      WHERE id = $1`,
     [workspaceId, s.name, s.rateLimitCount, s.rateLimitWindowMinutes, s.duplicateWindowMinutes, s.retentionDays, s.panelTitle, s.panelIntro],
   );
@@ -107,7 +107,7 @@ export async function listMembers(q: Queryable, workspaceId: string) {
 export async function removeMember(db: Db, workspaceId: string, userId: string): Promise<void> {
   await withTransaction(db, async (c) => {
     const { rows } = await c.query(
-      `SELECT user_id, role FROM workspace_members WHERE workspace_id = $1 FOR UPDATE`,
+      `SELECT user_id, role FROM workspace_members WHERE workspace_id = $1`,
       [workspaceId],
     );
     const target = rows.find((r) => r.user_id === userId);
@@ -122,9 +122,9 @@ export async function removeMember(db: Db, workspaceId: string, userId: string):
 export async function createInvite(q: Queryable, workspaceId: string, createdBy: string): Promise<string> {
   const token = randomToken(24);
   await q.query(
-    `INSERT INTO workspace_invites (workspace_id, token_hash, created_by, expires_at)
-     VALUES ($1, $2, $3, now() + interval '7 days')`,
-    [workspaceId, sha256(token), createdBy],
+    `INSERT INTO workspace_invites (id, workspace_id, token_hash, created_by, expires_at)
+     VALUES ($4, $1, $2, $3, now_ms() + 604800000)`,
+    [workspaceId, sha256(token), createdBy, randomUUID()],
   );
   return token;
 }
@@ -132,7 +132,7 @@ export async function createInvite(q: Queryable, workspaceId: string, createdBy:
 export async function listInvites(q: Queryable, workspaceId: string) {
   const { rows } = await q.query(
     `SELECT id, created_at, expires_at FROM workspace_invites
-     WHERE workspace_id = $1 AND used_at IS NULL AND revoked_at IS NULL AND expires_at > now()
+     WHERE workspace_id = $1 AND used_at IS NULL AND revoked_at IS NULL AND expires_at > now_ms()
      ORDER BY created_at DESC`,
     [workspaceId],
   );
@@ -140,13 +140,13 @@ export async function listInvites(q: Queryable, workspaceId: string) {
 }
 
 export async function revokeInvite(q: Queryable, workspaceId: string, inviteId: string): Promise<void> {
-  await q.query('UPDATE workspace_invites SET revoked_at = now() WHERE id = $1 AND workspace_id = $2', [inviteId, workspaceId]);
+  await q.query('UPDATE workspace_invites SET revoked_at = now_ms() WHERE id = $1 AND workspace_id = $2', [inviteId, workspaceId]);
 }
 
 export async function findInvite(q: Queryable, token: string) {
   const { rows } = await q.query(
     `SELECT i.id, i.workspace_id, w.name AS workspace_name FROM workspace_invites i JOIN workspaces w ON w.id = i.workspace_id
-     WHERE i.token_hash = $1 AND i.used_at IS NULL AND i.revoked_at IS NULL AND i.expires_at > now()`,
+     WHERE i.token_hash = $1 AND i.used_at IS NULL AND i.revoked_at IS NULL AND i.expires_at > now_ms()`,
     [sha256(token)],
   );
   return (rows[0] as { id: string; workspace_id: string; workspace_name: string } | undefined) ?? null;
@@ -155,8 +155,8 @@ export async function findInvite(q: Queryable, token: string) {
 export async function acceptInvite(db: Db, token: string, userId: string): Promise<string> {
   return withTransaction(db, async (c) => {
     const { rows } = await c.query(
-      `UPDATE workspace_invites SET used_at = now(), used_by = $2
-       WHERE token_hash = $1 AND used_at IS NULL AND revoked_at IS NULL AND expires_at > now()
+      `UPDATE workspace_invites SET used_at = now_ms(), used_by = $2
+       WHERE token_hash = $1 AND used_at IS NULL AND revoked_at IS NULL AND expires_at > now_ms()
        RETURNING workspace_id`,
       [sha256(token), userId],
     );

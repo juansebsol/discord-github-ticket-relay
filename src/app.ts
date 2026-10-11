@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import type { Config } from './config.js';
-import type { Db } from './db/pool.js';
+import type { Db } from './db/database.js';
 import { DiscordClient } from './discord/client.js';
 import { Processor } from './domain/processor.js';
 import type { Deps, Logger } from './domain/types.js';
@@ -20,6 +20,8 @@ export interface AppOptions {
   logger?: boolean | object;
   instanceId?: string;
   githubTimeouts?: { request: number; createIssue: number };
+  /** Tickets one worker process files in parallel (default 2). */
+  workerConcurrency?: number;
 }
 
 export interface AppInstance {
@@ -44,6 +46,6 @@ export async function createApp(opts: AppOptions): Promise<AppInstance> {
   const processor = new Processor(deps);
   const server = await buildServer(deps, processor, { logger: opts.logger });
   if (!opts.log && opts.logger) deps.log = server.log;
-  const worker = new Worker(deps, processor);
+  const worker = new Worker(deps, processor, { concurrency: opts.workerConcurrency });
   return { server, deps, processor, worker };
 }

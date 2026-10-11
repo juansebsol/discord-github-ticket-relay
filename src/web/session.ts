@@ -1,5 +1,5 @@
 import type { FastifyReply, FastifyRequest } from 'fastify';
-import type { Queryable } from '../db/pool.js';
+import type { Queryable } from '../db/database.js';
 import { randomToken, sha256 } from '../lib/crypto.js';
 import type { UserRow } from '../domain/types.js';
 
@@ -28,7 +28,7 @@ export async function createSession(
   const token = randomToken(32);
   const { rows } = await q.query<SessionRow>(
     `INSERT INTO sessions (id, user_id, csrf_token, discord_access_token_enc, discord_token_expires_at, expires_at)
-     VALUES ($1, $2, $3, $4, $5, now() + make_interval(days => $6)) RETURNING *`,
+     VALUES ($1, $2, $3, $4, $5, now_ms() + ($6 * 86400000)) RETURNING *`,
     [sha256(token), userId, randomToken(24), discordToken?.enc ?? null, discordToken?.expiresAt ?? null, SESSION_DAYS],
   );
   return { token, session: rows[0]! };
@@ -39,7 +39,7 @@ export async function loadSession(q: Queryable, token: string | undefined): Prom
   const { rows } = await q.query(
     `SELECT s.id AS s_id, s.user_id, s.csrf_token, s.discord_access_token_enc, s.discord_token_expires_at, s.expires_at,
             u.id, u.discord_user_id, u.username, u.display_name, u.avatar
-     FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.id = $1 AND s.expires_at > now()`,
+     FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.id = $1 AND s.expires_at > now_ms()`,
     [sha256(token)],
   );
   const r = rows[0];

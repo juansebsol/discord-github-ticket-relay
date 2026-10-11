@@ -1,5 +1,5 @@
 import type { Config } from '../config.js';
-import type { Db } from '../db/pool.js';
+import type { Db } from '../db/database.js';
 import type { DiscordClient } from '../discord/client.js';
 import type { GitHubClient } from '../github/client.js';
 import type { SecretBox } from '../lib/crypto.js';
@@ -125,7 +125,7 @@ export interface SubmissionRow {
   attempts: number;
   next_attempt_at: Date | null;
   lease_owner: string | null;
-  lease_until: Date | null;
+  lease_until_at: Date | null;
   github_request_started_at: Date | null;
   reconcile_attempts: number;
   last_reconciled_at: Date | null;
