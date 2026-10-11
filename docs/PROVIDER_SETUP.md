@@ -75,9 +75,10 @@ The bot asks for these channel permissions when it is added:
    - Copy the **App ID** → `GITHUB_APP_ID`.
    - Copy the **Client ID** → `GITHUB_CLIENT_ID`.
    - **Generate a new client secret** → `GITHUB_CLIENT_SECRET`.
-   - **Generate a private key** (a `.pem` file) → `GITHUB_APP_PRIVATE_KEY`. Paste the PEM
-     with `\n` escapes, or base64-encode it, or mount the file and set
-     `GITHUB_APP_PRIVATE_KEY_FILE`.
+   - **Generate a private key** (a `.pem` file). Rename it to `sec.pem` and place it at
+     `secrets/sec.pem` (git-ignored), then `chmod 600 secrets/sec.pem`. `.env.example` already
+     points `GITHUB_APP_PRIVATE_KEY_FILE` there. Alternatively set `GITHUB_APP_PRIVATE_KEY` to the
+     key as one base64 line.
 
 Issues created by the app show **`<app-slug>[bot]`** as the author. The issue body credits
 the Discord member who reported it.

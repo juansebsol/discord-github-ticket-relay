@@ -10,3 +10,8 @@ data/
 *.db
 *.db-wal
 *.db-shm
+
+# Credential files: keep only the folder README in git
+secrets/*
+!secrets/README.md
+*.pem

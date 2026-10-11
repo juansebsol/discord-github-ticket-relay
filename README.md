@@ -66,7 +66,8 @@ Processes, operations, backups and scaling: [docs/DEPLOYMENT.md](docs/DEPLOYMENT
 | `PUBLIC_URL` | Public HTTPS origin |
 | `ENCRYPTION_KEY` | `openssl rand -base64 32`; keep it stable |
 | `DISCORD_*` | `APPLICATION_ID`, `PUBLIC_KEY`, `CLIENT_SECRET`, `BOT_TOKEN` |
-| `GITHUB_*` | `APP_ID`, `APP_SLUG`, `CLIENT_ID`, `CLIENT_SECRET`, `APP_PRIVATE_KEY`, optional `WEBHOOK_SECRET` |
+| `GITHUB_*` | `APP_ID`, `APP_SLUG`, `CLIENT_ID`, `CLIENT_SECRET`, optional `WEBHOOK_SECRET` |
+| `GITHUB_APP_PRIVATE_KEY_FILE` | `./secrets/sec.pem` (git-ignored; see [`secrets/`](secrets/README.md)) |
 | `PLATFORM_ADMIN_DISCORD_IDS` | Discord user IDs allowed to create workspaces |
 
 Optional variables are listed in [`.env.example`](.env.example). Everything else is configured
