@@ -1,4 +1,19 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+/** Project root (parent of src/ or dist/). Relative paths in config resolve against it, not the cwd. */
+export const APP_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+/** Loads `<APP_ROOT>/.env` if present. Variables already set in the environment win. */
+export function loadDotEnv(): void {
+  const file = path.join(APP_ROOT, '.env');
+  if (existsSync(file)) process.loadEnvFile(file);
+}
+
+function fromRoot(p: string): string {
+  return p === ':memory:' ? p : path.resolve(APP_ROOT, p);
+}
 
 /**
  * One-time deployment configuration. Everything here is infrastructure: provider
@@ -44,7 +59,11 @@ export interface Config {
 export class ConfigError extends Error {}
 
 function readPrivateKey(env: NodeJS.ProcessEnv): string | undefined {
-  if (env.GITHUB_APP_PRIVATE_KEY_FILE) return readFileSync(env.GITHUB_APP_PRIVATE_KEY_FILE, 'utf8');
+  if (env.GITHUB_APP_PRIVATE_KEY_FILE) {
+    const file = fromRoot(env.GITHUB_APP_PRIVATE_KEY_FILE);
+    if (!existsSync(file)) throw new ConfigError(`GITHUB_APP_PRIVATE_KEY_FILE not found: ${file}`);
+    return readFileSync(file, 'utf8');
+  }
   const raw = env.GITHUB_APP_PRIVATE_KEY;
   if (!raw) return undefined;
   if (raw.includes('BEGIN')) return raw.replace(/\\n/g, '\n');
@@ -56,7 +75,7 @@ function readPrivateKey(env: NodeJS.ProcessEnv): string | undefined {
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const nodeEnv = (env.NODE_ENV === 'production' || env.NODE_ENV === 'test' ? env.NODE_ENV : 'development') as Config['nodeEnv'];
 
-  const databasePath = env.DATABASE_PATH || './data/ticket-relay.db';
+  const databasePath = fromRoot(env.DATABASE_PATH || './data/ticket-relay.db');
 
   const port = Number(env.PORT ?? 3000);
   const publicUrl = (env.PUBLIC_URL ?? `http://localhost:${port}`).replace(/\/+$/, '');

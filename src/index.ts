@@ -1,11 +1,10 @@
-import { existsSync } from 'node:fs';
 import { createApp } from './app.js';
-import { ConfigError, loadConfig } from './config.js';
+import { ConfigError, loadConfig, loadDotEnv } from './config.js';
 import { migrate } from './db/migrate.js';
 import { openDatabase } from './db/database.js';
 import { loggerOptions } from './logging.js';
 
-if (existsSync('.env')) process.loadEnvFile('.env');
+loadDotEnv();
 
 let config;
 try {
