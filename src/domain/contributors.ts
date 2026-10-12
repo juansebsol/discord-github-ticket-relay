@@ -27,24 +27,51 @@ export interface ContributorSettings {
   role_name: string | null;
   channel_id: string | null;
   channel_name: string | null;
+  /** Custom “Which role will I get?” list for the panel; null = generated from the tiers. */
+  roles_text: string | null;
+  /** Other panel text overrides; null = built-in default. */
+  panel_title: string | null;
+  panel_intro: string | null;
+  panel_steps: string | null;
+  panel_footer: string | null;
+  button_label: string | null;
 }
+
+export type ContributorPanelTextFields = Pick<ContributorSettings, 'panel_title' | 'panel_intro' | 'roles_text' | 'panel_steps' | 'panel_footer' | 'button_label'>;
+
+const TEXT_COLUMNS = ['panel_title', 'panel_intro', 'roles_text', 'panel_steps', 'panel_footer', 'button_label'] as const;
 
 export async function getContributorSettings(q: Queryable, workspaceId: string): Promise<ContributorSettings> {
   const { rows } = await q.query<Omit<ContributorSettings, 'enabled'> & { enabled: number }>(
-    'SELECT enabled, role_id, role_name, channel_id, channel_name FROM contributor_settings WHERE workspace_id = $1',
+    `SELECT enabled, role_id, role_name, channel_id, channel_name, ${TEXT_COLUMNS.join(', ')} FROM contributor_settings WHERE workspace_id = $1`,
     [workspaceId],
   );
   const r = rows[0];
-  return r ? { ...r, enabled: Boolean(r.enabled) } : { enabled: false, role_id: null, role_name: null, channel_id: null, channel_name: null };
+  return r ? { ...r, enabled: Boolean(r.enabled) } : { enabled: false, role_id: null, role_name: null, channel_id: null, channel_name: null, roles_text: null, panel_title: null, panel_intro: null, panel_steps: null, panel_footer: null, button_label: null };
 }
 
-export async function saveContributorSettings(q: Queryable, workspaceId: string, s: ContributorSettings): Promise<void> {
+/** Saves on/off and the panel channel (panel text is saved separately). */
+export async function saveContributorSettings(
+  q: Queryable,
+  workspaceId: string,
+  s: Pick<ContributorSettings, 'enabled' | 'role_id' | 'role_name' | 'channel_id' | 'channel_name'>,
+): Promise<void> {
   await q.query(
     `INSERT INTO contributor_settings (workspace_id, enabled, role_id, role_name, channel_id, channel_name, updated_at)
      VALUES ($1, $2, $3, $4, $5, $6, now_ms())
      ON CONFLICT (workspace_id) DO UPDATE SET enabled = EXCLUDED.enabled, role_id = EXCLUDED.role_id,
        role_name = EXCLUDED.role_name, channel_id = EXCLUDED.channel_id, channel_name = EXCLUDED.channel_name, updated_at = now_ms()`,
     [workspaceId, s.enabled, s.role_id, s.role_name, s.channel_id, s.channel_name],
+  );
+}
+
+/** Saves the panel text overrides (null = default). */
+export async function saveContributorPanelText(q: Queryable, workspaceId: string, t: ContributorPanelTextFields): Promise<void> {
+  await q.query(
+    `INSERT INTO contributor_settings (workspace_id, ${TEXT_COLUMNS.join(', ')}, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, now_ms())
+     ON CONFLICT (workspace_id) DO UPDATE SET ${TEXT_COLUMNS.map((c) => `${c} = EXCLUDED.${c}`).join(', ')}, updated_at = now_ms()`,
+    [workspaceId, ...TEXT_COLUMNS.map((c) => t[c])],
   );
 }
 
@@ -152,8 +179,18 @@ export async function getContributorPanel(q: Queryable, workspaceId: string): Pr
   return rows[0] ?? null;
 }
 
-export function contributorPanelPayload(tiers: ContributorTier[], _apps: AppRow[]) {
-  const payload = m.buildContributorPanel({ tiers: tiers.map((t) => ({ name: t.role_name, min: t.min_contributions })) });
+export function contributorPanelPayload(tiers: ContributorTier[], settings: ContributorPanelTextFields) {
+  const payload = m.buildContributorPanel({
+    tiers: tiers.map((t) => ({ roleId: t.role_id, min: t.min_contributions })),
+    text: {
+      title: settings.panel_title,
+      intro: settings.panel_intro,
+      rolesText: settings.roles_text,
+      steps: settings.panel_steps,
+      footer: settings.panel_footer,
+      buttonLabel: settings.button_label,
+    },
+  });
   return { payload, hash: sha256(JSON.stringify(payload)) };
 }
 
@@ -177,7 +214,7 @@ export async function publishContributorPanel(deps: Deps, workspaceId: string, u
   if (!tiers.length) throw new UserFacingError('Add at least one contributor role tier first.');
   const apps = await listApps(deps.db, workspaceId);
   if (!contributorApps(apps).length) throw new UserFacingError('Turn on contributor verification for at least one app first.');
-  const { payload, hash } = contributorPanelPayload(tiers, apps);
+  const { payload, hash } = contributorPanelPayload(tiers, settings);
   const existing = await getContributorPanel(deps.db, workspaceId);
 
   if (existing && existing.channel_id === settings.channel_id) {
@@ -233,7 +270,7 @@ export async function checkContributorPanel(deps: Deps, workspaceId: string, con
     }
   }
   const settings = await getContributorSettings(deps.db, workspaceId);
-  const { hash } = contributorPanelPayload(await listTiers(deps.db, workspaceId), await listApps(deps.db, workspaceId));
+  const { hash } = contributorPanelPayload(await listTiers(deps.db, workspaceId), settings);
   return {
     state: 'published',
     outdated: hash !== panel.content_hash,

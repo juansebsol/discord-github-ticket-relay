@@ -2,6 +2,8 @@ import type { FastifyInstance } from 'fastify';
 import {
   addTier,
   checkContributorPanel,
+  contributorPanelPayload,
+  saveContributorPanelText,
   deleteTier,
   listTiers,
   contributorApps,
@@ -17,12 +19,30 @@ import {
 import { inspectGuild } from '../../domain/discord-checks.js';
 import { getDiscordConnection, getGitHubConnection, listApps } from '../../domain/store.js';
 import { UserFacingError } from '../../domain/types.js';
-import { html, raw, type SafeHtml } from '../../lib/html.js';
+import { CONTRIBUTOR_PANEL_DEFAULTS, defaultContributorRolesText } from '../../discord/messages.js';
+import { escapeHtml, html, raw, type SafeHtml } from '../../lib/html.js';
 import { alert, badge, button, csrfField, formatDate, pageHead, postButton, timeAgo } from '../layout.js';
 import { setFlash } from '../session.js';
 import type { Web } from '../server.js';
 
 type Check = { status: 'ok' | 'warning' | 'error'; title: string; detail?: string };
+
+/**
+ * Discord-markdown preview for the admin page: escapes everything first, then renders
+ * headings, **bold**, and role mentions (shown by role name, as Discord does).
+ */
+function discordPreview(text: string, roleNames: Map<string, string>): SafeHtml {
+  const lines = escapeHtml(text).split('\n').map((line) => {
+    const withInline = line
+      .replace(/&lt;@&amp;(\d+)&gt;/g, (_m, id: string) => `<span class="dp-mention">@${escapeHtml(roleNames.get(id) ?? 'unknown-role')}</span>`)
+      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    const h = /^#{1,3} (.*)$/.exec(withInline);
+    return h ? `<span class="dp-h">${h[1]}</span>` : withInline;
+  });
+  return raw(lines.join('<br>'));
+}
+
+const TEXT_LIMITS = { panel_title: 256, panel_intro: 1000, roles_text: 2000, panel_steps: 1500, panel_footer: 500, button_label: 80 } as const;
 
 const RESULT_BADGES: Record<string, [string, 'ok' | 'warn' | 'danger' | '']> = {
   verified: ['Verified', 'ok'],
@@ -94,6 +114,9 @@ export function registerContributorRoutes(app: FastifyInstance, web: Web): void 
     const panel = await checkContributorPanel(deps, wid, conn);
 
     const usedRoles = new Set(tiers.map((t) => t.role_id));
+    const roleNames = new Map<string, string>(roles?.ok ? roles.roles.map((r) => [r.id, r.name]) : tiers.map((t) => [t.role_id, t.role_name]));
+    const preview = contributorPanelPayload(tiers, settings).payload;
+    const defaultRoles = defaultContributorRolesText(tiers.map((t) => ({ roleId: t.role_id, min: t.min_contributions })));
     const roleOptions: SafeHtml = roles?.ok
       ? html`${roles.roles.filter((r) => !usedRoles.has(r.id)).map((r) => html`<option value="${r.id}" ${r.assignable ? '' : raw('disabled')}>@${r.name}${r.reason ? ` (${r.reason})` : ''}</option>`)}`
       : html``;
@@ -147,6 +170,32 @@ export function registerContributorRoutes(app: FastifyInstance, web: Web): void 
           ${button('+ Add role', { loading: 'Adding…' })}
         </form>
         <p class="hint">The bot can only give roles that sit below its own role.</p>
+      </div>
+
+      <div class="grid grid-2">
+        <form method="post" action="${b}/contributors/text" class="card">
+          ${csrfField(ctx.csrf)}
+          <div class="card-head"><h2>Panel text</h2></div>
+          <p class="small muted">Leave a field empty to use the default shown as a placeholder. Discord formatting works: <code>**bold**</code>, <code>## heading</code>, <code>- list</code>, and <code>&lt;@&amp;ROLE_ID&gt;</code> for a role tag (it never pings).</p>
+          <div class="field"><label for="panel_title">Title</label><input id="panel_title" type="text" name="panel_title" maxlength="256" value="${settings.panel_title ?? ''}" placeholder="${CONTRIBUTOR_PANEL_DEFAULTS.title}"></div>
+          <div class="field"><label for="panel_intro">Intro</label><textarea id="panel_intro" name="panel_intro" maxlength="1000" rows="2" placeholder="${CONTRIBUTOR_PANEL_DEFAULTS.intro}">${settings.panel_intro ?? ''}</textarea></div>
+          <div class="field"><label for="roles_text">Which role will I get?</label><textarea id="roles_text" name="roles_text" maxlength="2000" rows="4" placeholder="${defaultRoles}">${settings.roles_text ?? ''}</textarea>
+            <div class="hint">Empty = list the roles from the Roles card automatically. You can also mention roles you give manually.</div></div>
+          <div class="field"><label for="panel_steps">How it works</label><textarea id="panel_steps" name="panel_steps" maxlength="1500" rows="4" placeholder="${CONTRIBUTOR_PANEL_DEFAULTS.steps}">${settings.panel_steps ?? ''}</textarea></div>
+          <div class="field"><label for="panel_footer">Footer</label><textarea id="panel_footer" name="panel_footer" maxlength="500" rows="2" placeholder="${CONTRIBUTOR_PANEL_DEFAULTS.footer}">${settings.panel_footer ?? ''}</textarea></div>
+          <div class="field"><label for="button_label">Button label</label><input id="button_label" type="text" name="button_label" maxlength="80" value="${settings.button_label ?? ''}" placeholder="${CONTRIBUTOR_PANEL_DEFAULTS.buttonLabel}"></div>
+          ${button('Save text', { variant: 'primary', loading: 'Saving…' })}
+        </form>
+        <div class="card"><div class="card-head"><h2>Preview</h2></div>
+          <div class="discord-preview" aria-label="Preview of the contributor panel in Discord">
+            <div class="dp-msg"><div class="dp-avatar" aria-hidden="true">TR</div><div>
+              <div><span class="dp-name">Ticket Relay</span><span class="dp-tag">APP</span></div>
+              <div class="dp-embed dp-embed-green"><h4>${preview.embeds[0]!.title}</h4><p>${discordPreview(preview.embeds[0]!.description, roleNames)}</p></div>
+              <span class="dp-button">${preview.components[0]!.components[0]!.label}</span>
+            </div></div>
+          </div>
+          <p class="small muted">Saved text shows here. Click <strong>Update panel</strong> below to change it in Discord.</p>
+        </div>
       </div>
 
       <div class="card">
@@ -211,6 +260,23 @@ export function registerContributorRoutes(app: FastifyInstance, web: Web): void 
     });
     setFlash(reply, 'success', 'Contributor settings saved. Update the panel if it is already published.');
     return reply.redirect(back);
+  });
+
+  app.post('/w/:wid/contributors/text', async (req, reply) => {
+    const ctx = await web.requireWorkspace(req, reply);
+    if (!ctx) return reply;
+    const body = (req.body ?? {}) as Record<string, string | undefined>;
+    const clean = (key: keyof typeof TEXT_LIMITS) => (body[key] ?? '').replace(/\r\n/g, '\n').trim().slice(0, TEXT_LIMITS[key]) || null;
+    await saveContributorPanelText(deps.db, ctx.workspace.id, {
+      panel_title: clean('panel_title'),
+      panel_intro: clean('panel_intro'),
+      roles_text: clean('roles_text'),
+      panel_steps: clean('panel_steps'),
+      panel_footer: clean('panel_footer'),
+      button_label: clean('button_label'),
+    });
+    setFlash(reply, 'success', 'Panel text saved. Click Update panel to show it in Discord.');
+    return reply.redirect(`${ctx.base}/contributors`);
   });
 
   app.post('/w/:wid/contributors/tiers', async (req, reply) => {

@@ -236,7 +236,8 @@ describe('admin page', () => {
     expect(contributorPanel.message_id).not.toBe(ticketPanel.message_id);
     const payload = env.discord.messages.get(contributorPanel.message_id)!.payload;
     expect(payload.components[0].components[0]).toMatchObject({ type: 2, custom_id: 'cv:verify', label: 'Verify with GitHub' });
-    expect(payload.embeds[0].description).toContain('**Contributor**: 10+');
+    expect(payload.embeds[0].description).toContain(`## Which role will I get?\n- <@&${JUNIOR_ID}> - at least 1 merged pull request\n- <@&${CONTRIB_ID}> - at least 10 merged pull requests`);
+    expect(payload.allowed_mentions).toEqual({ parse: [] });
     expect(env.discord.messages.get(ticketPanel.message_id)!.payload.components[0].components[0].custom_id).toBe('tr:pick');
 
     contributed(1);
@@ -245,6 +246,30 @@ describe('admin page', () => {
     await env.server.inject({ method: 'POST', url: `/w/${ws.workspace.id}/contributors/verifications/${v.id}/revoke`, ...form(ws.owner) });
     expect(removed()).toEqual([JUNIOR_ID, CONTRIB_ID]);
     expect((await env.db.query('SELECT count(*) AS n FROM contributor_links')).rows[0].n).toBe(0);
+  });
+
+  it('lets admins edit the panel text, with a preview, and publishes it', async () => {
+    await enable();
+    const text = `- <@&${JUNIOR_ID}>  - at least 1 merged pull request\n- <@&555>  - given manually to biggest contributors`;
+    await env.server.inject({
+      method: 'POST', url: `/w/${ws.workspace.id}/contributors/text`,
+      ...form(ws.owner, { panel_title: 'Get your contributor role', panel_intro: '', roles_text: text, panel_steps: '', panel_footer: '', button_label: 'Check my GitHub' }),
+    });
+    const page = await env.server.inject({ method: 'GET', url: `/w/${ws.workspace.id}/contributors`, ...get(ws.owner) });
+    expect(page.body).toContain('<h4>Get your contributor role</h4>');
+    expect(page.body).toContain('<span class="dp-mention">@Junior Contributor</span>');
+    expect(page.body).toContain('<span class="dp-button">Check my GitHub</span>');
+
+    await env.server.inject({ method: 'POST', url: `/w/${ws.workspace.id}/contributors/publish`, ...form(ws.owner) });
+    const payload = env.discord.messages.get((await getContributorPanel(env.db, ws.workspace.id))!.message_id)!.payload;
+    expect(payload.embeds[0].title).toBe('Get your contributor role');
+    expect(payload.embeds[0].description).toContain(`## Which role will I get?\n${text}`);
+    expect(payload.embeds[0].description).toContain('Contributed to one of our apps on GitHub?'); // empty field = default
+    expect(payload.components[0].components[0].label).toBe('Check my GitHub');
+
+    // Saving channel settings keeps the text.
+    await env.server.inject({ method: 'POST', url: `/w/${ws.workspace.id}/contributors/settings`, ...form(ws.owner, { enabled: '1', channel_id: ws.channelId }) });
+    expect((await env.db.query('SELECT panel_title FROM contributor_settings')).rows[0].panel_title).toBe('Get your contributor role');
   });
 
   it('is isolated per workspace', async () => {

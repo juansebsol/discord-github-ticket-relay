@@ -313,27 +313,49 @@ export function textEchoMessage(title: string, explanation: string, ticket: { ti
 
 // ---- Contributor roles ---------------------------------------------------------------------
 
-export function buildContributorPanel(opts: { tiers: { name: string; min: number }[] }) {
-  const description = [
-    'Contributed to one of our apps on GitHub? Get a contributor role.',
-    '',
-    '**Roles**',
-    ...opts.tiers.map((t) => `• **${escapeMarkdown(t.name)}**: ${t.min}+ contribution${t.min === 1 ? '' : 's'}`),
-    '',
-    '**How it works**',
+/** Default “Which role will I get?” list: one line per tier, using role mentions. */
+export function defaultContributorRolesText(tiers: { roleId: string; min: number }[]): string {
+  return tiers.map((t) => `- <@&${t.roleId}> - at least ${t.min} merged pull request${t.min === 1 ? '' : 's'}`).join('\n');
+}
+
+export const CONTRIBUTOR_PANEL_DEFAULTS = {
+  title: 'Verify as a contributor',
+  intro: 'Contributed to one of our apps on GitHub? Get a contributor role.',
+  steps: [
     '1. Click **Verify with GitHub** and sign in to confirm which account is yours.',
     '2. We add up your merged pull requests (or commits) across all our apps.',
     '3. You get the highest role you qualify for. Verify again later to move up.',
-    '',
-    'We only use the sign-in to confirm your GitHub username. Nothing is posted on your behalf.',
-  ].join('\n');
+  ].join('\n'),
+  footer: 'We only use the sign-in to confirm your GitHub username. Nothing is posted on your behalf.',
+  buttonLabel: 'Verify with GitHub',
+};
+
+export interface ContributorPanelText {
+  title?: string | null;
+  intro?: string | null;
+  rolesText?: string | null;
+  steps?: string | null;
+  footer?: string | null;
+  buttonLabel?: string | null;
+}
+
+export function buildContributorPanel(opts: { tiers: { roleId: string; min: number }[]; text?: ContributorPanelText }) {
+  const t = opts.text ?? {};
+  const pick = (v: string | null | undefined, fallback: string) => v?.trim() || fallback;
+  // Role mentions render as role tags in embeds and never ping (allowed_mentions is empty too).
+  const sections = [
+    pick(t.intro, CONTRIBUTOR_PANEL_DEFAULTS.intro),
+    `## Which role will I get?\n${pick(t.rolesText, defaultContributorRolesText(opts.tiers))}`,
+    `## How it works\n${pick(t.steps, CONTRIBUTOR_PANEL_DEFAULTS.steps)}`,
+    pick(t.footer, CONTRIBUTOR_PANEL_DEFAULTS.footer),
+  ];
   return {
     content: '',
-    embeds: [{ title: 'Verify as a contributor', description, color: COLORS.success }],
+    embeds: [{ title: truncate(pick(t.title, CONTRIBUTOR_PANEL_DEFAULTS.title), 256), description: truncate(sections.join('\n\n'), 4096), color: COLORS.success }],
     components: [
       {
         type: ComponentType.ActionRow,
-        components: [{ type: ComponentType.Button, style: 3, label: 'Verify with GitHub', custom_id: CustomId.contributorVerify }],
+        components: [{ type: ComponentType.Button, style: 3, label: truncate(pick(t.buttonLabel, CONTRIBUTOR_PANEL_DEFAULTS.buttonLabel), 80), custom_id: CustomId.contributorVerify }],
       },
     ],
     allowed_mentions: NO_MENTIONS,
