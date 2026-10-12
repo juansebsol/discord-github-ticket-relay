@@ -43,10 +43,6 @@ and filed by a GitHub App. Reporters never need a GitHub account.
 
 ![Admin console overview](docs/images/admin-overview.png)
 
-**Validate & publish:** live checks, previews of the Discord panel and form, and a test ticket.
-
-![Validate and publish page](docs/images/admin-publish.png)
-
 ## Quick start
 
 ```bash
