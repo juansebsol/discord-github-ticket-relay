@@ -60,9 +60,9 @@ export class FakeGitHub {
   rejectAppJwt = false;
   /** GitHub account returned for the user access token from code `good-code`. */
   oauthUser = { id: 4242, login: 'octo-dev' };
-  /** repoId → logins with a merged PR / an authored commit. */
-  mergedPrs = new Map<number, Set<string>>();
-  commits = new Map<number, Set<string>>();
+  /** repoId → login → number of merged PRs / authored commits. */
+  mergedPrs = new Map<number, Map<string, number>>();
+  commits = new Map<number, Map<string, number>>();
   installationPermissions: Record<string, string> = { issues: 'write', metadata: 'read', pull_requests: 'read', contents: 'read' };
   appSlug = 'ticket-relay';
 
@@ -167,7 +167,9 @@ export class FakeGitHub {
       const r = this.repoByName(decodeURIComponent(m[1]!), decodeURIComponent(m[2]!));
       if (!accessible(r)) return json(404, { message: 'Not Found' });
       const author = url.searchParams.get('author') ?? '';
-      return json(200, this.commits.get(r!.id)?.has(author) ? [{ sha: 'abc' }] : []);
+      const n = this.commits.get(r!.id)?.get(author) ?? 0;
+      const link: Record<string, string> = n > 1 ? { link: `<https://api.github.com${path}?author=${author}&per_page=1&page=2>; rel="next", <https://api.github.com${path}?author=${author}&per_page=1&page=${n}>; rel="last"` } : {};
+      return json(200, n ? [{ sha: 'abc' }] : [], link);
     }
     if ((m = /^\/repos\/([^/]+)\/([^/]+)\/issues\/(\d+)$/.exec(path))) {
       const r = this.repoByName(decodeURIComponent(m[1]!), decodeURIComponent(m[2]!));
@@ -201,7 +203,7 @@ export class FakeGitHub {
       const [owner, name] = (/repo:(\S+)/.exec(q)?.[1] ?? '/').split('/');
       const author = /author:(\S+)/.exec(q)?.[1] ?? '';
       const r = this.repoByName(owner!, name!);
-      const n = r && accessible(r) && this.mergedPrs.get(r.id)?.has(author) ? 1 : 0;
+      const n = r && accessible(r) ? (this.mergedPrs.get(r.id)?.get(author) ?? 0) : 0;
       return json(200, { total_count: n, items: [] });
     }
     if (path === '/search/issues') {

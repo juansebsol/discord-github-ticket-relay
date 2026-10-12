@@ -311,17 +311,20 @@ export function textEchoMessage(title: string, explanation: string, ticket: { ti
 
 // ---- Contributor roles ---------------------------------------------------------------------
 
-export function buildContributorPanel(opts: { roleName: string; apps: PanelApp[] }) {
+export function buildContributorPanel(opts: { tiers: { name: string; min: number }[]; apps: PanelApp[] }) {
   const overflow = opts.apps.length > SELECT_MAX;
   const options = (overflow ? opts.apps.slice(0, SELECT_MAX - 1) : opts.apps).map(appOption);
   if (overflow) options.push({ label: 'More apps…', value: MORE_APPS_VALUE, description: `Browse all ${opts.apps.length} apps` });
   const description = [
-    `Contributed to one of our apps on GitHub? Get the **${escapeMarkdown(opts.roleName)}** role.`,
+    'Contributed to one of our apps on GitHub? Get a contributor role.',
+    '',
+    '**Roles**',
+    ...opts.tiers.map((t) => `• **${escapeMarkdown(t.name)}**: ${t.min}+ merged pull request${t.min === 1 ? '' : 's'} or commits`),
     '',
     '**How it works**',
     '1. Choose the app you contributed to.',
     '2. Sign in with GitHub to confirm which account is yours.',
-    '3. If you have a merged pull request or a commit in its repository, the role is added right away.',
+    '3. We count your contributions to its repository and add the highest role you qualify for. Verify again later to move up.',
     '',
     'We only use the sign-in to confirm your GitHub username. Nothing is posted on your behalf.',
   ].join('\n');
@@ -340,11 +343,11 @@ export function buildContributorPanel(opts: { roleName: string; apps: PanelApp[]
   };
 }
 
-export function contributorVerifyPrompt(s: { appName: string; roleName: string; url: string }) {
+export function contributorVerifyPrompt(s: { appName: string; tiers: string[]; url: string }) {
   return reply(
     {
       title: 'Confirm your GitHub account',
-      description: `Sign in with GitHub to check your contributions to **${escapeMarkdown(s.appName)}**. If you have a merged pull request or a commit there, you get the **${escapeMarkdown(s.roleName)}** role.\n\nThis link is just for you and expires in 10 minutes.`,
+      description: `Sign in with GitHub to count your contributions to **${escapeMarkdown(s.appName)}**. Roles: ${s.tiers.map(escapeMarkdown).join(', ')}.\n\nThis link is just for you and expires in 10 minutes.`,
       color: COLORS.brand,
     },
     [{ type: ComponentType.ActionRow, components: [{ type: ComponentType.Button, style: 5, label: 'Verify with GitHub', url: s.url }] }],
@@ -353,10 +356,10 @@ export function contributorVerifyPrompt(s: { appName: string; roleName: string; 
 
 export type ContributorOutcome = 'verified' | 'not_contributor' | 'conflict' | 'error';
 
-export function contributorResultMessage(s: { outcome: ContributorOutcome; appName: string; roleName: string; login: string | null; explanation: string }) {
+export function contributorResultMessage(s: { outcome: ContributorOutcome; appName: string; roleName: string | null; login: string | null; explanation: string }) {
   const titles: Record<ContributorOutcome, string> = {
-    verified: 'Verified: role added',
-    not_contributor: 'No contributions found',
+    verified: s.roleName ? `Verified: ${s.roleName}` : 'Verified: role added',
+    not_contributor: 'Not enough contributions yet',
     conflict: 'GitHub account already linked',
     error: 'Verification failed',
   };

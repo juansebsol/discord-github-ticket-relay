@@ -314,24 +314,26 @@ export class GitHubClient {
     return { id: data.id, login: data.login };
   }
 
-  /** True if `login` authored at least one merged pull request in the repository. */
-  async hasMergedPullRequest(installationId: number, owner: string, repo: string, login: string): Promise<boolean> {
+  /** Number of merged pull requests authored by `login` in the repository. */
+  async countMergedPullRequests(installationId: number, owner: string, repo: string, login: string): Promise<number> {
     const q = `repo:${owner}/${repo} is:pr is:merged author:${login}`;
     const { data } = await this.request('GET', `/search/issues?q=${encodeURIComponent(q)}&per_page=1`, await this.asInstallation(installationId));
-    return Number(data.total_count ?? 0) > 0;
+    return Number(data.total_count ?? 0);
   }
 
-  /** True if the repository's default branch has a commit attributed to `login`. */
-  async hasAuthoredCommit(installationId: number, owner: string, repo: string, login: string): Promise<boolean> {
+  /** Number of commits on the default branch attributed to `login` (read from pagination). */
+  async countAuthoredCommits(installationId: number, owner: string, repo: string, login: string): Promise<number> {
     try {
-      const { data } = await this.request(
+      const { data, headers } = await this.request(
         'GET',
         `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits?author=${encodeURIComponent(login)}&per_page=1`,
         await this.asInstallation(installationId),
       );
-      return Array.isArray(data) && data.length > 0;
+      if (!Array.isArray(data) || data.length === 0) return 0;
+      const last = /[?&]page=(\d+)>; rel="last"/.exec(headers.get('link') ?? '');
+      return last ? Number(last[1]) : data.length;
     } catch (err) {
-      if (err instanceof GitHubApiError && err.status === 409) return false; // empty repository
+      if (err instanceof GitHubApiError && err.status === 409) return 0; // empty repository
       throw err;
     }
   }

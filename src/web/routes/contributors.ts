@@ -1,6 +1,9 @@
 import type { FastifyInstance } from 'fastify';
 import {
+  addTier,
   checkContributorPanel,
+  deleteTier,
+  listTiers,
   contributorApps,
   getContributorSettings,
   inspectRoles,
@@ -36,8 +39,9 @@ export function registerContributorRoutes(app: FastifyInstance, web: Web): void 
     if (!ctx) return reply;
     const wid = ctx.workspace.id;
     const b = ctx.base;
-    const [settings, apps, conn, gh, history] = await Promise.all([
+    const [settings, tiers, apps, conn, gh, history] = await Promise.all([
       getContributorSettings(deps.db, wid),
+      listTiers(deps.db, wid),
       listApps(deps.db, wid),
       getDiscordConnection(deps.db, wid),
       getGitHubConnection(deps.db, wid),
@@ -55,11 +59,13 @@ export function registerContributorRoutes(app: FastifyInstance, web: Web): void 
       checks.push(roles.canManageRoles
         ? { status: 'ok', title: 'The bot has the Manage Roles permission' }
         : { status: 'error', title: 'The bot is missing the Manage Roles permission', detail: 'In Discord: Server Settings → Roles → the bot’s role → turn on Manage Roles.' });
-      const role = settings.role_id ? roles.roles.find((r) => r.id === settings.role_id) : null;
-      if (!settings.role_id) checks.push({ status: 'error', title: 'No contributor role chosen' });
-      else if (!role) checks.push({ status: 'error', title: 'The chosen role no longer exists', detail: 'Choose another role below.' });
-      else if (!role.assignable) checks.push({ status: 'error', title: `The bot can't assign @${role.name}`, detail: `${role.reason}. In Server Settings → Roles, drag the bot's role above @${role.name}.` });
-      else checks.push({ status: 'ok', title: `Members will get the @${role.name} role` });
+      if (!tiers.length) checks.push({ status: 'error', title: 'No contributor roles added yet', detail: 'Add at least one role and the contributions it needs below.' });
+      for (const tier of tiers) {
+        const role = roles.roles.find((r) => r.id === tier.role_id);
+        if (!role) checks.push({ status: 'error', title: `The role for “${tier.role_name}” no longer exists`, detail: 'Remove it and add the role again.' });
+        else if (!role.assignable) checks.push({ status: 'error', title: `The bot can't assign @${role.name}`, detail: `${role.reason}. In Server Settings → Roles, drag the bot's role above @${role.name}.` });
+        else checks.push({ status: 'ok', title: `@${role.name} at ${tier.min_contributions}+ contribution${tier.min_contributions === 1 ? '' : 's'}` });
+      }
     }
     if (conn && guild?.ok) {
       const channel = settings.channel_id ? guild.channels.find((c) => c.id === settings.channel_id) : null;
@@ -87,15 +93,16 @@ export function registerContributorRoutes(app: FastifyInstance, web: Web): void 
     const blocking = checks.some((c) => c.status === 'error');
     const panel = await checkContributorPanel(deps, wid, conn);
 
+    const usedRoles = new Set(tiers.map((t) => t.role_id));
     const roleOptions: SafeHtml = roles?.ok
-      ? html`${roles.roles.map((r) => html`<option value="${r.id}" ${r.id === settings.role_id ? raw('selected') : ''} ${r.assignable ? '' : raw('disabled')}>@${r.name}${r.reason ? ` (${r.reason})` : ''}</option>`)}`
+      ? html`${roles.roles.filter((r) => !usedRoles.has(r.id)).map((r) => html`<option value="${r.id}" ${r.assignable ? '' : raw('disabled')}>@${r.name}${r.reason ? ` (${r.reason})` : ''}</option>`)}`
       : html``;
     const channelOptions: SafeHtml = guild?.ok
       ? html`${guild.channels.map((c) => html`<option value="${c.id}" ${c.id === settings.channel_id ? raw('selected') : ''} ${c.missing.length ? raw('disabled') : ''}>#${c.name}${c.category ? ` (${c.category})` : ''}${c.missing.length ? ` (bot missing: ${c.missing.join(', ')})` : ''}</option>`)}`
       : html``;
 
     const body = html`
-      ${pageHead('Contributor roles', 'A second Discord panel where members sign in with GitHub. Anyone with a merged pull request or a commit in an app’s repository gets your contributor role. Roles are only removed if an admin revokes them.')}
+      ${pageHead('Contributor roles', 'A second Discord panel where members sign in with GitHub and get a role based on how many merged pull requests or commits they have in an app’s repository. Roles are only removed if an admin revokes them.')}
 
       <div class="card">
         <div class="card-head"><h2>Checks</h2>${blocking ? badge('Action needed', 'danger') : badge('Ready', 'ok')}</div>
@@ -107,9 +114,6 @@ export function registerContributorRoutes(app: FastifyInstance, web: Web): void 
           ${csrfField(ctx.csrf)}
           <div class="card-head"><h2>Settings</h2></div>
           <div class="field"><label class="checkbox"><input type="checkbox" name="enabled" value="1" ${settings.enabled ? raw('checked') : ''}> Verification turned on</label></div>
-          <div class="field"><label for="role">Contributor role</label>
-            <select id="role" name="role_id" required><option value="">Choose a role…</option>${roleOptions}</select>
-            <div class="hint">The bot can only give roles that sit below its own role.</div></div>
           <div class="field"><label for="channel">Panel channel</label>
             <select id="channel" name="channel_id" required><option value="">Choose a channel…</option>${channelOptions}</select>
             <div class="hint">For example #verify. Separate from the ticket panel.</div></div>
@@ -125,6 +129,24 @@ export function registerContributorRoutes(app: FastifyInstance, web: Web): void 
                 <hr class="divider">${button('Save apps', { loading: 'Saving…' })}`
             : html`<p class="muted">Add apps first on the <a href="${b}/apps">Apps</a> page.</p>`}
         </form>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2>Roles</h2></div>
+        <p class="small muted">Contributions to the chosen app’s repository: merged pull requests or direct commits, whichever is higher. Members get the highest role they qualify for; moving up replaces the lower role.</p>
+        ${tiers.length
+          ? html`<div class="table-wrap"><table><thead><tr><th>Role</th><th>Contributions needed</th><th></th></tr></thead><tbody>
+              ${tiers.map((t) => html`<tr><td>@${t.role_name}</td><td>${String(t.min_contributions)}+</td>
+                <td>${postButton(`${b}/contributors/tiers/${t.id}/delete`, 'Remove', ctx.csrf, { variant: 'sm danger', confirm: `Remove @${t.role_name} from the contributor roles? Members keep it until an admin removes it in Discord.` })}</td></tr>`)}
+            </tbody></table></div>`
+          : html`<p class="muted">No roles yet. Add the first one below, e.g. Junior Contributor at 1.</p>`}
+        <form method="post" action="${b}/contributors/tiers" class="row">
+          ${csrfField(ctx.csrf)}
+          <select name="role_id" required aria-label="Role"><option value="">Choose a role…</option>${roleOptions}</select>
+          <input type="number" name="min_contributions" min="1" max="100000" required placeholder="Contributions" aria-label="Contributions needed">
+          ${button('+ Add role', { loading: 'Adding…' })}
+        </form>
+        <p class="hint">The bot can only give roles that sit below its own role.</p>
       </div>
 
       <div class="card">
@@ -150,7 +172,7 @@ export function registerContributorRoutes(app: FastifyInstance, web: Web): void 
                   <td>${v.discord_name}<div class="sub">${v.discord_user_id}</div></td>
                   <td>${v.github_login ? html`<a href="https://github.com/${v.github_login}" target="_blank" rel="noopener noreferrer">${v.github_login}</a>` : html`<span class="muted">—</span>`}</td>
                   <td>${v.app_name}</td>
-                  <td>${v.revoked_at ? badge('Revoked', '') : badge(label, tone)}${v.method ? html`<div class="sub">${v.method === 'merged_pr' ? 'merged PR' : 'commit'}</div>` : ''}${v.info ? html`<div class="sub">${v.info}</div>` : ''}</td>
+                  <td>${v.revoked_at ? badge('Revoked', '') : badge(v.result === 'verified' && v.role_name ? v.role_name : label, tone)}${v.contributions !== null ? html`<div class="sub">${String(v.contributions)} contribution${v.contributions === 1 ? '' : 's'}</div>` : ''}${v.info ? html`<div class="sub">${v.info}</div>` : ''}</td>
                   <td>${v.result === 'verified' && !v.revoked_at ? postButton(`${b}/contributors/verifications/${v.id}/revoke`, 'Revoke', ctx.csrf, { variant: 'sm danger', confirm: `Remove the role from ${v.discord_name} and unlink ${v.github_login}?` }) : ''}</td>
                 </tr>`;
               })}</tbody></table></div>`
@@ -163,37 +185,72 @@ export function registerContributorRoutes(app: FastifyInstance, web: Web): void 
     const ctx = await web.requireWorkspace(req, reply);
     if (!ctx) return reply;
     const back = `${ctx.base}/contributors`;
-    const body = req.body as { enabled?: string; role_id?: string; channel_id?: string };
+    const body = req.body as { enabled?: string; channel_id?: string };
     const conn = await getDiscordConnection(deps.db, ctx.workspace.id);
     if (!conn || !deps.discord) {
       setFlash(reply, 'error', 'Connect a Discord server first.');
       return reply.redirect(back);
     }
-    const [roles, guild] = await Promise.all([inspectRoles(deps.discord, conn.guild_id), inspectGuild(deps.discord, conn.guild_id)]);
-    if (!roles.ok || !guild.ok) {
+    const guild = await inspectGuild(deps.discord, conn.guild_id);
+    if (!guild.ok) {
       setFlash(reply, 'error', 'Could not read the server from Discord. Try again in a moment.');
       return reply.redirect(back);
     }
-    // Server-side allowlists: the role and channel must belong to the connected server.
-    const role = roles.roles.find((r) => r.id === body.role_id);
+    // Server-side allowlist: the channel must belong to the connected server.
     const channel = guild.channels.find((c) => c.id === body.channel_id);
-    if (!role || !role.assignable) {
-      setFlash(reply, 'error', role ? `The bot can't assign @${role.name}: ${role.reason}.` : 'Choose one of the listed roles.');
-      return reply.redirect(back);
-    }
     if (!channel || channel.missing.length) {
       setFlash(reply, 'error', channel ? `The bot is missing permissions in #${channel.name}: ${channel.missing.join(', ')}.` : 'Choose one of the listed channels.');
       return reply.redirect(back);
     }
     await saveContributorSettings(deps.db, ctx.workspace.id, {
       enabled: body.enabled !== undefined,
-      role_id: role.id,
-      role_name: role.name,
+      role_id: null,
+      role_name: null,
       channel_id: channel.id,
       channel_name: channel.name,
     });
     setFlash(reply, 'success', 'Contributor settings saved. Update the panel if it is already published.');
     return reply.redirect(back);
+  });
+
+  app.post('/w/:wid/contributors/tiers', async (req, reply) => {
+    const ctx = await web.requireWorkspace(req, reply);
+    if (!ctx) return reply;
+    const back = `${ctx.base}/contributors`;
+    const body = req.body as { role_id?: string; min_contributions?: string };
+    const min = Number(body.min_contributions);
+    const conn = await getDiscordConnection(deps.db, ctx.workspace.id);
+    if (!conn || !deps.discord) {
+      setFlash(reply, 'error', 'Connect a Discord server first.');
+      return reply.redirect(back);
+    }
+    if (!Number.isInteger(min) || min < 1 || min > 100000) {
+      setFlash(reply, 'error', 'Enter the number of contributions needed (1 or more).');
+      return reply.redirect(back);
+    }
+    const roles = await inspectRoles(deps.discord, conn.guild_id);
+    // Server-side allowlist: the role must exist in the connected server and be assignable.
+    const role = roles.ok ? roles.roles.find((r) => r.id === body.role_id) : undefined;
+    if (!role || !role.assignable) {
+      setFlash(reply, 'error', role ? `The bot can't assign @${role.name}: ${role.reason}.` : 'Choose one of the listed roles.');
+      return reply.redirect(back);
+    }
+    try {
+      await addTier(deps.db, ctx.workspace.id, role, min);
+      setFlash(reply, 'success', `Added @${role.name} at ${min}+ contributions. Update the panel if it is already published.`);
+    } catch (err) {
+      if (!(err instanceof UserFacingError)) throw err;
+      setFlash(reply, 'error', err.message);
+    }
+    return reply.redirect(back);
+  });
+
+  app.post('/w/:wid/contributors/tiers/:tid/delete', async (req, reply) => {
+    const ctx = await web.requireWorkspace(req, reply);
+    if (!ctx) return reply;
+    await deleteTier(deps.db, ctx.workspace.id, (req.params as { tid: string }).tid);
+    setFlash(reply, 'success', 'Role removed from the contributor roles. Update the panel if it is already published.');
+    return reply.redirect(`${ctx.base}/contributors`);
   });
 
   app.post('/w/:wid/contributors/apps', async (req, reply) => {

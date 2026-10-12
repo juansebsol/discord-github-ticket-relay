@@ -142,7 +142,7 @@ export function registerGitHubRoutes(app: FastifyInstance, web: Web): void {
       // A Discord member returning from GitHub sign-in on the contributor panel.
       const result = await completeVerification(deps, state, q.error ? undefined : q.code);
       const icon = result.outcome === 'verified' ? '✅' : result.outcome === 'error' ? '⚠️' : 'ℹ️';
-      return reply.type('text/html').send(simplePage('Contributor verification', html`<h1>${icon} ${result.outcome === 'verified' ? 'You are verified' : result.outcome === 'not_contributor' ? 'No contributions found' : result.outcome === 'conflict' ? 'Account already linked' : 'Verification failed'}</h1>
+      return reply.type('text/html').send(simplePage('Contributor verification', html`<h1>${icon} ${result.outcome === 'verified' ? `You are verified${result.roleName ? `: ${result.roleName}` : ''}` : result.outcome === 'not_contributor' ? 'Not enough contributions yet' : result.outcome === 'conflict' ? 'Account already linked' : 'Verification failed'}</h1>
         <p>${raw(escapeHtml(result.explanation).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>'))}</p>
         <p class="muted">You can close this tab and return to Discord.</p>`));
     }

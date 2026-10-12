@@ -111,7 +111,7 @@ stable user ID are recorded in the body.
 | `panels` | Published panel message ID, channel and content hash (detects stale or deleted panels) |
 | `submissions` | Tickets, routing snapshot, queue state, lease, reconcile counters, encrypted payload |
 | `submission_events` | Append-only timeline for investigation |
-| `contributor_settings`, `contributor_panels` | Contributor role, panel channel and published panel per workspace |
+| `contributor_settings`, `contributor_panels`, `contributor_tiers` | On/off, panel channel, published panel, and role tiers (role + minimum contributions) per workspace |
 | `contributor_links`, `contributor_verifications` | One GitHub account ↔ one Discord member per workspace; audit trail of every verification |
 
 Migrations live in [`src/db/migrations`](../src/db/migrations) and are applied inside one write
