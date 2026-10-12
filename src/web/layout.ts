@@ -141,13 +141,14 @@ export function layout(ctx: PageContext, opts: { title: string; active: string; 
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>${opts.title} · Ticket Relay</title>
+  <link rel="icon" type="image/png" href="/static/logo.png">
   <link rel="stylesheet" href="/static/app.css">
   <script src="/static/app.js" defer></script>
 </head>
 <body>
 <div class="shell">
   <aside class="sidebar">
-    <div class="brand"><span class="brand-mark" aria-hidden="true">✉</span> Ticket Relay</div>
+    <div class="brand"><img class="brand-logo" src="/static/logo.png" alt="" width="28" height="28"> Ticket Relay</div>
     ${switcher}
     ${sidebar}
     <div class="sidebar-footer">
@@ -177,12 +178,13 @@ export function simplePage(title: string, body: SafeHtml): string {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>${title} · Ticket Relay</title>
+  <link rel="icon" type="image/png" href="/static/logo.png">
   <link rel="stylesheet" href="/static/app.css">
   <script src="/static/app.js" defer></script>
 </head>
 <body>
   <div class="center-page"><div class="auth-card">
-    <div class="brand"><span class="brand-mark" aria-hidden="true">✉</span> Ticket Relay</div>
+    <div class="brand"><img class="brand-logo" src="/static/logo.png" alt="" width="28" height="28"> Ticket Relay</div>
     <div class="card">${body}</div>
   </div></div>
 </body>

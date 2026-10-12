@@ -83,6 +83,8 @@ p { margin: 0 0 12px; }
   width: 28px; height: 28px; border-radius: 8px; background: var(--accent); color: #fff;
   display: grid; place-items: center; font-size: 15px;
 }
+.brand-logo { width: 28px; height: 28px; border-radius: 7px; display: block; }
+.auth-card .brand-logo { width: 36px; height: 36px; border-radius: 9px; }
 .ws-switch { padding: 0 8px; }
 .ws-switch select { width: 100%; }
 .nav { display: flex; flex-direction: column; gap: 2px; }

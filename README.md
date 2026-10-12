@@ -18,7 +18,7 @@ and filed by a GitHub App. Reporters never need a GitHub account.
 
 ## Features
 
-- **Discord:** pick an app, fill a form, get a private confirmation with the issue link. No GitHub account needed.
+- **Discord-native:** members open tickets from a panel in your server and get a private confirmation with the issue link. No GitHub account needed.
 - **Admin console:** guided setup, map apps to repos and labels, ticket history with retry.
 - **Reliable:** duplicate and rate-limit protection; never files the same issue twice.
 - **Secure:** credentials stay on the server; stored tokens and ticket text are encrypted.
