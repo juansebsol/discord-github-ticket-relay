@@ -7,6 +7,7 @@ import { form, get, makeAdmin, makeApp, makeWorkspace, member, modalSubmit, next
 const JUNIOR_ID = '1559142599141494824';
 const CONTRIB_ID = '700000000000000999';
 const HIGH_ROLE_ID = '700000000000000888';
+const CORE_ID = '1559142504920653834';
 const MANAGE_ROLES = 1n << 28n;
 
 let env: TestEnv;
@@ -26,6 +27,7 @@ beforeEach(async () => {
     { id: JUNIOR_ID, name: 'Junior Contributor', permissions: '0', position: 2 },
     { id: CONTRIB_ID, name: 'Contributor', permissions: '0', position: 3 },
     { id: HIGH_ROLE_ID, name: 'Admins', permissions: '0', position: 9 },
+    { id: CORE_ID, name: 'Core Contributor', permissions: '0', position: 8 },
   );
 });
 afterAll(async () => {
@@ -270,6 +272,34 @@ describe('admin page', () => {
     // Saving channel settings keeps the text.
     await env.server.inject({ method: 'POST', url: `/w/${ws.workspace.id}/contributors/settings`, ...form(ws.owner, { enabled: '1', channel_id: ws.channelId }) });
     expect((await env.db.query('SELECT panel_title FROM contributor_settings')).rows[0].panel_title).toBe('Get your contributor role');
+  });
+
+  it('lists manual roles and tier notes on the panel by default, without the bot granting them', async () => {
+    await enable();
+    const ws1 = ws.workspace.id;
+    await env.db.query('DELETE FROM contributor_tiers WHERE role_id = $1', [CONTRIB_ID]);
+    await env.server.inject({ method: 'POST', url: `/w/${ws1}/contributors/tiers`, ...form(ws.owner, { role_id: CONTRIB_ID, min_contributions: '10', note: 'at least 10 merged pull requests or a big feature' }) });
+    // Manual roles don't need to be assignable by the bot (Core sits above the bot's role).
+    await env.server.inject({ method: 'POST', url: `/w/${ws1}/contributors/manual-roles`, ...form(ws.owner, { role_id: CORE_ID, note: 'given manually to biggest contributors' }) });
+    // A role can't be both a tier and a manual role.
+    await env.server.inject({ method: 'POST', url: `/w/${ws1}/contributors/manual-roles`, ...form(ws.owner, { role_id: JUNIOR_ID, note: '' }) });
+    expect((await env.db.query('SELECT role_id FROM contributor_manual_roles')).rows).toEqual([{ role_id: CORE_ID }]);
+
+    await env.server.inject({ method: 'POST', url: `/w/${ws1}/contributors/publish`, ...form(ws.owner) });
+    const description = env.discord.messages.get((await getContributorPanel(env.db, ws1))!.message_id)!.payload.embeds[0].description;
+    expect(description).toContain([
+      '## Which role will I get?',
+      `- <@&${JUNIOR_ID}> - at least 1 merged pull request`,
+      `- <@&${CONTRIB_ID}> - at least 10 merged pull requests or a big feature`,
+      `- <@&${CORE_ID}> - given manually to biggest contributors`,
+    ].join('\n'));
+
+    const page = await env.server.inject({ method: 'GET', url: `/w/${ws1}/contributors`, ...get(ws.owner) });
+    expect(page.body).toContain('<span class="dp-mention">@Core Contributor</span>');
+
+    contributed(500);
+    await verify();
+    expect(added()).toEqual([CONTRIB_ID]);
   });
 
   it('is isolated per workspace', async () => {

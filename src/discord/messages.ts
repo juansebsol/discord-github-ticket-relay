@@ -313,9 +313,21 @@ export function textEchoMessage(title: string, explanation: string, ticket: { ti
 
 // ---- Contributor roles ---------------------------------------------------------------------
 
-/** Default “Which role will I get?” list: one line per tier, using role mentions. */
-export function defaultContributorRolesText(tiers: { roleId: string; min: number }[]): string {
-  return tiers.map((t) => `- <@&${t.roleId}> - at least ${t.min} merged pull request${t.min === 1 ? '' : 's'}`).join('\n');
+/** One line of the panel's role list. `min` null = given manually, not by the bot. */
+export interface PanelRoleLine {
+  roleId: string;
+  min: number | null;
+  note: string | null;
+}
+
+/** Default “Which role will I get?” list, using role mentions (they never ping). */
+export function defaultContributorRolesText(roles: PanelRoleLine[]): string {
+  return roles
+    .map((r) => {
+      const fallback = r.min === null ? 'given manually' : `at least ${r.min} merged pull request${r.min === 1 ? '' : 's'}`;
+      return `- <@&${r.roleId}> - ${r.note?.trim() || fallback}`;
+    })
+    .join('\n');
 }
 
 export const CONTRIBUTOR_PANEL_DEFAULTS = {
@@ -339,13 +351,13 @@ export interface ContributorPanelText {
   buttonLabel?: string | null;
 }
 
-export function buildContributorPanel(opts: { tiers: { roleId: string; min: number }[]; text?: ContributorPanelText }) {
+export function buildContributorPanel(opts: { roles: PanelRoleLine[]; text?: ContributorPanelText }) {
   const t = opts.text ?? {};
   const pick = (v: string | null | undefined, fallback: string) => v?.trim() || fallback;
   // Role mentions render as role tags in embeds and never ping (allowed_mentions is empty too).
   const sections = [
     pick(t.intro, CONTRIBUTOR_PANEL_DEFAULTS.intro),
-    `## Which role will I get?\n${pick(t.rolesText, defaultContributorRolesText(opts.tiers))}`,
+    `## Which role will I get?\n${pick(t.rolesText, defaultContributorRolesText(opts.roles))}`,
     `## How it works\n${pick(t.steps, CONTRIBUTOR_PANEL_DEFAULTS.steps)}`,
     pick(t.footer, CONTRIBUTOR_PANEL_DEFAULTS.footer),
   ];

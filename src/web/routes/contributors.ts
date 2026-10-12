@@ -1,7 +1,11 @@
 import type { FastifyInstance } from 'fastify';
 import {
+  addManualRole,
   addTier,
   checkContributorPanel,
+  deleteManualRole,
+  listManualRoles,
+  panelRoleLines,
   contributorPanelPayload,
   saveContributorPanelText,
   deleteTier,
@@ -59,9 +63,10 @@ export function registerContributorRoutes(app: FastifyInstance, web: Web): void 
     if (!ctx) return reply;
     const wid = ctx.workspace.id;
     const b = ctx.base;
-    const [settings, tiers, apps, conn, gh, history] = await Promise.all([
+    const [settings, tiers, manualRoles, apps, conn, gh, history] = await Promise.all([
       getContributorSettings(deps.db, wid),
       listTiers(deps.db, wid),
+      listManualRoles(deps.db, wid),
       listApps(deps.db, wid),
       getDiscordConnection(deps.db, wid),
       getGitHubConnection(deps.db, wid),
@@ -113,10 +118,13 @@ export function registerContributorRoutes(app: FastifyInstance, web: Web): void 
     const blocking = checks.some((c) => c.status === 'error');
     const panel = await checkContributorPanel(deps, wid, conn);
 
-    const usedRoles = new Set(tiers.map((t) => t.role_id));
-    const roleNames = new Map<string, string>(roles?.ok ? roles.roles.map((r) => [r.id, r.name]) : tiers.map((t) => [t.role_id, t.role_name]));
-    const preview = contributorPanelPayload(tiers, settings).payload;
-    const defaultRoles = defaultContributorRolesText(tiers.map((t) => ({ roleId: t.role_id, min: t.min_contributions })));
+    const usedRoles = new Set([...tiers.map((t) => t.role_id), ...manualRoles.map((r) => r.role_id)]);
+    const roleNames = new Map<string, string>(roles?.ok ? roles.roles.map((r) => [r.id, r.name]) : [...tiers, ...manualRoles].map((t) => [t.role_id, t.role_name]));
+    const preview = contributorPanelPayload(tiers, settings, manualRoles).payload;
+    const defaultRoles = defaultContributorRolesText(panelRoleLines(tiers, manualRoles));
+    const anyRoleOptions: SafeHtml = roles?.ok
+      ? html`${roles.roles.filter((r) => !usedRoles.has(r.id)).map((r) => html`<option value="${r.id}">@${r.name}</option>`)}`
+      : html``;
     const roleOptions: SafeHtml = roles?.ok
       ? html`${roles.roles.filter((r) => !usedRoles.has(r.id)).map((r) => html`<option value="${r.id}" ${r.assignable ? '' : raw('disabled')}>@${r.name}${r.reason ? ` (${r.reason})` : ''}</option>`)}`
       : html``;
@@ -158,8 +166,9 @@ export function registerContributorRoutes(app: FastifyInstance, web: Web): void 
         <div class="card-head"><h2>Roles</h2></div>
         <p class="small muted">Per repository: merged pull requests or direct commits, whichever is higher, added up across the apps selected under Apps. Members get the highest role they qualify for; moving up replaces the lower role.</p>
         ${tiers.length
-          ? html`<div class="table-wrap"><table><thead><tr><th>Role</th><th>Contributions needed</th><th></th></tr></thead><tbody>
+          ? html`<div class="table-wrap"><table><thead><tr><th>Role</th><th>Contributions needed</th><th>Shown on the panel</th><th></th></tr></thead><tbody>
               ${tiers.map((t) => html`<tr><td>@${t.role_name}</td><td>${String(t.min_contributions)}+</td>
+                <td class="small">${t.note ?? html`<span class="muted">at least ${String(t.min_contributions)} merged pull request${t.min_contributions === 1 ? '' : 's'}</span>`}</td>
                 <td>${postButton(`${b}/contributors/tiers/${t.id}/delete`, 'Remove', ctx.csrf, { variant: 'sm danger', confirm: `Remove @${t.role_name} from the contributor roles? Members keep it until an admin removes it in Discord.` })}</td></tr>`)}
             </tbody></table></div>`
           : html`<p class="muted">No roles yet. Add the first one below, e.g. Junior Contributor at 1.</p>`}
@@ -167,9 +176,26 @@ export function registerContributorRoutes(app: FastifyInstance, web: Web): void 
           ${csrfField(ctx.csrf)}
           <select name="role_id" required aria-label="Role"><option value="">Choose a role…</option>${roleOptions}</select>
           <input type="number" name="min_contributions" min="1" max="100000" required placeholder="Contributions" aria-label="Contributions needed">
+          <input type="text" name="note" maxlength="200" placeholder="Panel text (optional)" aria-label="Text shown on the panel">
           ${button('+ Add role', { loading: 'Adding…' })}
         </form>
-        <p class="hint">The bot can only give roles that sit below its own role.</p>
+        <p class="hint">The bot can only give roles that sit below its own role. Panel text example: “at least 10 merged pull requests or a big feature”.</p>
+
+        <hr class="divider">
+        <h3>Manual roles</h3>
+        <p class="small muted">Listed on the panel so people know they exist, but never given by the bot. Give them by hand in Discord.</p>
+        ${manualRoles.length
+          ? html`<div class="table-wrap"><table><tbody>
+              ${manualRoles.map((r) => html`<tr><td>@${r.role_name}</td><td class="small">${r.note ?? html`<span class="muted">given manually</span>`}</td>
+                <td>${postButton(`${b}/contributors/manual-roles/${r.id}/delete`, 'Remove', ctx.csrf, { variant: 'sm danger' })}</td></tr>`)}
+            </tbody></table></div>`
+          : ''}
+        <form method="post" action="${b}/contributors/manual-roles" class="row">
+          ${csrfField(ctx.csrf)}
+          <select name="role_id" required aria-label="Manual role"><option value="">Choose a role…</option>${anyRoleOptions}</select>
+          <input type="text" name="note" maxlength="200" placeholder="given manually to biggest contributors" aria-label="Text shown on the panel">
+          ${button('+ Add manual role', { loading: 'Adding…' })}
+        </form>
       </div>
 
       <div class="grid grid-2">
@@ -283,7 +309,7 @@ export function registerContributorRoutes(app: FastifyInstance, web: Web): void 
     const ctx = await web.requireWorkspace(req, reply);
     if (!ctx) return reply;
     const back = `${ctx.base}/contributors`;
-    const body = req.body as { role_id?: string; min_contributions?: string };
+    const body = req.body as { role_id?: string; min_contributions?: string; note?: string };
     const min = Number(body.min_contributions);
     const conn = await getDiscordConnection(deps.db, ctx.workspace.id);
     if (!conn || !deps.discord) {
@@ -302,13 +328,44 @@ export function registerContributorRoutes(app: FastifyInstance, web: Web): void 
       return reply.redirect(back);
     }
     try {
-      await addTier(deps.db, ctx.workspace.id, role, min);
+      await addTier(deps.db, ctx.workspace.id, role, min, (body.note ?? '').trim().slice(0, 200) || null);
       setFlash(reply, 'success', `Added @${role.name} at ${min}+ contributions. Update the panel if it is already published.`);
     } catch (err) {
       if (!(err instanceof UserFacingError)) throw err;
       setFlash(reply, 'error', err.message);
     }
     return reply.redirect(back);
+  });
+
+  app.post('/w/:wid/contributors/manual-roles', async (req, reply) => {
+    const ctx = await web.requireWorkspace(req, reply);
+    if (!ctx) return reply;
+    const back = `${ctx.base}/contributors`;
+    const body = req.body as { role_id?: string; note?: string };
+    const conn = await getDiscordConnection(deps.db, ctx.workspace.id);
+    const roles = conn && deps.discord ? await inspectRoles(deps.discord, conn.guild_id) : null;
+    // Server-side allowlist: the role must exist in the connected server.
+    const role = roles?.ok ? roles.roles.find((r) => r.id === body.role_id) : undefined;
+    if (!role) {
+      setFlash(reply, 'error', 'Choose one of the listed roles.');
+      return reply.redirect(back);
+    }
+    try {
+      await addManualRole(deps.db, ctx.workspace.id, role, (body.note ?? '').trim().slice(0, 200) || null);
+      setFlash(reply, 'success', `Added @${role.name} to the panel as a manual role. Update the panel to show it in Discord.`);
+    } catch (err) {
+      if (!(err instanceof UserFacingError)) throw err;
+      setFlash(reply, 'error', err.message);
+    }
+    return reply.redirect(back);
+  });
+
+  app.post('/w/:wid/contributors/manual-roles/:mid/delete', async (req, reply) => {
+    const ctx = await web.requireWorkspace(req, reply);
+    if (!ctx) return reply;
+    await deleteManualRole(deps.db, ctx.workspace.id, (req.params as { mid: string }).mid);
+    setFlash(reply, 'success', 'Manual role removed from the panel. Update the panel to show the change in Discord.');
+    return reply.redirect(`${ctx.base}/contributors`);
   });
 
   app.post('/w/:wid/contributors/tiers/:tid/delete', async (req, reply) => {

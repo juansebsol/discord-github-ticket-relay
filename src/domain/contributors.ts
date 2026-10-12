@@ -88,25 +88,63 @@ export interface ContributorTier {
   role_id: string;
   role_name: string;
   min_contributions: number;
+  /** Optional panel text for this role; default "at least N merged pull requests". */
+  note: string | null;
+}
+
+/** A role only listed on the panel; admins give it by hand, the bot never does. */
+export interface ManualRole {
+  id: string;
+  role_id: string;
+  role_name: string;
+  note: string | null;
 }
 
 /** Tiers sorted by the contributions they require (lowest first). */
 export async function listTiers(q: Queryable, workspaceId: string): Promise<ContributorTier[]> {
   const { rows } = await q.query<ContributorTier>(
-    'SELECT id, role_id, role_name, min_contributions FROM contributor_tiers WHERE workspace_id = $1 ORDER BY min_contributions',
+    'SELECT id, role_id, role_name, min_contributions, note FROM contributor_tiers WHERE workspace_id = $1 ORDER BY min_contributions',
     [workspaceId],
   );
   return rows;
 }
 
-export async function addTier(q: Queryable, workspaceId: string, role: { id: string; name: string }, minContributions: number): Promise<void> {
+export async function addTier(
+  q: Queryable,
+  workspaceId: string,
+  role: { id: string; name: string },
+  minContributions: number,
+  note: string | null = null,
+): Promise<void> {
   const tiers = await listTiers(q, workspaceId);
   if (tiers.some((t) => t.role_id === role.id)) throw new UserFacingError(`@${role.name} is already a tier.`);
+  if ((await listManualRoles(q, workspaceId)).some((r) => r.role_id === role.id)) throw new UserFacingError(`@${role.name} is listed as a manual role. Remove it there first.`);
   if (tiers.some((t) => t.min_contributions === minContributions)) throw new UserFacingError(`Another tier already needs ${minContributions} contribution${minContributions === 1 ? '' : 's'}.`);
   await q.query(
-    'INSERT INTO contributor_tiers (id, workspace_id, role_id, role_name, min_contributions) VALUES ($1, $2, $3, $4, $5)',
-    [randomUUID(), workspaceId, role.id, role.name, minContributions],
+    'INSERT INTO contributor_tiers (id, workspace_id, role_id, role_name, min_contributions, note) VALUES ($1, $2, $3, $4, $5, $6)',
+    [randomUUID(), workspaceId, role.id, role.name, minContributions, note],
   );
+}
+
+export async function listManualRoles(q: Queryable, workspaceId: string): Promise<ManualRole[]> {
+  const { rows } = await q.query<ManualRole>(
+    'SELECT id, role_id, role_name, note FROM contributor_manual_roles WHERE workspace_id = $1 ORDER BY created_at',
+    [workspaceId],
+  );
+  return rows;
+}
+
+export async function addManualRole(q: Queryable, workspaceId: string, role: { id: string; name: string }, note: string | null): Promise<void> {
+  if ((await listTiers(q, workspaceId)).some((t) => t.role_id === role.id)) throw new UserFacingError(`@${role.name} is already given automatically as a tier.`);
+  if ((await listManualRoles(q, workspaceId)).some((r) => r.role_id === role.id)) throw new UserFacingError(`@${role.name} is already listed.`);
+  await q.query(
+    'INSERT INTO contributor_manual_roles (id, workspace_id, role_id, role_name, note) VALUES ($1, $2, $3, $4, $5)',
+    [randomUUID(), workspaceId, role.id, role.name, note],
+  );
+}
+
+export async function deleteManualRole(q: Queryable, workspaceId: string, id: string): Promise<void> {
+  await q.query('DELETE FROM contributor_manual_roles WHERE workspace_id = $1 AND id = $2', [workspaceId, id]);
 }
 
 export async function deleteTier(q: Queryable, workspaceId: string, tierId: string): Promise<void> {
@@ -179,9 +217,17 @@ export async function getContributorPanel(q: Queryable, workspaceId: string): Pr
   return rows[0] ?? null;
 }
 
-export function contributorPanelPayload(tiers: ContributorTier[], settings: ContributorPanelTextFields) {
+/** Lines for the panel's role list: automatic tiers first, then manually given roles. */
+export function panelRoleLines(tiers: ContributorTier[], manual: ManualRole[]): m.PanelRoleLine[] {
+  return [
+    ...tiers.map((t) => ({ roleId: t.role_id, min: t.min_contributions, note: t.note })),
+    ...manual.map((r) => ({ roleId: r.role_id, min: null, note: r.note })),
+  ];
+}
+
+export function contributorPanelPayload(tiers: ContributorTier[], settings: ContributorPanelTextFields, manual: ManualRole[] = []) {
   const payload = m.buildContributorPanel({
-    tiers: tiers.map((t) => ({ roleId: t.role_id, min: t.min_contributions })),
+    roles: panelRoleLines(tiers, manual),
     text: {
       title: settings.panel_title,
       intro: settings.panel_intro,
@@ -214,7 +260,7 @@ export async function publishContributorPanel(deps: Deps, workspaceId: string, u
   if (!tiers.length) throw new UserFacingError('Add at least one contributor role tier first.');
   const apps = await listApps(deps.db, workspaceId);
   if (!contributorApps(apps).length) throw new UserFacingError('Turn on contributor verification for at least one app first.');
-  const { payload, hash } = contributorPanelPayload(tiers, settings);
+  const { payload, hash } = contributorPanelPayload(tiers, settings, await listManualRoles(deps.db, workspaceId));
   const existing = await getContributorPanel(deps.db, workspaceId);
 
   if (existing && existing.channel_id === settings.channel_id) {
@@ -270,7 +316,7 @@ export async function checkContributorPanel(deps: Deps, workspaceId: string, con
     }
   }
   const settings = await getContributorSettings(deps.db, workspaceId);
-  const { hash } = contributorPanelPayload(await listTiers(deps.db, workspaceId), settings);
+  const { hash } = contributorPanelPayload(await listTiers(deps.db, workspaceId), settings, await listManualRoles(deps.db, workspaceId));
   return {
     state: 'published',
     outdated: hash !== panel.content_hash,
