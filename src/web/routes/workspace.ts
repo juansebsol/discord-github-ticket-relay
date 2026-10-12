@@ -12,6 +12,7 @@ import {
   updateWorkspaceSettings,
 } from '../../domain/workspaces.js';
 import { DEFAULT_PANEL_INTRO, DEFAULT_PANEL_TITLE } from '../../discord/messages.js';
+import { checkDiscordCredentials, checkGitHubCredentials, type CredentialCheck } from '../../domain/credentials.js';
 import { html, type SafeHtml } from '../../lib/html.js';
 import { alert, badge, button, csrfField, discordAvatar, formatDate, pageHead, postButton, statusBadge, timeAgo } from '../layout.js';
 import { setFlash } from '../session.js';
@@ -224,11 +225,20 @@ export function registerWorkspaceRoutes(app: FastifyInstance, web: Web): void {
     if (!ctx) return reply;
     const c = deps.config;
     const url = (id: string, value: string) => html`<div class="copy-field"><input id="${id}" type="text" readonly value="${value}"><button type="button" class="btn" data-copy="${id}">Copy</button></div>`;
-    const status = (missing: string[]) => (missing.length ? html`${badge('Incomplete', 'danger')} <span class="small muted">Missing: ${missing.join(', ')}</span>` : badge('Configured', 'ok'));
+    const [discordCheck, githubCheck] = await Promise.all([checkDiscordCredentials(deps), checkGitHubCredentials(deps)]);
+    const status = (missing: string[], check: CredentialCheck) =>
+      missing.length
+        ? html`${badge('Incomplete', 'danger')} <span class="small muted">Missing: ${missing.join(', ')}</span>`
+        : check.ok
+          ? badge('Working', 'ok')
+          : badge('Credentials rejected', 'danger');
+    const checkLine = (check: CredentialCheck, missing: string[]) =>
+      missing.length ? '' : alert(check.ok ? 'success' : 'error', check.detail);
     const body = html`
       ${pageHead('Deployment setup', 'One-time provider registration that has to happen on GitHub and Discord themselves. Whoever operates this deployment does this once; day-to-day setup happens in the other pages.')}
       <div class="card">
-        <div class="card-head"><h2>Discord application</h2>${status(c.missing.discord)}</div>
+        <div class="card-head"><h2>Discord application</h2>${status(c.missing.discord, discordCheck)}</div>
+        ${checkLine(discordCheck, c.missing.discord)}
         <p class="muted small">In the Discord Developer Portal (Applications → your app):</p>
         <ol class="small">
           <li>General Information → <strong>Interactions Endpoint URL</strong>:</li>
@@ -240,7 +250,8 @@ export function registerWorkspaceRoutes(app: FastifyInstance, web: Web): void {
         <li>Server variables: <code>DISCORD_APPLICATION_ID</code>, <code>DISCORD_PUBLIC_KEY</code>, <code>DISCORD_CLIENT_SECRET</code>, <code>DISCORD_BOT_TOKEN</code>.</li></ol>
       </div>
       <div class="card">
-        <div class="card-head"><h2>GitHub App</h2>${status(c.missing.github)}</div>
+        <div class="card-head"><h2>GitHub App</h2>${status(c.missing.github, githubCheck)}</div>
+        ${checkLine(githubCheck, c.missing.github)}
         <p class="muted small">In GitHub → Settings → Developer settings → GitHub Apps → New GitHub App:</p>
         <ol class="small"><li><strong>Callback URL</strong> (must be the first callback URL), with “Request user authorization (OAuth) during installation” turned on:</li></ol>
         ${url('github-callback', web.publicUrl('/oauth/github/callback'))}

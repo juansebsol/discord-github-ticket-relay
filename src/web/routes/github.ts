@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { GitHubApiError, type InstallationInfo } from '../../github/client.js';
+import { checkGitHubCredentials, explainGitHubAppError } from '../../domain/credentials.js';
 import { consumeState, createState } from '../../domain/oauth-state.js';
 import { clearRepoCache, getInstallationRepos } from '../../domain/repos.js';
 import { deleteGitHubConnection, getGitHubConnection, listApps, saveGitHubConnection } from '../../domain/store.js';
@@ -45,6 +46,8 @@ export function registerGitHubRoutes(app: FastifyInstance, web: Web): void {
       }
     }
 
+    const credentials = deps.github && (!conn || conn.status !== 'active') ? await checkGitHubCredentials(deps) : null;
+
     const connectButtons = html`<div class="row">
       ${postButton(`${b}/setup/github/install`, conn ? 'Reinstall or change account' : 'Install the GitHub App', ctx.csrf, { variant: conn ? '' : 'github primary', disabled: !deps.github })}
       ${postButton(`${b}/setup/github/link`, 'Link an existing installation', ctx.csrf, { disabled: !deps.github })}
@@ -53,6 +56,7 @@ export function registerGitHubRoutes(app: FastifyInstance, web: Web): void {
     const body = html`
       ${pageHead('Step 1 · Connect GitHub', 'Tickets become issues in your GitHub repositories. Install the Ticket Relay GitHub App on the account or organization that owns them.')}
       ${!deps.github ? alert('warn', html`<p><strong>The GitHub App has not been registered for this deployment yet.</strong> Whoever runs the server needs to complete the <a href="${b}/provider-setup">deployment setup</a> first.</p>`) : ''}
+      ${credentials && !credentials.ok ? alert('error', html`<p><strong>The server's GitHub App credentials don't work.</strong> ${credentials.detail}</p><p class="small">Fix <code>.env</code> or <code>secrets/sec.pem</code> on the server, then run <code>pm2 restart all --update-env</code>.</p>`) : ''}
       ${conn
         ? html`<div class="card">
             <div class="card-head"><h2>Connection</h2>${badge(conn.status === 'active' ? 'Connected' : conn.status === 'suspended' ? 'Suspended' : conn.status === 'removed' ? 'App uninstalled' : 'Problem', conn.status === 'active' ? 'ok' : 'danger')}</div>
@@ -111,7 +115,14 @@ export function registerGitHubRoutes(app: FastifyInstance, web: Web): void {
   });
 
   async function connectInstallation(reply: FastifyReply, workspaceId: string, userId: string, installationId: number) {
-    const inst = await deps.github!.getInstallation(installationId);
+    let inst: InstallationInfo;
+    try {
+      inst = await deps.github!.getInstallation(installationId);
+    } catch (err) {
+      deps.log.warn({ installationId, status: (err as GitHubApiError).status, err: (err as Error).message }, 'could not load github installation');
+      setFlash(reply, 'error', `The app was installed on GitHub, but this server could not connect to it. ${explainGitHubAppError(err)}`);
+      return reply.redirect(`/w/${workspaceId}/setup/github`);
+    }
     await saveGitHubConnection(deps.db, workspaceId, { ...inst, installationId: inst.id }, userId);
     clearRepoCache(installationId);
     setFlash(reply, 'success', `Connected to GitHub as ${inst.accountLogin}.${inst.suspended ? ' The installation is suspended; unsuspend it on GitHub.' : ''}`);

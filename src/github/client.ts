@@ -174,6 +174,12 @@ export class GitHubClient {
     return `token ${await this.installationToken(installationId)}`;
   }
 
+  /** The GitHub App these credentials belong to (verifies app ID, client ID and private key). */
+  async getApp(): Promise<{ slug: string; name: string; owner: string }> {
+    const { data } = await this.request('GET', '/app', `Bearer ${this.appJwt()}`);
+    return { slug: data.slug, name: data.name, owner: data.owner?.login ?? '' };
+  }
+
   async getInstallation(installationId: number): Promise<InstallationInfo> {
     const { data } = await this.request('GET', `/app/installations/${installationId}`, `Bearer ${this.appJwt()}`);
     return {

@@ -56,6 +56,9 @@ export class FakeGitHub {
   invalidToken: string | null = null;
   /** Artificial latency for create-issue calls (to make workers overlap in tests). */
   createDelayMs = 0;
+  /** Simulates a wrong/rotated private key: every app-JWT call is rejected. */
+  rejectAppJwt = false;
+  appSlug = 'ticket-relay';
 
   addInstallation(id: number, login: string, repos: Partial<FakeRepo>[], type = 'Organization') {
     const ids: number[] = [];
@@ -115,6 +118,8 @@ export class FakeGitHub {
         installations: this.userInstallationIds.map((id) => ({ id, account: this.installations.get(id)?.account, repository_selection: 'selected' })),
       });
     }
+    if (path.startsWith('/app') && this.rejectAppJwt) return json(401, { message: 'A JSON web token could not be decoded' });
+    if (path === '/app') return json(200, { slug: this.appSlug, name: 'Ticket Relay', owner: { login: 'owner' } });
     if ((m = /^\/app\/installations\/(\d+)\/access_tokens$/.exec(path)) && method === 'POST') {
       this.tokenCalls++;
       const failure = this.tokenFailures.shift();

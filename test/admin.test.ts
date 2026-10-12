@@ -318,3 +318,38 @@ describe('missing deployment configuration', () => {
     expect(interactions.statusCode).toBe(503);
   });
 });
+
+describe('GitHub App credential problems', () => {
+  async function installFlow(env: TestEnv) {
+    const owner = await makeAdmin(env);
+    const ws = await createWorkspace(env.db, { ...env.deps.config, openWorkspaceCreation: true }, owner.user, 'WS');
+    env.github.addInstallation(111, 'mine', [{ id: 1, name: 'a' }]);
+    env.github.userInstallationIds = [111];
+    const sid = (await env.db.query('SELECT id FROM sessions WHERE user_id = $1', [owner.user.id])).rows[0].id;
+    const state = await createState(env.db, 'github_install', sid, ws.id, { mode: 'install' });
+    const res = await env.server.inject({ method: 'GET', url: `/oauth/github/callback?code=good-code&installation_id=111&setup_action=install&state=${state}`, ...get(owner) });
+    return { owner, ws, res };
+  }
+
+  it('explains rejected app credentials after install instead of failing with a 500', async () => {
+    env.github.rejectAppJwt = true;
+    const { owner, ws, res } = await installFlow(env);
+    expect(res.statusCode).toBe(302);
+    expect(res.headers.location).toBe(`/w/${ws.id}/setup/github`);
+    const flash = Buffer.from(res.cookies.find((c) => c.name === 'tr_flash')!.value, 'base64url').toString();
+    expect(flash).toMatch(/secrets\/sec\.pem/);
+    expect(await getGitHubConnection(env.db, ws.id)).toBeNull();
+    const page = await env.server.inject({ method: 'GET', url: `/w/${ws.id}/setup/github`, ...get(owner) });
+    expect(page.body).toContain("GitHub App credentials don't work");
+  });
+
+  it('verifies credentials and catches a wrong slug on the deployment page', async () => {
+    const ws = await makeWorkspace(env);
+    const ok = await env.server.inject({ method: 'GET', url: `/w/${ws.workspace.id}/provider-setup`, ...get(ws.owner) });
+    expect(ok.body).toContain('Credentials work for the GitHub App');
+    expect(ok.body).toContain('Bot token works');
+    env.github.appSlug = 'ticket-craft';
+    const wrong = await env.server.inject({ method: 'GET', url: `/w/${ws.workspace.id}/provider-setup`, ...get(ws.owner) });
+    expect(wrong.body).toContain('Set GITHUB_APP_SLUG=ticket-craft');
+  });
+});
