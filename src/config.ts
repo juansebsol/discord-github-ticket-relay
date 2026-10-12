@@ -1,3 +1,4 @@
+import { createPrivateKey } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -58,18 +59,43 @@ export interface Config {
 
 export class ConfigError extends Error {}
 
-function readPrivateKey(env: NodeJS.ProcessEnv): string | undefined {
-  if (env.GITHUB_APP_PRIVATE_KEY_FILE) {
-    const file = fromRoot(env.GITHUB_APP_PRIVATE_KEY_FILE);
-    if (!existsSync(file)) throw new ConfigError(`GITHUB_APP_PRIVATE_KEY_FILE not found: ${file}`);
-    return readFileSync(file, 'utf8');
+type KeyResult = { key: string } | { error: string } | null;
+
+function readKeyFile(p: string, variable: string): KeyResult {
+  const file = fromRoot(p);
+  if (!existsSync(file)) return { error: `${variable}: file not found (${file})` };
+  try {
+    return { key: readFileSync(file, 'utf8') };
+  } catch (err) {
+    const code = (err as { code?: string }).code;
+    return { error: `${variable}: cannot read ${file}${code === 'EACCES' ? ' (permission denied: make it owned by the user running the app)' : ''}` };
   }
-  const raw = env.GITHUB_APP_PRIVATE_KEY;
-  if (!raw) return undefined;
-  if (raw.includes('BEGIN')) return raw.replace(/\\n/g, '\n');
-  // Allow a base64-encoded PEM so the key fits in single-line secret stores.
-  const decoded = Buffer.from(raw, 'base64').toString('utf8');
-  return decoded.includes('BEGIN') ? decoded : raw;
+}
+
+/**
+ * Loads the GitHub App private key from GITHUB_APP_PRIVATE_KEY_FILE, or from
+ * GITHUB_APP_PRIVATE_KEY (PEM, \\n-escaped PEM, base64 PEM, or a file path), and checks it parses.
+ */
+function readPrivateKey(env: NodeJS.ProcessEnv): KeyResult {
+  let result: KeyResult = null;
+  const raw = env.GITHUB_APP_PRIVATE_KEY?.trim();
+  if (env.GITHUB_APP_PRIVATE_KEY_FILE) result = readKeyFile(env.GITHUB_APP_PRIVATE_KEY_FILE, 'GITHUB_APP_PRIVATE_KEY_FILE');
+  else if (!raw) return null;
+  else if (raw.includes('BEGIN')) result = { key: raw.replace(/\\n/g, '\n') };
+  else if (/\.pem$/i.test(raw) || raw.startsWith('/') || raw.startsWith('./')) result = readKeyFile(raw, 'GITHUB_APP_PRIVATE_KEY');
+  else {
+    // A base64-encoded PEM fits in single-line secret stores.
+    const decoded = Buffer.from(raw, 'base64').toString('utf8');
+    result = { key: decoded };
+  }
+  if ('key' in result!) {
+    try {
+      createPrivateKey(result.key);
+    } catch {
+      return { error: 'GITHUB_APP_PRIVATE_KEY: not a valid private key (expected the .pem file downloaded from the GitHub App page)' };
+    }
+  }
+  return result;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -102,15 +128,18 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
         clientSecret: discordVars.DISCORD_CLIENT_SECRET!,
       };
 
-  const privateKey = readPrivateKey(env);
+  const keyResult = readPrivateKey(env);
+  const privateKey = keyResult && 'key' in keyResult ? keyResult.key : undefined;
   const githubVars = {
     GITHUB_APP_ID: env.GITHUB_APP_ID,
     GITHUB_APP_SLUG: env.GITHUB_APP_SLUG,
-    GITHUB_APP_PRIVATE_KEY: privateKey,
+    GITHUB_APP_PRIVATE_KEY_FILE: privateKey,
     GITHUB_CLIENT_ID: env.GITHUB_CLIENT_ID,
     GITHUB_CLIENT_SECRET: env.GITHUB_CLIENT_SECRET,
   };
-  const missingGithub = Object.entries(githubVars).filter(([, v]) => !v).map(([k]) => k);
+  const missingGithub = Object.entries(githubVars)
+    .filter(([, v]) => !v)
+    .map(([k]) => (k === 'GITHUB_APP_PRIVATE_KEY_FILE' && keyResult && 'error' in keyResult ? keyResult.error : k));
   const github: GitHubAppConfig | null = missingGithub.length
     ? null
     : {

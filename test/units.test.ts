@@ -10,6 +10,9 @@ import { modalValues } from '../src/discord/interactions.js';
 import { classifyError } from '../src/domain/processor.js';
 import { GitHubApiError } from '../src/github/client.js';
 import { NetworkError } from '../src/lib/http.js';
+import { writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { loadConfig } from '../src/config.js';
 
 describe('SecretBox', () => {
@@ -192,11 +195,25 @@ describe('deployment config', () => {
     const c = loadConfig(base);
     expect(c.discord).toBeNull();
     expect(c.missing.discord).toContain('DISCORD_BOT_TOKEN');
-    expect(c.missing.github).toContain('GITHUB_APP_PRIVATE_KEY');
+    expect(c.missing.github).toContain('GITHUB_APP_PRIVATE_KEY_FILE');
   });
   it('requires a 32-byte encryption key and never enables dev login in production', () => {
     expect(() => loadConfig({ ...base, ENCRYPTION_KEY: 'short' })).toThrow(/32 bytes/);
     expect(loadConfig({ ...base, NODE_ENV: 'production', DEV_LOGIN: 'true' }).devLogin).toBe(false);
     expect(loadConfig({ ...base, DEV_LOGIN: 'true', PUBLIC_URL: 'https://relay.example.com' }).devLogin).toBe(false);
+  });
+
+  it('loads the GitHub private key from a file path in either variable and reports bad keys clearly', () => {
+    const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+    const file = path.join(tmpdir(), 'ticket-relay-test-key.pem');
+    writeFileSync(file, privateKey.export({ type: 'pkcs1', format: 'pem' }));
+    const gh = { ...base, GITHUB_APP_ID: '1', GITHUB_APP_SLUG: 's', GITHUB_CLIENT_ID: 'Iv1', GITHUB_CLIENT_SECRET: 'x' };
+    expect(loadConfig({ ...gh, GITHUB_APP_PRIVATE_KEY_FILE: file }).github).not.toBeNull();
+    expect(loadConfig({ ...gh, GITHUB_APP_PRIVATE_KEY: file }).github).not.toBeNull(); // common mix-up
+    const missing = loadConfig({ ...gh, GITHUB_APP_PRIVATE_KEY_FILE: '/nope/sec.pem' });
+    expect(missing.github).toBeNull();
+    expect(missing.missing.github.join()).toMatch(/file not found/);
+    const garbage = loadConfig({ ...gh, GITHUB_APP_PRIVATE_KEY: 'not-a-key' });
+    expect(garbage.missing.github.join()).toMatch(/not a valid private key/);
   });
 });
