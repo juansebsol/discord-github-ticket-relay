@@ -1,11 +1,20 @@
-# Ticket Relay
+<p align="center">
+  <img src="docs/images/logo.png" alt="Ticket Relay logo" width="112" height="112">
+</p>
 
-Discord support tickets, filed as GitHub issues.
+<h1 align="center">Ticket Relay</h1>
+
+<p align="center">
+  Discord support tickets, filed as GitHub issues.<br>
+  <code>Node.js 24</code> · <code>TypeScript</code> · <code>Fastify</code> · <code>SQLite</code> · <code>Discord Interactions</code> · <code>GitHub Apps</code>
+</p>
 
 Members submit tickets from a panel in Discord. Each ticket is routed to the right repository
 and filed by a GitHub App. Reporters never need a GitHub account.
 
-`Node.js 24` · `TypeScript` · `Fastify` · `SQLite` · `Discord Interactions` · `GitHub Apps`
+<p align="center">
+  <img src="docs/images/discord-panel.png" alt="Ticket panel in Discord with an app picker" width="620">
+</p>
 
 ## Features
 
@@ -27,6 +36,16 @@ and filed by a GitHub App. Reporters never need a GitHub account.
 - SQLite-backed job queue with multiple worker processes; safe across restarts and crashes
 - Never files an issue twice: unknown outcomes are reconciled, not retried
 - Credentials stay server-side; stored tokens and ticket text are encrypted
+
+## Screenshots
+
+**Overview:** connection status, ticket counts and recent submissions.
+
+![Admin console overview](docs/images/admin-overview.png)
+
+**Validate & publish:** live checks, previews of the Discord panel and form, and a test ticket.
+
+![Validate and publish page](docs/images/admin-publish.png)
 
 ## Quick start
 
