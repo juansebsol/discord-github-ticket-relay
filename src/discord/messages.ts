@@ -28,6 +28,8 @@ export const CustomId = {
   titleInput: 'title',
   descriptionInput: 'description',
   // Contributor panel (separate prefix so it never collides with the ticket flow).
+  contributorVerify: 'cv:verify',
+  // Legacy app-picker panel (still accepted until the panel is updated).
   contributorSelect: 'cv:pick',
   contributorPickerSelect: 'cv:pickp',
   contributorPage: (page: number) => `cv:page:${page}`,
@@ -311,20 +313,17 @@ export function textEchoMessage(title: string, explanation: string, ticket: { ti
 
 // ---- Contributor roles ---------------------------------------------------------------------
 
-export function buildContributorPanel(opts: { tiers: { name: string; min: number }[]; apps: PanelApp[] }) {
-  const overflow = opts.apps.length > SELECT_MAX;
-  const options = (overflow ? opts.apps.slice(0, SELECT_MAX - 1) : opts.apps).map(appOption);
-  if (overflow) options.push({ label: 'More apps…', value: MORE_APPS_VALUE, description: `Browse all ${opts.apps.length} apps` });
+export function buildContributorPanel(opts: { tiers: { name: string; min: number }[] }) {
   const description = [
     'Contributed to one of our apps on GitHub? Get a contributor role.',
     '',
     '**Roles**',
-    ...opts.tiers.map((t) => `• **${escapeMarkdown(t.name)}**: ${t.min}+ merged pull request${t.min === 1 ? '' : 's'} or commits`),
+    ...opts.tiers.map((t) => `• **${escapeMarkdown(t.name)}**: ${t.min}+ contribution${t.min === 1 ? '' : 's'}`),
     '',
     '**How it works**',
-    '1. Choose the app you contributed to.',
-    '2. Sign in with GitHub to confirm which account is yours.',
-    '3. We count your contributions to its repository and add the highest role you qualify for. Verify again later to move up.',
+    '1. Click **Verify with GitHub** and sign in to confirm which account is yours.',
+    '2. We add up your merged pull requests (or commits) across all our apps.',
+    '3. You get the highest role you qualify for. Verify again later to move up.',
     '',
     'We only use the sign-in to confirm your GitHub username. Nothing is posted on your behalf.',
   ].join('\n');
@@ -334,20 +333,18 @@ export function buildContributorPanel(opts: { tiers: { name: string; min: number
     components: [
       {
         type: ComponentType.ActionRow,
-        components: [
-          { type: ComponentType.StringSelect, custom_id: CustomId.contributorSelect, placeholder: 'Choose the app you contributed to…', min_values: 1, max_values: 1, options },
-        ],
+        components: [{ type: ComponentType.Button, style: 3, label: 'Verify with GitHub', custom_id: CustomId.contributorVerify }],
       },
     ],
     allowed_mentions: NO_MENTIONS,
   };
 }
 
-export function contributorVerifyPrompt(s: { appName: string; tiers: string[]; url: string }) {
+export function contributorVerifyPrompt(s: { tiers: string[]; url: string }) {
   return reply(
     {
       title: 'Confirm your GitHub account',
-      description: `Sign in with GitHub to count your contributions to **${escapeMarkdown(s.appName)}**. Roles: ${s.tiers.map(escapeMarkdown).join(', ')}.\n\nThis link is just for you and expires in 10 minutes.`,
+      description: `Sign in with GitHub and we'll add up your contributions across all our apps. Roles: ${s.tiers.map(escapeMarkdown).join(', ')}.\n\nThis link is just for you and expires in 10 minutes.`,
       color: COLORS.brand,
     },
     [{ type: ComponentType.ActionRow, components: [{ type: ComponentType.Button, style: 5, label: 'Verify with GitHub', url: s.url }] }],
@@ -368,10 +365,7 @@ export function contributorResultMessage(s: { outcome: ContributorOutcome; appNa
       title: titles[s.outcome],
       description: truncate(s.explanation, 4096),
       color: s.outcome === 'verified' ? COLORS.success : s.outcome === 'error' ? COLORS.danger : COLORS.warning,
-      fields: [
-        { name: 'App', value: escapeMarkdown(s.appName), inline: true },
-        ...(s.login ? [{ name: 'GitHub', value: escapeMarkdown(s.login), inline: true }] : []),
-      ],
+      fields: s.login ? [{ name: 'GitHub', value: escapeMarkdown(s.login), inline: true }] : [],
     },
   );
 }

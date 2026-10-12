@@ -15,7 +15,8 @@ let ws: ConfiguredWorkspace;
 beforeEach(async () => {
   await resetDb();
   env = await makeApp();
-  ws = await makeWorkspace(env, { apps: [{ name: 'Mobile App' }, { name: 'Website', repoIndex: 1 }] });
+  // Two apps share the mobile repo; the website has its own.
+  ws = await makeWorkspace(env, { apps: [{ name: 'Mobile App' }, { name: 'Website', repoIndex: 1 }, { name: 'Mobile Beta' }] });
   // Bot role (position 5) with Manage Roles; two tier roles below it and an Admins role above it.
   const guild = env.discord.guilds.get(ws.guildId)!;
   const botRole = guild.roles.find((r) => r.id === guild.botRoles[0])!;
@@ -37,18 +38,21 @@ async function enable() {
   await saveContributorSettings(env.db, ws.workspace.id, { enabled: true, role_id: null, role_name: null, channel_id: ws.channelId, channel_name: 'tickets' });
   await addTier(env.db, ws.workspace.id, { id: JUNIOR_ID, name: 'Junior Contributor' }, 1);
   await addTier(env.db, ws.workspace.id, { id: CONTRIB_ID, name: 'Contributor' }, 10);
-  await setContributorApps(env.db, ws.workspace.id, [ws.apps[0]!.id]);
+  await setContributorApps(env.db, ws.workspace.id, ws.apps.map((a) => a.id));
 }
 
-function contributed(prs: number, commits = 0) {
+/** Contributions in the mobile repo (index 0) and optionally the website repo (index 1). */
+function contributed(prs: number, commits = 0, website: { prs?: number; commits?: number } = {}) {
   env.github.mergedPrs.set(ws.repoIds[0]!, new Map([[LOGIN, prs]]));
   env.github.commits.set(ws.repoIds[0]!, new Map([[LOGIN, commits]]));
+  env.github.mergedPrs.set(ws.repoIds[1]!, new Map([[LOGIN, website.prs ?? 0]]));
+  env.github.commits.set(ws.repoIds[1]!, new Map([[LOGIN, website.commits ?? 0]]));
 }
 
-async function pick(who = member('555000000000000001', 'Casey'), appPublicId = ws.apps[0]!.public_id) {
+async function pick(who = member('555000000000000001', 'Casey'), customId = 'cv:verify') {
   return sendInteraction(env, {
     id: nextInteractionId(), type: 3, token: `vtok-${who.user.id}`, guild_id: ws.guildId, channel_id: ws.channelId, member: who,
-    data: { custom_id: 'cv:pick', values: [appPublicId] },
+    data: customId === 'cv:pick' ? { custom_id: customId, values: [ws.apps[0]!.public_id] } : { custom_id: customId },
   });
 }
 
@@ -161,10 +165,28 @@ describe('member verification flow', () => {
     expect((await verify()).page.body).toContain('You are verified');
   });
 
-  it('is unavailable when turned off, without roles, or for apps not enabled', async () => {
+  it('is unavailable when turned off or with no apps selected', async () => {
     expect((await pick()).json().data.embeds[0].title).toBe('Not available');
     await enable();
-    expect((await pick(member(), ws.apps[1]!.public_id)).json().data.embeds[0].title).toBe('App unavailable');
+    await setContributorApps(env.db, ws.workspace.id, []);
+    expect((await pick()).json().data.embeds[0].title).toBe('Not available');
+  });
+
+  it('adds up contributions across all apps, counting a shared repository once', async () => {
+    await enable();
+    contributed(4, 0, { prs: 6 });
+    const { page } = await verify();
+    expect(page.body).toContain('You are verified: Contributor');
+    expect(page.body).toContain('10 contributions (mobile 4, web 6)');
+    expect((await verifications())[0]).toMatchObject({ app_name: 'All apps', contributions: 10, role_name: 'Contributor' });
+    expect(env.github.allIssues()).toHaveLength(0);
+  });
+
+  it('still accepts clicks on an old app-picker panel', async () => {
+    await enable();
+    contributed(1);
+    const res = await pick(member(), 'cv:pick');
+    expect(res.json().data.components[0].components[0].label).toBe('Verify with GitHub');
   });
 
   it('rate-limits repeated attempts', async () => {
@@ -213,7 +235,7 @@ describe('admin page', () => {
     const contributorPanel = (await getContributorPanel(env.db, ws.workspace.id))!;
     expect(contributorPanel.message_id).not.toBe(ticketPanel.message_id);
     const payload = env.discord.messages.get(contributorPanel.message_id)!.payload;
-    expect(payload.components[0].components[0].custom_id).toBe('cv:pick');
+    expect(payload.components[0].components[0]).toMatchObject({ type: 2, custom_id: 'cv:verify', label: 'Verify with GitHub' });
     expect(payload.embeds[0].description).toContain('**Contributor**: 10+');
     expect(env.discord.messages.get(ticketPanel.message_id)!.payload.components[0].components[0].custom_id).toBe('tr:pick');
 

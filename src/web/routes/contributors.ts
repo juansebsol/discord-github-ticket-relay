@@ -124,7 +124,7 @@ export function registerContributorRoutes(app: FastifyInstance, web: Web): void 
           ${csrfField(ctx.csrf)}
           <div class="card-head"><h2>Apps</h2></div>
           ${apps.length
-            ? html`<p class="small muted">Members can verify against these apps’ repositories.</p>
+            ? html`<p class="small muted">Contributions to these apps’ repositories are added up. Each repository counts once.</p>
                 <div class="stack">${apps.map((a) => html`<label class="checkbox"><input type="checkbox" name="app_ids" value="${a.id}" ${a.contributor_enabled ? raw('checked') : ''}> ${a.name} <span class="muted small mono">${a.repo_owner}/${a.repo_name}</span></label>`)}</div>
                 <hr class="divider">${button('Save apps', { loading: 'Saving…' })}`
             : html`<p class="muted">Add apps first on the <a href="${b}/apps">Apps</a> page.</p>`}
@@ -133,7 +133,7 @@ export function registerContributorRoutes(app: FastifyInstance, web: Web): void 
 
       <div class="card">
         <div class="card-head"><h2>Roles</h2></div>
-        <p class="small muted">Contributions to the chosen app’s repository: merged pull requests or direct commits, whichever is higher. Members get the highest role they qualify for; moving up replaces the lower role.</p>
+        <p class="small muted">Per repository: merged pull requests or direct commits, whichever is higher, added up across the apps selected under Apps. Members get the highest role they qualify for; moving up replaces the lower role.</p>
         ${tiers.length
           ? html`<div class="table-wrap"><table><thead><tr><th>Role</th><th>Contributions needed</th><th></th></tr></thead><tbody>
               ${tiers.map((t) => html`<tr><td>@${t.role_name}</td><td>${String(t.min_contributions)}+</td>

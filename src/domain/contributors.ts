@@ -11,8 +11,9 @@ import { UserFacingError, type AppRow, type Deps, type DiscordConnectionRow, typ
 
 /**
  * Contributor roles: a second Discord panel where members sign in with GitHub so we can
- * count their contributions (merged pull requests or direct commits, whichever is higher)
- * to an app's repository, then receive the highest contributor tier they qualify for
+ * count their contributions (per repository: merged pull requests or direct commits,
+ * whichever is higher) added up across every enabled app's repository, then receive the
+ * highest contributor tier they qualify for
  * (e.g. Junior Contributor at 1, Contributor at 10). Roles are only removed by an admin,
  * except that a lower tier role is swapped out when a member moves up a tier.
  */
@@ -151,11 +152,8 @@ export async function getContributorPanel(q: Queryable, workspaceId: string): Pr
   return rows[0] ?? null;
 }
 
-export function contributorPanelPayload(tiers: ContributorTier[], apps: AppRow[]) {
-  const payload = m.buildContributorPanel({
-    tiers: tiers.map((t) => ({ name: t.role_name, min: t.min_contributions })),
-    apps: contributorApps(apps).map((a) => ({ publicId: a.public_id, name: a.name, description: a.description })),
-  });
+export function contributorPanelPayload(tiers: ContributorTier[], _apps: AppRow[]) {
+  const payload = m.buildContributorPanel({ tiers: tiers.map((t) => ({ name: t.role_name, min: t.min_contributions })) });
   return { payload, hash: sha256(JSON.stringify(payload)) };
 }
 
@@ -266,25 +264,17 @@ function notice(title: string, description: string) {
 
 export async function handleContributorComponent(deps: Deps, i: MemberInteraction, workspace: WorkspaceRow): Promise<{ response: unknown }> {
   const customId = i.data?.custom_id ?? '';
-  const settings = await getContributorSettings(deps.db, workspace.id);
-  const tiers = await listTiers(deps.db, workspace.id);
-  if (!settings.enabled || !tiers.length) {
-    return notice('Not available', 'Contributor verification is turned off for this server right now.');
-  }
-  const apps = contributorApps(await listApps(deps.db, workspace.id)).map((a) => ({ publicId: a.public_id, name: a.name, description: a.description }));
-
-  if (customId.startsWith('cv:page:')) {
-    const { flags: _flags, ...data } = m.buildPickerPage(apps, Number(customId.slice('cv:page:'.length)) || 0, m.CONTRIBUTOR_PICKER);
-    return { response: { type: 7, data } };
-  }
-  if (customId !== m.CustomId.contributorSelect && customId !== m.CustomId.contributorPickerSelect) {
+  // cv:verify is the current panel button; cv:pick / cv:pickp / cv:page are from the earlier
+  // app-picker panel and run the same all-apps check until the panel is updated.
+  if (!['cv:verify', 'cv:pick', 'cv:pickp'].includes(customId) && !customId.startsWith('cv:page:')) {
     return notice('Out of date', 'This button is no longer active. Please use the current panel.');
   }
-  const value = i.data?.values?.[0] ?? '';
-  if (value === m.MORE_APPS_VALUE) return { response: { type: 4, data: m.buildPickerPage(apps, 0, m.CONTRIBUTOR_PICKER) } };
-
-  const app = await getAppByPublicId(deps.db, workspace.id, value);
-  if (!app || !app.contributor_enabled) return notice('App unavailable', 'Verification for that app is no longer available. The menu may be out of date.');
+  const settings = await getContributorSettings(deps.db, workspace.id);
+  const tiers = await listTiers(deps.db, workspace.id);
+  const apps = contributorApps(await listApps(deps.db, workspace.id));
+  if (!settings.enabled || !tiers.length || !apps.length) {
+    return notice('Not available', 'Contributor verification is turned off for this server right now.');
+  }
   const gh = await getGitHubConnection(deps.db, workspace.id);
   if (!gh || gh.status !== 'active' || !deps.github) return notice('Temporarily unavailable', 'Verification is temporarily unavailable. Please try again later.');
 
@@ -298,7 +288,6 @@ export async function handleContributorComponent(deps: Deps, i: MemberInteractio
   }
 
   const state = await createState(deps.db, 'contributor_verify', null, workspace.id, {
-    appId: app.id,
     guildId: i.guild_id,
     discordUserId: member.user.id,
     discordName: member.nick || member.user.global_name || member.user.username,
@@ -306,7 +295,7 @@ export async function handleContributorComponent(deps: Deps, i: MemberInteractio
     tokenExpiresAt: Date.now() + 14 * 60_000,
   }, VERIFY_LINK_TTL_MINUTES);
   const url = deps.github.authorizeUrl(state, `${deps.config.publicUrl}/oauth/github/callback`);
-  return { response: { type: 4, data: m.contributorVerifyPrompt({ appName: app.name, tiers: tiers.map(tierLabel), url }) } };
+  return { response: { type: 4, data: m.contributorVerifyPrompt({ tiers: tiers.map(tierLabel), url }) } };
 }
 
 // ---- GitHub callback (member returns from GitHub sign-in) ----------------------------------------
@@ -321,7 +310,6 @@ export interface VerificationResult {
 }
 
 interface VerifyStateData {
-  appId: string;
   guildId: string;
   discordUserId: string;
   discordName: string;
@@ -334,43 +322,49 @@ export async function consumeContributorState(q: Queryable, token: string | unde
   return consumeState(q, token, ['contributor_verify']);
 }
 
+/** Distinct repositories of the enabled apps (several apps can share one repository). */
+function distinctRepos(apps: AppRow[]): { owner: string; name: string }[] {
+  const seen = new Map<number, { owner: string; name: string }>();
+  for (const a of apps) if (!seen.has(a.repo_id)) seen.set(a.repo_id, { owner: a.repo_owner, name: a.repo_name });
+  return [...seen.values()];
+}
+
 export async function completeVerification(deps: Deps, state: StateRow, code: string | undefined): Promise<VerificationResult> {
   const data = state.data as unknown as VerifyStateData;
   const workspaceId = state.workspace_id!;
   const settings = await getContributorSettings(deps.db, workspaceId);
   const tiers = await listTiers(deps.db, workspaceId);
-  const app = (await listApps(deps.db, workspaceId)).find((a) => a.id === data.appId);
+  const apps = contributorApps(await listApps(deps.db, workspaceId));
+  const repos = distinctRepos(apps);
   const gh = await getGitHubConnection(deps.db, workspaceId);
   const conn = await getDiscordConnection(deps.db, workspaceId);
-  const appName = app?.name ?? 'this app';
+  const appName = 'all apps';
 
   const finish = async (
     outcome: m.ContributorOutcome,
     explanation: string,
     extra: { login?: string | null; githubUserId?: number | null; method?: 'merged_pr' | 'commit' | null; info?: string | null; contributions?: number | null; roleName?: string | null } = {},
   ): Promise<VerificationResult> => {
-    if (app) {
-      await deps.db.query(
-        `INSERT INTO contributor_verifications (id, workspace_id, app_id, app_name, repo_owner, repo_name, discord_user_id, discord_name,
-           github_user_id, github_login, result, method, info, contributions, role_name)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
-        [randomUUID(), workspaceId, app.id, app.name, app.repo_owner, app.repo_name, data.discordUserId, data.discordName,
-          extra.githubUserId ?? null, extra.login ?? null, outcome, extra.method ?? null, extra.info ?? null, extra.contributions ?? null, extra.roleName ?? null],
-      );
-    }
+    await deps.db.query(
+      `INSERT INTO contributor_verifications (id, workspace_id, app_id, app_name, repo_owner, repo_name, discord_user_id, discord_name,
+         github_user_id, github_login, result, method, info, contributions, role_name)
+       VALUES ($1, $2, NULL, 'All apps', '', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+      [randomUUID(), workspaceId, repos.map((r) => `${r.owner}/${r.name}`).join(', '), data.discordUserId, data.discordName,
+        extra.githubUserId ?? null, extra.login ?? null, outcome, extra.method ?? null, extra.info ?? null, extra.contributions ?? null, extra.roleName ?? null],
+    );
     const result = { outcome, appName, roleName: extra.roleName ?? null, login: extra.login ?? null, explanation };
     // Update the member's private message in Discord while the interaction token is valid.
     if (deps.discord && data.tokenEnc && data.tokenExpiresAt > Date.now()) {
       const { flags: _flags, ...edit } = m.contributorResultMessage(result);
       await deps.discord.editOriginalResponse(deps.box.decrypt(data.tokenEnc), { ...edit, components: [] }).catch(() => {});
     }
-    deps.log.info({ workspace: workspaceId, app: app?.public_id, outcome, contributions: extra.contributions ?? null }, 'contributor verification');
+    deps.log.info({ workspace: workspaceId, outcome, contributions: extra.contributions ?? null }, 'contributor verification');
     return result;
   };
 
-  if (!code) return { outcome: 'error', appName, roleName: null, login: null, explanation: 'GitHub sign-in was cancelled. Pick the app in Discord again to retry.' };
-  if (!app || !app.contributor_enabled || !settings.enabled || !tiers.length || !gh || gh.status !== 'active' || !deps.github || !deps.discord || !conn || conn.guild_id !== data.guildId) {
-    return finish('error', 'Verification is not available for this app right now. Please ask a server admin.', { info: 'Contributor settings, tiers, GitHub or Discord connection changed during verification.' });
+  if (!code) return { outcome: 'error', appName, roleName: null, login: null, explanation: 'GitHub sign-in was cancelled. Click Verify with GitHub in Discord again to retry.' };
+  if (!repos.length || !settings.enabled || !tiers.length || !gh || gh.status !== 'active' || !deps.github || !deps.discord || !conn || conn.guild_id !== data.guildId) {
+    return finish('error', 'Verification is not available right now. Please ask a server admin.', { info: 'Contributor settings, tiers, apps, GitHub or Discord connection changed during verification.' });
   }
 
   let user: { id: number; login: string };
@@ -391,35 +385,43 @@ export async function completeVerification(deps: Deps, state: StateRow, code: st
     return finish('conflict', `The GitHub account **${user.login}** is already linked to another member of this server. If this is a mistake, ask a server admin.`, { ...who, info: `Already linked to Discord user ${existing.rows[0].discord_user_id}.` });
   }
 
-  // Contributions = merged PRs or direct commits, whichever is higher (a squash-merged PR
-  // is usually also a commit, so adding them would double count).
-  let prs: number;
-  let commits: number;
+  // Per repository: merged PRs or direct commits, whichever is higher (a squash-merged PR is
+  // usually also a commit). Then add up all repositories. Checked one repository at a time
+  // to stay within GitHub's search rate limit; any failure aborts rather than under-counting.
+  const perRepo: { repo: string; prs: number; commits: number; count: number }[] = [];
   try {
-    [prs, commits] = await Promise.all([
-      deps.github.countMergedPullRequests(gh.installation_id, app.repo_owner, app.repo_name, user.login),
-      deps.github.countAuthoredCommits(gh.installation_id, app.repo_owner, app.repo_name, user.login),
-    ]);
+    for (const r of repos) {
+      const [prs, commits] = await Promise.all([
+        deps.github.countMergedPullRequests(gh.installation_id, r.owner, r.name, user.login),
+        deps.github.countAuthoredCommits(gh.installation_id, r.owner, r.name, user.login),
+      ]);
+      perRepo.push({ repo: r.name, prs, commits, count: Math.max(prs, commits) });
+    }
   } catch (err) {
     const status = err instanceof GitHubApiError ? err.status : null;
-    const info = status === 403 || status === 404
-      ? `GitHub refused the contribution check (${status}). The GitHub App needs "Pull requests: Read" and "Contents: Read" and access to ${app.repo_owner}/${app.repo_name}.`
-      : `Contribution check failed: ${(err as Error).message}`;
-    return finish('error', 'We could not check your contributions right now. Please try again later or ask a server admin.', { ...who, info });
+    const info = err instanceof GitHubApiError && err.isRateLimit
+      ? 'GitHub rate limit reached while counting contributions.'
+      : status === 403 || status === 404
+        ? `GitHub refused the contribution check (${status}). The GitHub App needs "Pull requests: Read" and "Contents: Read" and access to every enabled app's repository.`
+        : `Contribution check failed: ${(err as Error).message}`;
+    return finish('error', 'We could not check your contributions right now. Please try again in a minute or ask a server admin.', { ...who, info });
   }
-  const contributions = Math.max(prs, commits);
-  const method = contributions === 0 ? null : prs >= commits ? 'merged_pr' : 'commit';
-  const counted = `${contributions} contribution${contributions === 1 ? '' : 's'} (${prs} merged PR${prs === 1 ? '' : 's'}, ${commits} commit${commits === 1 ? '' : 's'})`;
+  const contributions = perRepo.reduce((sum, r) => sum + r.count, 0);
+  const prTotal = perRepo.reduce((sum, r) => sum + (r.prs >= r.commits ? r.count : 0), 0);
+  const method = contributions === 0 ? null : prTotal * 2 >= contributions ? 'merged_pr' : 'commit';
+  const breakdown = perRepo.filter((r) => r.count > 0).map((r) => `${r.repo} ${r.count}`).join(', ');
+  const counted = `${contributions} contribution${contributions === 1 ? '' : 's'}${breakdown ? ` (${breakdown})` : ''}`;
   const earned = [...tiers].reverse().find((t) => contributions >= t.min_contributions);
   const next = tiers.find((t) => contributions < t.min_contributions);
+  const info = breakdown ? `Counted: ${breakdown}` : null;
 
   if (!earned) {
     return finish(
       'not_contributor',
       contributions === 0
-        ? `We couldn't find a merged pull request or commit by **${user.login}** for ${appName}. If your pull request was just merged, wait a minute and try again. Commits only count when their email is linked to your GitHub account.`
-        : `**${user.login}** has ${counted} to ${appName}. **${next!.role_name}** needs ${next!.min_contributions}.`,
-      { ...who, method, contributions },
+        ? `We couldn't find a merged pull request or commit by **${user.login}** in any of our apps. If your pull request was just merged, wait a minute and try again. Commits only count when their email is linked to your GitHub account.`
+        : `**${user.login}** has ${counted}. **${next!.role_name}** needs ${next!.min_contributions}.`,
+      { ...who, method, contributions, info },
     );
   }
 
@@ -434,18 +436,18 @@ export async function completeVerification(deps: Deps, state: StateRow, code: st
     return rows[0]!.discord_user_id === data.discordUserId;
   });
   if (!claimed) {
-    return finish('conflict', `The GitHub account **${user.login}** is already linked to another member of this server.`, { ...who, contributions });
+    return finish('conflict', `The GitHub account **${user.login}** is already linked to another member of this server.`, { ...who, contributions, info });
   }
 
   try {
-    await deps.discord.addMemberRole(data.guildId, data.discordUserId, earned.role_id, `Verified GitHub contributor ${user.login}: ${contributions} contributions to ${app.name}`);
+    await deps.discord.addMemberRole(data.guildId, data.discordUserId, earned.role_id, `Verified GitHub contributor ${user.login}: ${contributions} contributions`);
   } catch (err) {
     const code = err instanceof DiscordApiError ? err.code : null;
-    const info = code === DiscordErrorCode.MissingPermissions || code === DiscordErrorCode.MissingAccess
+    const why = code === DiscordErrorCode.MissingPermissions || code === DiscordErrorCode.MissingAccess
       ? `Discord refused to add the role: the bot needs Manage Roles and its role must be above "${earned.role_name}".`
       : code === DiscordErrorCode.UnknownMember ? 'The member is no longer in the server.' : `Adding the role failed: ${(err as Error).message}`;
     if (!existing.rows[0]) await deps.db.query('DELETE FROM contributor_links WHERE workspace_id = $1 AND github_user_id = $2', [workspaceId, user.id]);
-    return finish('error', 'You qualify, but the bot could not add the role. A server admin has been shown what to fix.', { ...who, method, contributions, roleName: earned.role_name, info });
+    return finish('error', 'You qualify, but the bot could not add the role. A server admin has been shown what to fix.', { ...who, method, contributions, roleName: earned.role_name, info: why });
   }
   // Moving up a tier replaces the lower tier roles (best effort; the member may not have them).
   for (const lower of tiers.filter((t) => t.min_contributions < earned.min_contributions)) {
@@ -454,8 +456,8 @@ export async function completeVerification(deps: Deps, state: StateRow, code: st
 
   return finish(
     'verified',
-    `Thanks for contributing! **${user.login}** has ${counted} to ${appName}, so you now have the **${earned.role_name}** role.${next ? ` Reach ${next.min_contributions} for **${next.role_name}**.` : ''}`,
-    { ...who, method, contributions, roleName: earned.role_name },
+    `Thanks for contributing! **${user.login}** has ${counted}, so you now have the **${earned.role_name}** role.${next ? ` Reach ${next.min_contributions} for **${next.role_name}**.` : ''}`,
+    { ...who, method, contributions, roleName: earned.role_name, info },
   );
 }
 
