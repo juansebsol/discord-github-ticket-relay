@@ -18,24 +18,10 @@ and filed by a GitHub App. Reporters never need a GitHub account.
 
 ## Features
 
-**Members (Discord)**
-- App picker panel, then a native ticket form
-- Private confirmation with ticket number, reference ID and issue link
-- Told up front whether the report will be public or private
-- Duplicate detection and per-user rate limiting
-
-**Admins (web console)**
-- Guided setup: connect GitHub, connect Discord, add apps, validate and publish
-- Map apps to repositories and labels; several apps can share one repository
-- Live validation of repository access, Issues, labels and bot permissions
-- Ticket history with per-ticket timeline, retry, re-check and link-issue actions
-- Owner/admin roles with invite links; rate limit and retention settings
-
-**Platform**
-- Multi-tenant workspaces (one GitHub installation and one Discord server each)
-- SQLite-backed job queue with multiple worker processes; safe across restarts and crashes
-- Never files an issue twice: unknown outcomes are reconciled, not retried
-- Credentials stay server-side; stored tokens and ticket text are encrypted
+- **Discord:** pick an app, fill a form, get a private confirmation with the issue link. No GitHub account needed.
+- **Admin console:** guided setup, map apps to repos and labels, ticket history with retry.
+- **Reliable:** duplicate and rate-limit protection; never files the same issue twice.
+- **Secure:** credentials stay on the server; stored tokens and ticket text are encrypted.
 
 ## Screenshots
 
