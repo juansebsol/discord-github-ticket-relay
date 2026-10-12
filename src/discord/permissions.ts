@@ -7,6 +7,7 @@ export const Permission = {
   SEND_MESSAGES: 1n << 11n,
   EMBED_LINKS: 1n << 14n,
   READ_MESSAGE_HISTORY: 1n << 16n,
+  MANAGE_ROLES: 1n << 28n,
 } as const;
 
 /** What the bot needs in the tickets channel: post and later edit/fetch the panel. */
@@ -17,7 +18,8 @@ export const REQUIRED_CHANNEL_PERMISSIONS: { flag: bigint; name: string }[] = [
   { flag: Permission.READ_MESSAGE_HISTORY, name: 'Read Message History' },
 ];
 
-export const BOT_INSTALL_PERMISSIONS = REQUIRED_CHANNEL_PERMISSIONS.reduce((acc, p) => acc | p.flag, 0n);
+/** Requested when adding the bot: channel permissions for panels, plus Manage Roles for contributor roles. */
+export const BOT_INSTALL_PERMISSIONS = REQUIRED_CHANNEL_PERMISSIONS.reduce((acc, p) => acc | p.flag, 0n) | Permission.MANAGE_ROLES;
 
 const ALL = (1n << 64n) - 1n;
 

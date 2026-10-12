@@ -22,6 +22,7 @@ export const DiscordErrorCode = {
   UnknownMessage: 10008,
   UnknownWebhook: 10015,
   UnknownInteraction: 10062,
+  UnknownMember: 10007,
   MissingAccess: 50001,
   MissingPermissions: 50013,
 } as const;
@@ -48,6 +49,7 @@ export interface DiscordRole {
   name: string;
   permissions: string;
   position: number;
+  managed?: boolean;
 }
 
 export interface DiscordUser {
@@ -76,9 +78,9 @@ export class DiscordClient {
   private async request<T = any>(
     method: string,
     path: string,
-    opts: { auth?: 'bot' | 'none' | string; body?: unknown; form?: URLSearchParams; retryOn429?: boolean } = {},
+    opts: { auth?: 'bot' | 'none' | string; body?: unknown; form?: URLSearchParams; retryOn429?: boolean; headers?: Record<string, string> } = {},
   ): Promise<T> {
-    const headers: Record<string, string> = { 'User-Agent': 'DiscordBot (discord-github-ticket-relay, 0.1)' };
+    const headers: Record<string, string> = { 'User-Agent': 'DiscordBot (discord-github-ticket-relay, 0.1)', ...opts.headers };
     const auth = opts.auth ?? 'bot';
     if (auth === 'bot') headers.Authorization = `Bot ${this.config.botToken}`;
     else if (auth !== 'none') headers.Authorization = `Bearer ${auth}`;
@@ -223,6 +225,18 @@ export class DiscordClient {
 
   async deleteMessage(channelId: string, messageId: string): Promise<void> {
     await this.request('DELETE', `/channels/${channelId}/messages/${messageId}`);
+  }
+
+  async addMemberRole(guildId: string, userId: string, roleId: string, reason: string): Promise<void> {
+    await this.request('PUT', `/guilds/${guildId}/members/${userId}/roles/${roleId}`, {
+      headers: { 'X-Audit-Log-Reason': encodeURIComponent(reason.slice(0, 400)) },
+    });
+  }
+
+  async removeMemberRole(guildId: string, userId: string, roleId: string, reason: string): Promise<void> {
+    await this.request('DELETE', `/guilds/${guildId}/members/${userId}/roles/${roleId}`, {
+      headers: { 'X-Audit-Log-Reason': encodeURIComponent(reason.slice(0, 400)) },
+    });
   }
 
   // ---- Interaction follow-ups (authorized by the interaction token, not the bot token) --

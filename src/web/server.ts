@@ -20,6 +20,7 @@ import { registerDiscordRoutes } from './routes/discord.js';
 import { registerAppRoutes } from './routes/apps.js';
 import { registerPanelRoutes } from './routes/panel.js';
 import { registerSubmissionRoutes } from './routes/submissions.js';
+import { registerContributorRoutes } from './routes/contributors.js';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -190,6 +191,7 @@ export async function buildServer(deps: Deps, processor: Processor, opts: { logg
   registerAppRoutes(app, web);
   registerPanelRoutes(app, web);
   registerSubmissionRoutes(app, web);
+  registerContributorRoutes(app, web);
 
   return app;
 }

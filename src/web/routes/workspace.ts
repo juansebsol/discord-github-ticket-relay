@@ -257,7 +257,7 @@ export function registerWorkspaceRoutes(app: FastifyInstance, web: Web): void {
         ${url('github-callback', web.publicUrl('/oauth/github/callback'))}
         <ol class="small" start="2"><li><strong>Webhook URL</strong> (optional but recommended, so uninstalls show up here immediately) with a webhook secret:</li></ol>
         ${url('github-webhook', web.publicUrl('/github/webhook'))}
-        <ol class="small" start="3"><li>Repository permissions: <strong>Issues: Read and write</strong> and <strong>Metadata: Read-only</strong>. Nothing else. Subscribe to no extra events.</li>
+        <ol class="small" start="3"><li>Repository permissions: <strong>Issues: Read and write</strong> and <strong>Metadata: Read-only</strong>. For contributor roles, also <strong>Pull requests: Read-only</strong> and <strong>Contents: Read-only</strong>. Nothing else. Subscribe to no extra events.</li>
         <li>Server variables: <code>GITHUB_APP_ID</code>, <code>GITHUB_APP_SLUG</code>, <code>GITHUB_CLIENT_ID</code>, <code>GITHUB_CLIENT_SECRET</code>, <code>GITHUB_APP_PRIVATE_KEY</code>, and optionally <code>GITHUB_WEBHOOK_SECRET</code> ${c.github?.webhookSecret ? badge('webhook on', 'ok') : badge('webhook off', '')}.</li></ol>
       </div>
       <p class="muted small">The full guide is in <code>docs/PROVIDER_SETUP.md</code> in the project repository. Secret values are never shown in this interface.</p>`;

@@ -23,7 +23,7 @@ Discord endpoint, OAuth) and one or more queue workers.
 - **No Discord gateway.** The bot is driven entirely by Discord's HTTP interactions endpoint and
   REST API. It needs no privileged intents and no slash-command registration.
 - **GitHub App auth.** Short-lived installation tokens are minted from the app's private key
-  (RS256 JWT). Required permissions: `Issues: read & write`, `Metadata: read`.
+  (RS256 JWT). Required permissions: `Issues: read & write`, `Metadata: read`; contributor roles add `Pull requests: read` and `Contents: read`.
 - **SQLite-backed queue.** Submissions are the jobs. Workers in any number of processes claim
   them with one atomic `UPDATE … RETURNING` under SQLite's write lock, plus a 90s lease.
   WAL mode and a busy timeout let processes share the file on one host.
@@ -111,6 +111,8 @@ stable user ID are recorded in the body.
 | `panels` | Published panel message ID, channel and content hash (detects stale or deleted panels) |
 | `submissions` | Tickets, routing snapshot, queue state, lease, reconcile counters, encrypted payload |
 | `submission_events` | Append-only timeline for investigation |
+| `contributor_settings`, `contributor_panels` | Contributor role, panel channel and published panel per workspace |
+| `contributor_links`, `contributor_verifications` | One GitHub account ↔ one Discord member per workspace; audit trail of every verification |
 
 Migrations live in [`src/db/migrations`](../src/db/migrations) and are applied inside one write
 transaction, so concurrent boots are safe. Storage conventions: UUID text IDs, epoch-ms

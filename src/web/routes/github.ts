@@ -1,11 +1,12 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { GitHubApiError, type InstallationInfo } from '../../github/client.js';
 import { checkGitHubCredentials, explainGitHubAppError } from '../../domain/credentials.js';
+import { completeVerification } from '../../domain/contributors.js';
 import { consumeState, createState } from '../../domain/oauth-state.js';
 import { clearRepoCache, getInstallationRepos } from '../../domain/repos.js';
 import { deleteGitHubConnection, getGitHubConnection, listApps, saveGitHubConnection } from '../../domain/store.js';
 import { getMembership } from '../../domain/workspaces.js';
-import { html } from '../../lib/html.js';
+import { escapeHtml, html, raw } from '../../lib/html.js';
 import { alert, badge, button, csrfField, pageHead, postButton, simplePage } from '../layout.js';
 import { setFlash } from '../session.js';
 import type { Web } from '../server.js';
@@ -82,7 +83,7 @@ export function registerGitHubRoutes(app: FastifyInstance, web: Web): void {
               <li>GitHub asks you to authorize the app. This only confirms that you have access to the installation; we do not keep your personal GitHub token.</li>
               <li>You come back here and see the connected account and its repositories.</li>
             </ol>
-            <p class="muted small">The app asks for exactly two repository permissions: <strong>Issues: Read and write</strong> (to create issues and read labels) and <strong>Metadata: Read-only</strong> (required by GitHub to see repository names and settings). Installing on an organization may need approval from an organization owner.</p>
+            <p class="muted small">The app needs <strong>Issues: Read and write</strong> (to create issues and read labels) and <strong>Metadata: Read-only</strong> (required by GitHub to see repository names and settings). Contributor roles also use <strong>Pull requests</strong> and <strong>Contents</strong> (read-only) to check merged pull requests and commits. It never changes code. Installing on an organization may need approval from an organization owner.</p>
             ${connectButtons}
           </div>`}`;
     return web.render(reply, ctx, 'Connect GitHub', 'github', body);
@@ -136,7 +137,15 @@ export function registerGitHubRoutes(app: FastifyInstance, web: Web): void {
    */
   app.get('/oauth/github/callback', async (req, reply) => {
     const q = req.query as { code?: string; state?: string; installation_id?: string; setup_action?: string; error?: string };
-    const state = await consumeState(deps.db, q.state, ['github_install']);
+    const state = await consumeState(deps.db, q.state, ['github_install', 'contributor_verify']);
+    if (state?.purpose === 'contributor_verify' && deps.github) {
+      // A Discord member returning from GitHub sign-in on the contributor panel.
+      const result = await completeVerification(deps, state, q.error ? undefined : q.code);
+      const icon = result.outcome === 'verified' ? '✅' : result.outcome === 'error' ? '⚠️' : 'ℹ️';
+      return reply.type('text/html').send(simplePage('Contributor verification', html`<h1>${icon} ${result.outcome === 'verified' ? 'You are verified' : result.outcome === 'not_contributor' ? 'No contributions found' : result.outcome === 'conflict' ? 'Account already linked' : 'Verification failed'}</h1>
+        <p>${raw(escapeHtml(result.explanation).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>'))}</p>
+        <p class="muted">You can close this tab and return to Discord.</p>`));
+    }
     if (!state || !deps.github) {
       return reply.type('text/html').send(simplePage('Finish connecting GitHub', html`<h1>Almost done</h1>
         <p>The app was installed on GitHub, but this link can't be matched to a workspace (it may have expired, or the installation was started from GitHub directly).</p>

@@ -27,6 +27,10 @@ export const CustomId = {
   form: (appPublicId: string, repoId: number) => `tr:form:${appPublicId}:${repoId}`,
   titleInput: 'title',
   descriptionInput: 'description',
+  // Contributor panel (separate prefix so it never collides with the ticket flow).
+  contributorSelect: 'cv:pick',
+  contributorPickerSelect: 'cv:pickp',
+  contributorPage: (page: number) => `cv:page:${page}`,
 };
 
 export const MORE_APPS_VALUE = '__more';
@@ -120,7 +124,15 @@ export function buildPanelMessage(opts: PanelOptions) {
 }
 
 /** Ephemeral, paginated picker used when there are more apps than one menu can hold. */
-export function buildPickerPage(apps: PanelApp[], requestedPage: number) {
+export interface PickerIds {
+  select: string;
+  page: (page: number) => string;
+}
+
+const TICKET_PICKER: PickerIds = { select: CustomId.pickerSelect, page: CustomId.pickerPage };
+export const CONTRIBUTOR_PICKER: PickerIds = { select: CustomId.contributorPickerSelect, page: CustomId.contributorPage };
+
+export function buildPickerPage(apps: PanelApp[], requestedPage: number, ids: PickerIds = TICKET_PICKER) {
   const pageCount = Math.max(1, Math.ceil(apps.length / SELECT_MAX));
   const page = Math.min(Math.max(0, requestedPage), pageCount - 1);
   const slice = apps.slice(page * SELECT_MAX, (page + 1) * SELECT_MAX);
@@ -134,7 +146,7 @@ export function buildPickerPage(apps: PanelApp[], requestedPage: number) {
         components: [
           {
             type: ComponentType.StringSelect,
-            custom_id: CustomId.pickerSelect,
+            custom_id: ids.select,
             placeholder: 'Choose an app…',
             options: slice.map(appOption),
           },
@@ -143,8 +155,8 @@ export function buildPickerPage(apps: PanelApp[], requestedPage: number) {
       {
         type: ComponentType.ActionRow,
         components: [
-          { type: ComponentType.Button, style: 2, label: 'Previous', custom_id: CustomId.pickerPage(page - 1), disabled: page === 0 },
-          { type: ComponentType.Button, style: 2, label: 'Next', custom_id: CustomId.pickerPage(page + 1), disabled: page >= pageCount - 1 },
+          { type: ComponentType.Button, style: 2, label: 'Previous', custom_id: ids.page(page - 1), disabled: page === 0 },
+          { type: ComponentType.Button, style: 2, label: 'Next', custom_id: ids.page(page + 1), disabled: page >= pageCount - 1 },
         ],
       },
     ],
@@ -295,4 +307,68 @@ export function textEchoMessage(title: string, explanation: string, ticket: { ti
     description: truncate(`${explanation}\n\nHere is what you wrote, so you can copy it:\n\n${echo}`, 4096),
     color: COLORS.warning,
   });
+}
+
+// ---- Contributor roles ---------------------------------------------------------------------
+
+export function buildContributorPanel(opts: { roleName: string; apps: PanelApp[] }) {
+  const overflow = opts.apps.length > SELECT_MAX;
+  const options = (overflow ? opts.apps.slice(0, SELECT_MAX - 1) : opts.apps).map(appOption);
+  if (overflow) options.push({ label: 'More apps…', value: MORE_APPS_VALUE, description: `Browse all ${opts.apps.length} apps` });
+  const description = [
+    `Contributed to one of our apps on GitHub? Get the **${escapeMarkdown(opts.roleName)}** role.`,
+    '',
+    '**How it works**',
+    '1. Choose the app you contributed to.',
+    '2. Sign in with GitHub to confirm which account is yours.',
+    '3. If you have a merged pull request or a commit in its repository, the role is added right away.',
+    '',
+    'We only use the sign-in to confirm your GitHub username. Nothing is posted on your behalf.',
+  ].join('\n');
+  return {
+    content: '',
+    embeds: [{ title: 'Verify as a contributor', description, color: COLORS.success }],
+    components: [
+      {
+        type: ComponentType.ActionRow,
+        components: [
+          { type: ComponentType.StringSelect, custom_id: CustomId.contributorSelect, placeholder: 'Choose the app you contributed to…', min_values: 1, max_values: 1, options },
+        ],
+      },
+    ],
+    allowed_mentions: NO_MENTIONS,
+  };
+}
+
+export function contributorVerifyPrompt(s: { appName: string; roleName: string; url: string }) {
+  return reply(
+    {
+      title: 'Confirm your GitHub account',
+      description: `Sign in with GitHub to check your contributions to **${escapeMarkdown(s.appName)}**. If you have a merged pull request or a commit there, you get the **${escapeMarkdown(s.roleName)}** role.\n\nThis link is just for you and expires in 10 minutes.`,
+      color: COLORS.brand,
+    },
+    [{ type: ComponentType.ActionRow, components: [{ type: ComponentType.Button, style: 5, label: 'Verify with GitHub', url: s.url }] }],
+  );
+}
+
+export type ContributorOutcome = 'verified' | 'not_contributor' | 'conflict' | 'error';
+
+export function contributorResultMessage(s: { outcome: ContributorOutcome; appName: string; roleName: string; login: string | null; explanation: string }) {
+  const titles: Record<ContributorOutcome, string> = {
+    verified: 'Verified: role added',
+    not_contributor: 'No contributions found',
+    conflict: 'GitHub account already linked',
+    error: 'Verification failed',
+  };
+  return reply(
+    {
+      title: titles[s.outcome],
+      description: truncate(s.explanation, 4096),
+      color: s.outcome === 'verified' ? COLORS.success : s.outcome === 'error' ? COLORS.danger : COLORS.warning,
+      fields: [
+        { name: 'App', value: escapeMarkdown(s.appName), inline: true },
+        ...(s.login ? [{ name: 'GitHub', value: escapeMarkdown(s.login), inline: true }] : []),
+      ],
+    },
+  );
 }

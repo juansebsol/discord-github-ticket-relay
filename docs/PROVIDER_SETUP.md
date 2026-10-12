@@ -42,6 +42,7 @@ The bot asks for these channel permissions when it is added:
 - Send Messages
 - Embed Links
 - Read Message History (needed to check and update its own panel message)
+- Manage Roles (only for contributor roles; the bot's role must sit above the contributor role)
 
 ## GitHub App
 
@@ -66,8 +67,12 @@ The bot asks for these channel permissions when it is added:
    - **Issues: Read and write**, to create issues and read labels.
    - **Metadata: Read-only**, which GitHub requires; it covers repository names, visibility
      and the Issues setting.
+   - For **contributor roles**: **Pull requests: Read-only** (merged PRs) and **Contents:
+     Read-only** (direct commits). Read-only; the app never changes code.
    - Leave everything else as *No access*. No organization or account permissions are
      needed, and no event subscriptions are needed.
+   - Adding permissions to an existing app: GitHub asks each installation to accept them
+     (Settings → Applications → the app → Review request).
 4. **Where can this GitHub App be installed?**
    - *Only on this account* if every repository is yours.
    - *Any account* if workspaces will connect other organizations.

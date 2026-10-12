@@ -58,6 +58,12 @@ export class FakeGitHub {
   createDelayMs = 0;
   /** Simulates a wrong/rotated private key: every app-JWT call is rejected. */
   rejectAppJwt = false;
+  /** GitHub account returned for the user access token from code `good-code`. */
+  oauthUser = { id: 4242, login: 'octo-dev' };
+  /** repoId → logins with a merged PR / an authored commit. */
+  mergedPrs = new Map<number, Set<string>>();
+  commits = new Map<number, Set<string>>();
+  installationPermissions: Record<string, string> = { issues: 'write', metadata: 'read', pull_requests: 'read', contents: 'read' };
   appSlug = 'ticket-relay';
 
   addInstallation(id: number, login: string, repos: Partial<FakeRepo>[], type = 'Organization') {
@@ -112,6 +118,9 @@ export class FakeGitHub {
     if (url.hostname === 'github.com' && path === '/login/oauth/access_token') {
       return body.code === 'good-code' ? json(200, { access_token: 'ghu_user', token_type: 'bearer' }) : json(200, { error: 'bad_verification_code' });
     }
+    if (path === '/user') {
+      return auth === 'Bearer ghu_user' ? json(200, this.oauthUser) : json(401, { message: 'Bad credentials' });
+    }
     if (path === '/user/installations') {
       return json(200, {
         total_count: this.userInstallationIds.length,
@@ -132,7 +141,7 @@ export class FakeGitHub {
     if ((m = /^\/app\/installations\/(\d+)$/.exec(path))) {
       const inst = this.installations.get(Number(m[1]));
       if (!inst) return json(404, { message: 'Not Found' });
-      return json(200, { id: Number(m[1]), account: { ...inst.account, avatar_url: null }, repository_selection: 'selected', suspended_at: inst.suspended ? new Date().toISOString() : null });
+      return json(200, { id: Number(m[1]), account: { ...inst.account, avatar_url: null }, repository_selection: 'selected', suspended_at: inst.suspended ? new Date().toISOString() : null, permissions: this.installationPermissions });
     }
 
     // Installation-token endpoints.
@@ -153,6 +162,12 @@ export class FakeGitHub {
     if ((m = /^\/repos\/([^/]+)\/([^/]+)\/labels$/.exec(path))) {
       const r = this.repoByName(decodeURIComponent(m[1]!), decodeURIComponent(m[2]!));
       return accessible(r) ? json(200, r!.labels.map((name) => ({ name }))) : json(404, { message: 'Not Found' });
+    }
+    if ((m = /^\/repos\/([^/]+)\/([^/]+)\/commits$/.exec(path))) {
+      const r = this.repoByName(decodeURIComponent(m[1]!), decodeURIComponent(m[2]!));
+      if (!accessible(r)) return json(404, { message: 'Not Found' });
+      const author = url.searchParams.get('author') ?? '';
+      return json(200, this.commits.get(r!.id)?.has(author) ? [{ sha: 'abc' }] : []);
     }
     if ((m = /^\/repos\/([^/]+)\/([^/]+)\/issues\/(\d+)$/.exec(path))) {
       const r = this.repoByName(decodeURIComponent(m[1]!), decodeURIComponent(m[2]!));
@@ -180,6 +195,14 @@ export class FakeGitHub {
       if (behavior === 'timeout_after_create') return hang(init.signal);
       if (behavior === 'reset_after_create') throw netError('ECONNRESET');
       return json(201, { number: issue.number, html_url: `https://github.com/${repo.owner}/${repo.name}/issues/${issue.number}` });
+    }
+    if (path === '/search/issues' && (url.searchParams.get('q') ?? '').includes('is:pr')) {
+      const q = url.searchParams.get('q') ?? '';
+      const [owner, name] = (/repo:(\S+)/.exec(q)?.[1] ?? '/').split('/');
+      const author = /author:(\S+)/.exec(q)?.[1] ?? '';
+      const r = this.repoByName(owner!, name!);
+      const n = r && accessible(r) && this.mergedPrs.get(r.id)?.has(author) ? 1 : 0;
+      return json(200, { total_count: n, items: [] });
     }
     if (path === '/search/issues') {
       const q = url.searchParams.get('q') ?? '';
@@ -211,6 +234,8 @@ export class FakeDiscord {
   codes = new Map<string, Json>();
   nextMessageId = 5000;
   failNextCreate: { status: number; code: number } | null = null;
+  roleChanges: { method: string; guildId: string; userId: string; roleId: string }[] = [];
+  failRoleChange: { status: number; code: number } | null = null;
 
   addGuild(id: string, name: string, channels: FakeGuild['channels'], opts: { botPermissions?: bigint } = {}) {
     const perms = (opts.botPermissions ?? (1n << 10n) | (1n << 11n) | (1n << 14n) | (1n << 16n)).toString();
@@ -261,6 +286,12 @@ export class FakeDiscord {
       if (rest === '/channels') return json(200, g.channels);
       if (rest === '/roles') return json(200, g.roles);
       if (rest === `/members/${this.botId}`) return json(200, { roles: g.botRoles });
+      const roleMatch = /^\/members\/(\d+)\/roles\/(\d+)$/.exec(rest);
+      if (roleMatch && (method === 'PUT' || method === 'DELETE')) {
+        if (this.failRoleChange) return json(this.failRoleChange.status, { message: 'error', code: this.failRoleChange.code });
+        this.roleChanges.push({ method, guildId: g.id, userId: roleMatch[1]!, roleId: roleMatch[2]! });
+        return new Response(null, { status: 204 });
+      }
     }
     if ((m = /^\/channels\/(\d+)\/messages(?:\/(\d+))?$/.exec(path))) {
       const channelId = m[1]!;

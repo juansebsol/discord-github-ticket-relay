@@ -1,3 +1,4 @@
+import { handleContributorComponent } from '../domain/contributors.js';
 import type { Processor } from '../domain/processor.js';
 import { getAppByPublicId, getDiscordConnectionByGuild, getGitHubConnection, listApps } from '../domain/store.js';
 import { acceptSubmission } from '../domain/submissions.js';
@@ -67,6 +68,8 @@ export async function handleInteraction(deps: Deps, processor: Processor, i: Int
 
   // ---- App picker -------------------------------------------------------------------------
   if (i.type === InteractionType.MessageComponent) {
+    // Contributor-role panel (separate feature, separate custom_id prefix).
+    if (customId.startsWith('cv:')) return handleContributorComponent(deps, i, workspace);
     if (customId.startsWith('tr:page:')) {
       const apps = (await listApps(deps.db, workspace.id)).filter((a) => a.enabled);
       const page = Number(customId.slice('tr:page:'.length)) || 0;

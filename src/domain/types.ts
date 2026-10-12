@@ -80,6 +80,8 @@ export interface AppRow {
   repo_private: boolean;
   labels: string[];
   enabled: boolean;
+  /** Members can verify as contributors of this app (contributor panel). */
+  contributor_enabled: boolean;
   position: number;
   created_at: Date;
   updated_at: Date;

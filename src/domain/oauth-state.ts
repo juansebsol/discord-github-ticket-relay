@@ -1,7 +1,7 @@
 import type { Queryable } from '../db/database.js';
 import { randomToken, sha256 } from '../lib/crypto.js';
 
-export type StatePurpose = 'discord_login' | 'discord_bot' | 'github_install';
+export type StatePurpose = 'discord_login' | 'discord_bot' | 'github_install' | 'contributor_verify';
 
 export interface StateRow {
   purpose: StatePurpose;

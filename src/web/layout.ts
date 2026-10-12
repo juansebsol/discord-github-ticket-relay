@@ -98,6 +98,7 @@ function navLink(href: string, label: string, active: boolean, lead: SafeHtml | 
 const ICONS = {
   overview: '◎',
   submissions: '☰',
+  contributors: '★',
   settings: '⚙',
   guide: '?',
 };
@@ -121,6 +122,7 @@ export function layout(ctx: PageContext, opts: { title: string; active: string; 
         ${navLink(`${base}/panel`, 'Validate & publish', opts.active === 'panel', stepDot(p?.panel ?? 'todo', 4))}
         <div class="nav-label">Manage</div>
         ${navLink(`${base}/submissions`, 'Submissions', opts.active === 'submissions', icon('submissions'), p?.attention ? html`<span class="count" title="${p.attention} need attention">${String(p.attention)}</span>` : '')}
+        ${navLink(`${base}/contributors`, 'Contributor roles', opts.active === 'contributors', icon('contributors'))}
         ${navLink(`${base}/settings`, 'Settings & admins', opts.active === 'settings', icon('settings'))}
         ${navLink(`${base}/provider-setup`, 'Deployment setup', opts.active === 'provider', icon('guide'))}
       </nav>`

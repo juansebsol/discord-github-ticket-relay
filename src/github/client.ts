@@ -26,6 +26,8 @@ export interface InstallationInfo {
   accountAvatarUrl: string | null;
   repositorySelection: string;
   suspended: boolean;
+  /** Permissions granted to this installation, e.g. { issues: 'write', pull_requests: 'read' }. */
+  permissions: Record<string, string>;
 }
 
 export interface RepoInfo {
@@ -189,6 +191,7 @@ export class GitHubClient {
       accountAvatarUrl: data.account?.avatar_url ?? null,
       repositorySelection: data.repository_selection ?? 'selected',
       suspended: Boolean(data.suspended_at),
+      permissions: data.permissions ?? {},
     };
   }
 
@@ -305,6 +308,34 @@ export class GitHubClient {
     return data.access_token;
   }
 
+  /** The GitHub account behind a user access token (identity only). */
+  async getAuthenticatedUser(userToken: string): Promise<{ id: number; login: string }> {
+    const { data } = await this.request('GET', '/user', `Bearer ${userToken}`);
+    return { id: data.id, login: data.login };
+  }
+
+  /** True if `login` authored at least one merged pull request in the repository. */
+  async hasMergedPullRequest(installationId: number, owner: string, repo: string, login: string): Promise<boolean> {
+    const q = `repo:${owner}/${repo} is:pr is:merged author:${login}`;
+    const { data } = await this.request('GET', `/search/issues?q=${encodeURIComponent(q)}&per_page=1`, await this.asInstallation(installationId));
+    return Number(data.total_count ?? 0) > 0;
+  }
+
+  /** True if the repository's default branch has a commit attributed to `login`. */
+  async hasAuthoredCommit(installationId: number, owner: string, repo: string, login: string): Promise<boolean> {
+    try {
+      const { data } = await this.request(
+        'GET',
+        `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits?author=${encodeURIComponent(login)}&per_page=1`,
+        await this.asInstallation(installationId),
+      );
+      return Array.isArray(data) && data.length > 0;
+    } catch (err) {
+      if (err instanceof GitHubApiError && err.status === 409) return false; // empty repository
+      throw err;
+    }
+  }
+
   /** Installations of this app that the authorizing GitHub user can access. */
   async listUserInstallations(userToken: string): Promise<InstallationInfo[]> {
     const out: InstallationInfo[] = [];
@@ -319,6 +350,7 @@ export class GitHubClient {
           accountAvatarUrl: i.account?.avatar_url ?? null,
           repositorySelection: i.repository_selection ?? 'selected',
           suspended: Boolean(i.suspended_at),
+          permissions: i.permissions ?? {},
         });
       }
       if (batch.length < 100) break;
