@@ -253,6 +253,8 @@ export function registerWorkspaceRoutes(app: FastifyInstance, web: Web): void {
         <div class="card-h"><div><h2>Discord Developer Portal</h2><div class="desc">Applications › your app.</div></div>${linkBtn('https://discord.com/developers/applications', 'Open portal', { variant: 'ghost', size: 'sm', trail: 'arrow-up-right', external: true })}</div>
         ${setting('Interactions endpoint URL', 'General Information. Discord sends panel clicks and forms here.', copyField('discord-interactions', web.publicUrl('/discord/interactions'), 'Interactions endpoint URL'), { top: true })}
         ${setting('OAuth2 redirect', 'OAuth2 › Redirects. Used for console sign-in and for adding the bot.', copyField('discord-redirect', web.publicUrl('/oauth/discord/callback'), 'OAuth2 redirect'), { top: true })}
+        ${setting('Terms of Service URL', 'General Information. Required to verify the bot.', copyField('discord-terms', web.publicUrl('/terms'), 'Terms of Service URL'), { top: true })}
+        ${setting('Privacy Policy URL', html`General Information. Required to verify the bot.${c.legal.contactEmail ? '' : html` ${tag('Set LEGAL_CONTACT_EMAIL', { icon: 'triangle-alert', title: 'The legal pages need a contact email. Set LEGAL_CONTACT_EMAIL (and LEGAL_OPERATOR_NAME) in .env.' })}`}`, copyField('discord-privacy', web.publicUrl('/privacy'), 'Privacy Policy URL'), { top: true })}
         ${setting('Bot', 'Keep Public Bot off unless other workspaces on this deployment should add it. No privileged intents are needed.', tag('No intents'))}
         ${setting('Server variables', 'Set in .env on the server.', env(['DISCORD_APPLICATION_ID', 'DISCORD_PUBLIC_KEY', 'DISCORD_CLIENT_SECRET', 'DISCORD_BOT_TOKEN']), { stacked: true })}
       </div>

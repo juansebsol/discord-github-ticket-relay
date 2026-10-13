@@ -179,10 +179,33 @@ export function simplePage(title: string, body: SafeHtml, opts: { flash?: PageCo
   <main class="center-page"><div class="auth">
     <div class="brand"><img src="/static/logo.png" alt="" width="24" height="24"><span>Ticket Relay</span></div>
     <div class="card"><div class="card-b">${body}</div></div>
+    ${LEGAL_LINKS}
   </div></main>
   ${toastsFor(opts.flash ?? null)}
   ${CONFIRM_DIALOG}
   ${ICON_TEMPLATES}
+</body>
+</html>`.value;
+}
+
+const LEGAL_LINKS = html`<nav class="legal-links" aria-label="Legal"><a href="/terms">Terms of Service</a><span aria-hidden="true">·</span><a href="/privacy">Privacy Policy</a></nav>`;
+
+/** Public legal documents (Terms of Service, Privacy Policy): readable without signing in. */
+export function legalPage(o: { title: string; updated: string; intro: SafeHtml; body: SafeHtml }): string {
+  return html`<!doctype html>
+<html lang="en">
+<head>
+  ${head(o.title)}
+</head>
+<body>
+  <main class="legal">
+    <a class="brand" href="/"><img src="/static/logo.png" alt="" width="24" height="24"><span>Ticket Relay</span></a>
+    <article class="prose">
+      <header><h1>${o.title}</h1><p class="meta">Last updated ${o.updated}</p>${o.intro}</header>
+      ${o.body}
+    </article>
+    ${LEGAL_LINKS}
+  </main>
 </body>
 </html>`.value;
 }

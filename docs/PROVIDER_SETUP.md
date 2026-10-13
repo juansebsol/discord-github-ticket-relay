@@ -21,6 +21,11 @@ Throughout, `https://relay.example.com` stands for your `PUBLIC_URL`.
      Discord sends a signed test request when you save. The app must be deployed and
      reachable with Discord credentials configured, or saving fails. If needed, deploy first
      with the other variables, then set this URL.
+   - Set **Terms of Service URL** to `https://relay.example.com/terms` and **Privacy Policy
+     URL** to `https://relay.example.com/privacy`. Discord requires both to verify the bot.
+     Set `LEGAL_OPERATOR_NAME` and `LEGAL_CONTACT_EMAIL` so the pages name you and give a
+     contact address. Review the text before you rely on it; it describes what this app
+     stores and shares, but it isn't legal advice for your situation.
 3. **OAuth2**:
    - Copy the **Client Secret** → `DISCORD_CLIENT_SECRET`.
    - Under **Redirects**, add `https://relay.example.com/oauth/discord/callback`. This one

@@ -23,6 +23,7 @@ import { registerAppRoutes } from './routes/apps.js';
 import { registerPanelRoutes } from './routes/panel.js';
 import { registerTicketRoutes } from './routes/tickets.js';
 import { registerMemberRoutes } from './routes/members.js';
+import { registerLegalRoutes } from './routes/legal.js';
 import { registerContributorRoutes } from './routes/contributors.js';
 import { registerTicketTypeRoutes } from './routes/ticket-types.js';
 
@@ -210,6 +211,7 @@ export async function buildServer(deps: Deps, processor: Processor, opts: { logg
 
   registerWebhookRoutes(app, web);
   registerAuthRoutes(app, web);
+  registerLegalRoutes(app, web);
   registerWorkspaceRoutes(app, web);
   registerGitHubRoutes(app, web);
   registerDiscordRoutes(app, web);
