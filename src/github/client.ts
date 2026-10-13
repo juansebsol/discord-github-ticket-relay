@@ -308,6 +308,22 @@ export class GitHubClient {
     return data.access_token;
   }
 
+  /** Creates a label (Issues: write). Returns false if it already exists. */
+  async createLabel(installationId: number, owner: string, repo: string, name: string, color: string): Promise<boolean> {
+    try {
+      await this.request(
+        'POST',
+        `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/labels`,
+        await this.asInstallation(installationId),
+        { name, color },
+      );
+      return true;
+    } catch (err) {
+      if (err instanceof GitHubApiError && err.status === 422) return false; // already exists
+      throw err;
+    }
+  }
+
   /** The GitHub account behind a user access token (identity only). */
   async getAuthenticatedUser(userToken: string): Promise<{ id: number; login: string }> {
     const { data } = await this.request('GET', '/user', `Bearer ${userToken}`);

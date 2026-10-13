@@ -1,5 +1,6 @@
 import { handleContributorComponent } from '../domain/contributors.js';
 import type { Processor } from '../domain/processor.js';
+import { enabledTicketTypes, getTicketTypeByPublicId, type TicketType } from '../domain/ticket-types.js';
 import { getAppByPublicId, getDiscordConnectionByGuild, getGitHubConnection, listApps } from '../domain/store.js';
 import { acceptSubmission } from '../domain/submissions.js';
 import type { Deps } from '../domain/types.js';
@@ -88,6 +89,12 @@ export async function handleInteraction(deps: Deps, processor: Processor, i: Int
       }
       const gh = await getGitHubConnection(deps.db, workspace.id);
       if (!gh || gh.status !== 'active') return notice('Temporarily unavailable', UNAVAILABLE);
+      // With ticket types configured, members choose one before the form (required).
+      const types = await enabledTicketTypes(deps.db, workspace.id);
+      if (types.length) {
+        const picker = m.buildTypePicker({ publicId: app.public_id, name: app.name, repoId: app.repo_id }, types.map(toFormTypeOption));
+        return { response: { type: ResponseType.ChannelMessage, data: picker } };
+      }
       return {
         response: {
           type: ResponseType.Modal,
@@ -95,13 +102,31 @@ export async function handleInteraction(deps: Deps, processor: Processor, i: Int
         },
       };
     }
+    const typeMatch = /^tr:type:([0-9A-Z]{10}):(\d+)$/.exec(customId);
+    if (typeMatch) {
+      const app = await getAppByPublicId(deps.db, workspace.id, typeMatch[1]!);
+      if (!app || !app.enabled || app.repo_id !== Number(typeMatch[2])) {
+        return notice('App unavailable', 'That app is no longer accepting tickets here. Please start again from the ticket panel.');
+      }
+      const type = await getTicketTypeByPublicId(deps.db, workspace.id, i.data?.values?.[0] ?? '');
+      if (!type || !type.enabled) return notice('Type unavailable', 'That ticket type is no longer available. Please start again from the ticket panel.');
+      return {
+        response: {
+          type: ResponseType.Modal,
+          data: m.buildTicketModal(
+            { publicId: app.public_id, name: app.name, repoId: app.repo_id, repoPrivate: app.repo_private },
+            { publicId: type.public_id, name: type.name, guidance: type.guidance, placeholder: type.placeholder },
+          ),
+        },
+      };
+    }
     return notice('Out of date', 'This button is no longer active. Please use the current ticket panel.');
   }
 
   // ---- Ticket form submitted ----------------------------------------------------------------
-  const match = /^tr:form:([0-9A-Z]{10}):(\d+)$/.exec(customId);
+  const match = /^tr:form:([0-9A-Z]{10}):(\d+)(?::([0-9A-Z]{8}))?$/.exec(customId);
   if (!match) return notice('Out of date', 'This form is no longer active. Please use the current ticket panel.');
-  const [, publicId, repoIdText] = match;
+  const [, publicId, repoIdText, typePublicId] = match;
   const values = modalValues(i.data?.components);
   const ticket = {
     title: (values[m.CustomId.titleInput] ?? '').replace(/\s+/g, ' ').trim(),
@@ -121,6 +146,8 @@ export async function handleInteraction(deps: Deps, processor: Processor, i: Int
   }
   const gh = await getGitHubConnection(deps.db, workspace.id);
   if (!gh || gh.status !== 'active') return echo('Temporarily unavailable', UNAVAILABLE, ticket);
+  // A type removed or disabled while the form was open: file the ticket anyway, without it.
+  const type: TicketType | null = typePublicId ? await getTicketTypeByPublicId(deps.db, workspace.id, typePublicId) : null;
 
   const member = i.member;
   const result = await acceptSubmission(deps, {
@@ -140,6 +167,7 @@ export async function handleInteraction(deps: Deps, processor: Processor, i: Int
     },
     title: ticket.title,
     description: ticket.description,
+    ticketType: type && type.enabled ? { name: type.name, label: type.label, titlePrefix: type.title_prefix || type.name } : null,
   });
 
   switch (result.kind) {
@@ -165,6 +193,10 @@ export async function handleInteraction(deps: Deps, processor: Processor, i: Int
       );
     }
   }
+}
+
+function toFormTypeOption(t: TicketType) {
+  return { publicId: t.public_id, name: t.name, description: t.description };
 }
 
 function toPanelApp(a: { public_id: string; name: string; description: string | null }): m.PanelApp {

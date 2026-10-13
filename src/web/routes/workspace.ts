@@ -28,7 +28,7 @@ export function submissionsTable(base: string, rows: Awaited<ReturnType<typeof l
     <tbody>${rows.map(
       (s) => html`<tr>
         <td><a class="title" href="${base}/submissions/${s.id}">${titleOf(s) ?? s.ref}</a><div class="sub"><span class="mono">${s.ref}</span> · ${timeAgo(s.created_at)}</div></td>
-        <td>${s.app_name}${s.source === 'admin_test' ? html` ${badge('Test', 'info')}` : ''}</td>
+        <td>${s.app_name}${s.source === 'admin_test' ? html` ${badge('Test', 'info')}` : ''}${s.ticket_type_name ? html`<div class="sub">${s.ticket_type_name}</div>` : ''}</td>
         <td>${s.reporter_display_name}<div class="sub">${s.reporter_username ? `@${s.reporter_username}` : s.reporter_discord_id}</div></td>
         <td>${statusBadge(s.status)}</td>
         <td>${s.issue_url ? html`<a href="${s.issue_url}" target="_blank" rel="noopener noreferrer">${s.repo_name}#${s.issue_number}</a>` : html`<span class="muted">—</span>`}</td>

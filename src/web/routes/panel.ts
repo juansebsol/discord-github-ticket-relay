@@ -9,6 +9,8 @@ import { escapeHtml, html, raw, type SafeHtml } from '../../lib/html.js';
 import { alert, badge, button, csrfField, pageHead, postButton, timeAgo } from '../layout.js';
 import { setFlash } from '../session.js';
 import type { Web } from '../server.js';
+import { enabledTicketTypes, getTicketType } from '../../domain/ticket-types.js';
+import { ticketTypesCard } from './ticket-types.js';
 
 /** Tiny Discord-markdown preview: escapes everything, then renders **bold** and line breaks. */
 function discordMarkdown(text: string): SafeHtml {
@@ -30,12 +32,20 @@ export function registerPanelRoutes(app: FastifyInstance, web: Web): void {
       getDiscordConnection(deps.db, wid),
     ]);
     const state = await checkPanel(deps, wid, { live: false });
-    const { payload } = panelPayloadFor(ctx.workspace, apps);
+    const types = await enabledTicketTypes(deps.db, wid);
+    const typesCard = await ticketTypesCard(deps, ctx);
+    const { payload } = panelPayloadFor(ctx.workspace, apps, types.length > 0);
     const embed = payload.embeds[0]!;
     const options = payload.components[0]!.components[0]!.options;
     const enabledApps = apps.filter((a) => a.enabled);
     const sample = enabledApps[0];
-    const modal = sample ? buildTicketModal({ publicId: sample.public_id, name: sample.name, repoId: sample.repo_id, repoPrivate: sample.repo_private }) : null;
+    const firstType = types[0];
+    const modal = sample
+      ? buildTicketModal(
+          { publicId: sample.public_id, name: sample.name, repoId: sample.repo_id, repoPrivate: sample.repo_private },
+          firstType ? { publicId: firstType.public_id, name: firstType.name, guidance: firstType.guidance, placeholder: firstType.placeholder } : undefined,
+        )
+      : null;
     const errors = report.checks.filter((c) => c.status === 'error').length;
     const warnings = report.checks.filter((c) => c.status === 'warning').length;
     const messageLink = panel && conn ? `https://discord.com/channels/${conn.guild_id}/${panel.channel_id}/${panel.message_id}` : null;
@@ -76,6 +86,10 @@ export function registerPanelRoutes(app: FastifyInstance, web: Web): void {
           </div>
         </div>
         <div class="card"><div class="card-head"><h2>Preview: the form</h2></div>
+          ${modal && types.length ? html`<div class="discord-preview">
+              <p><strong>What kind of ticket is this?</strong></p>
+              <div class="dp-options">${types.map((t) => html`<div class="dp-option"><strong>${t.name}</strong>${t.description ? html`<span>${t.description}</span>` : ''}</div>`)}</div>
+            </div><p class="small muted">Then the form for the chosen type. Example for <strong>${firstType!.name}</strong>:</p>` : ''}
           ${modal ? html`<div class="discord-preview">
               <p><strong>${modal.title}</strong></p>
               <p>${discordMarkdown((modal.components[0] as { content: string }).content)}</p>
@@ -87,6 +101,8 @@ export function registerPanelRoutes(app: FastifyInstance, web: Web): void {
         </div>
       </div>
 
+      ${typesCard}
+
       <div class="card">
         <div class="card-head"><h2>Send a test ticket</h2></div>
         <p class="muted small">Creates a <strong>real GitHub issue</strong> through the full pipeline, marked as a test and attributed to you. Nothing is created unless you click the button.</p>
@@ -95,6 +111,7 @@ export function registerPanelRoutes(app: FastifyInstance, web: Web): void {
               ${csrfField(ctx.csrf)}
               <label for="test-app" class="muted small">App</label>
               <select id="test-app" name="app_id" class="nowrap">${enabledApps.map((a) => html`<option value="${a.id}">${a.name} → ${a.repo_owner}/${a.repo_name}</option>`)}</select>
+              ${types.length ? html`<select name="type_id" aria-label="Ticket type">${types.map((t) => html`<option value="${t.id}">${t.name}</option>`)}</select>` : ''}
               ${button('Send test ticket', { loading: 'Creating issue…' })}
             </form>`
           : html`<p class="muted">Add an app first.</p>`}
@@ -139,6 +156,8 @@ export function registerPanelRoutes(app: FastifyInstance, web: Web): void {
       return reply.redirect(`${ctx.base}/panel`);
     }
     const conn = await getDiscordConnection(deps.db, ctx.workspace.id);
+    const typeId = String((req.body as { type_id?: string }).type_id ?? '');
+    const testType = typeId ? await getTicketType(deps.db, ctx.workspace.id, typeId) : null;
     const result = await acceptSubmission(deps, {
       workspace: ctx.workspace,
       app: target,
@@ -150,6 +169,7 @@ export function registerPanelRoutes(app: FastifyInstance, web: Web): void {
       guildName: conn?.guild_name ?? null,
       channelId: null,
       reporter: { id: ctx.user.discord_user_id, displayName: ctx.user.display_name ?? ctx.user.username, username: ctx.user.username },
+      ticketType: testType ? { name: testType.name, label: testType.label, titlePrefix: testType.title_prefix || testType.name } : null,
       title: 'Ticket Relay connection test',
       description: `This test ticket was sent by ${ctx.user.display_name ?? ctx.user.username} from the Ticket Relay admin interface to confirm that tickets for “${target.name}” reach this repository. You can close it.`,
     });

@@ -161,7 +161,13 @@ export class FakeGitHub {
     }
     if ((m = /^\/repos\/([^/]+)\/([^/]+)\/labels$/.exec(path))) {
       const r = this.repoByName(decodeURIComponent(m[1]!), decodeURIComponent(m[2]!));
-      return accessible(r) ? json(200, r!.labels.map((name) => ({ name }))) : json(404, { message: 'Not Found' });
+      if (!accessible(r)) return json(404, { message: 'Not Found' });
+      if (method === 'POST') {
+        if (r!.labels.includes(body.name)) return json(422, { message: 'Validation Failed', errors: [{ code: 'already_exists' }] });
+        r!.labels.push(body.name);
+        return json(201, { name: body.name, color: body.color });
+      }
+      return json(200, r!.labels.map((name) => ({ name })));
     }
     if ((m = /^\/repos\/([^/]+)\/([^/]+)\/commits$/.exec(path))) {
       const r = this.repoByName(decodeURIComponent(m[1]!), decodeURIComponent(m[2]!));

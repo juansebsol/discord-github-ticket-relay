@@ -128,6 +128,7 @@ export function registerSubmissionRoutes(app: FastifyInstance, web: Web): void {
           <dl class="kv">
             <dt>Submission ID</dt><dd><code>${s.ref}</code></dd>
             <dt>App</dt><dd>${s.app_name}</dd>
+            ${s.ticket_type_name ? html`<dt>Type</dt><dd>${s.ticket_type_name}</dd>` : ''}
             <dt>Repository</dt><dd><span class="mono">${s.repo_owner}/${s.repo_name}</span> (${s.repo_private ? 'private' : 'public'})</dd>
             ${s.labels.length ? html`<dt>Labels</dt><dd>${s.labels.join(', ')}</dd>` : ''}
             <dt>Reporter</dt><dd>${s.reporter_display_name}${s.reporter_username ? html` <span class="muted">@${s.reporter_username}</span>` : ''}<div class="small muted">Discord ID ${s.reporter_discord_id}</div></dd>

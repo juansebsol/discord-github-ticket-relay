@@ -139,6 +139,8 @@ export interface SubmissionRow {
   interaction_token_enc: string | null;
   interaction_token_expires_at: Date | null;
   member_notice: string | null;
+  ticket_type_name: string | null;
+  title_prefix: string | null;
   resolved_by: string | null;
   resolution_note: string | null;
   created_at: Date;

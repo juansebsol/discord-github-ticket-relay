@@ -141,7 +141,7 @@ export class Processor {
       await addEvent(deps.db, sub.id, 'github_request_sent', { attempt: sub.attempts, labels });
 
       const issue = await github.createIssue(sub.installation_id, sub.repo_owner, sub.repo_name, {
-        title: buildIssueTitle(sub.app_name, payload.title, sub.source === 'admin_test'),
+        title: buildIssueTitle(sub.app_name, payload.title, sub.source === 'admin_test', sub.title_prefix),
         body: buildIssueBody({
           ref: sub.ref,
           appName: sub.app_name,
@@ -155,6 +155,7 @@ export class Processor {
           guildId: sub.discord_guild_id,
           channelId: sub.discord_channel_id,
           isTest: sub.source === 'admin_test',
+          ticketType: sub.ticket_type_name,
         }),
         labels,
       });

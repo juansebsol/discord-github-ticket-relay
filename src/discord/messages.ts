@@ -24,7 +24,8 @@ export const CustomId = {
   panelSelect: 'tr:pick',
   pickerSelect: 'tr:pickp',
   pickerPage: (page: number) => `tr:page:${page}`,
-  form: (appPublicId: string, repoId: number) => `tr:form:${appPublicId}:${repoId}`,
+  form: (appPublicId: string, repoId: number, typePublicId?: string) => `tr:form:${appPublicId}:${repoId}${typePublicId ? `:${typePublicId}` : ''}`,
+  typeSelect: (appPublicId: string, repoId: number) => `tr:type:${appPublicId}:${repoId}`,
   titleInput: 'title',
   descriptionInput: 'description',
   // Contributor panel (separate prefix so it never collides with the ticket flow).
@@ -61,6 +62,8 @@ export interface PanelOptions {
   title: string | null;
   intro: string | null;
   apps: PanelApp[];
+  /** When the workspace has ticket types, the steps mention choosing one. */
+  hasTypes?: boolean;
 }
 
 export const DEFAULT_PANEL_TITLE = 'Need help? Open a ticket';
@@ -90,9 +93,17 @@ export function buildPanelMessage(opts: PanelOptions) {
     opts.intro?.trim() || DEFAULT_PANEL_INTRO,
     '',
     '**How it works**',
-    '1. Choose your app from the menu.',
-    '2. Fill in a title and a description. Steps to reproduce, what you expected and what actually happened help a lot.',
-    '3. Submit. You will get a private confirmation with your ticket number.',
+    ...(opts.hasTypes
+      ? [
+          '1. Choose your app from the menu.',
+          '2. Pick what kind of ticket it is.',
+          '3. Fill in a title and a description, then submit. You will get a private confirmation with your ticket number.',
+        ]
+      : [
+          '1. Choose your app from the menu.',
+          '2. Fill in a title and a description. Steps to reproduce, what you expected and what actually happened help a lot.',
+          '3. Submit. You will get a private confirmation with your ticket number.',
+        ]),
     '',
     'You do not need a GitHub account. Please never include passwords, tokens or other secrets.',
   ].join('\n');
@@ -172,15 +183,51 @@ export function visibilityNotice(repoPrivate: boolean): string {
     : 'Your report will be posted publicly on GitHub, where anyone can read it.';
 }
 
-export function buildTicketModal(app: { publicId: string; name: string; repoId: number; repoPrivate: boolean }) {
+export interface FormType {
+  publicId: string;
+  name: string;
+  guidance: string | null;
+  placeholder: string | null;
+}
+
+export const DEFAULT_GUIDANCE = 'When it applies, include the steps to reproduce it, what you expected to happen and what actually happened.';
+
+/** Ephemeral step between choosing the app and the form: what kind of ticket is it? */
+export function buildTypePicker(app: { publicId: string; name: string; repoId: number }, types: { publicId: string; name: string; description: string | null }[]) {
   return {
-    custom_id: CustomId.form(app.publicId, app.repoId),
-    title: truncate(`New ticket: ${app.name}`, 45),
+    content: '',
+    embeds: [{ title: 'What kind of ticket is this?', description: `Choose a type for your **${escapeMarkdown(app.name)}** ticket.`, color: COLORS.brand }],
+    flags: EPHEMERAL,
+    components: [
+      {
+        type: ComponentType.ActionRow,
+        components: [
+          {
+            type: ComponentType.StringSelect,
+            custom_id: CustomId.typeSelect(app.publicId, app.repoId),
+            placeholder: 'Choose a type…',
+            options: types.slice(0, SELECT_MAX).map((t) => ({
+              label: truncate(t.name, 100),
+              value: t.publicId,
+              ...(t.description ? { description: truncate(t.description, 100) } : {}),
+            })),
+          },
+        ],
+      },
+    ],
+    allowed_mentions: NO_MENTIONS,
+  };
+}
+
+export function buildTicketModal(app: { publicId: string; name: string; repoId: number; repoPrivate: boolean }, type?: FormType) {
+  return {
+    custom_id: CustomId.form(app.publicId, app.repoId, type?.publicId),
+    title: truncate(type ? `${type.name}: ${app.name}` : `New ticket: ${app.name}`, 45),
     components: [
       {
         type: ComponentType.TextDisplay,
         content: [
-          `Describe your problem with **${escapeMarkdown(app.name)}**. When it applies, include the steps to reproduce it, what you expected to happen and what actually happened.`,
+          `${type ? `**${escapeMarkdown(type.name)}** for **${escapeMarkdown(app.name)}**.` : `Describe your problem with **${escapeMarkdown(app.name)}**.`} ${type?.guidance?.trim() || DEFAULT_GUIDANCE}`,
           '',
           `${visibilityNotice(app.repoPrivate)} Do not include passwords, tokens or other secrets.`,
         ].join('\n'),
@@ -202,7 +249,7 @@ export function buildTicketModal(app: { publicId: string; name: string; repoId: 
       {
         type: ComponentType.Label,
         label: 'Description',
-        description: 'Steps to reproduce, expected behavior and actual behavior.',
+        description: type ? 'The details that help the team act on it.' : 'Steps to reproduce, expected behavior and actual behavior.',
         component: {
           type: ComponentType.TextInput,
           custom_id: CustomId.descriptionInput,
@@ -210,7 +257,7 @@ export function buildTicketModal(app: { publicId: string; name: string; repoId: 
           min_length: 10,
           max_length: DESCRIPTION_MAX,
           required: true,
-          placeholder: '1. Go to…  2. Click…  Expected: …  Actual: …',
+          placeholder: truncate(type?.placeholder?.trim() || '1. Go to…  2. Click…  Expected: …  Actual: …', 100),
         },
       },
     ],

@@ -3,10 +3,12 @@ import { buildPanelMessage } from '../discord/messages.js';
 import { sha256 } from '../lib/crypto.js';
 import { deletePanel, getDiscordConnection, getPanel, listApps, markPanel, savePanel } from './store.js';
 import { UserFacingError, type AppRow, type Deps, type WorkspaceRow } from './types.js';
+import { enabledTicketTypes } from './ticket-types.js';
 import { getWorkspace } from './workspaces.js';
 
-export function panelPayloadFor(workspace: WorkspaceRow, apps: AppRow[]) {
+export function panelPayloadFor(workspace: WorkspaceRow, apps: AppRow[], hasTypes = false) {
   const payload = buildPanelMessage({
+    hasTypes,
     title: workspace.panel_title,
     intro: workspace.panel_intro,
     apps: apps.filter((a) => a.enabled).map((a) => ({ publicId: a.public_id, name: a.name, description: a.description })),
@@ -26,7 +28,7 @@ export async function checkPanel(deps: Deps, workspaceId: string, opts: { live: 
   if (!panel) return { state: 'not_published' };
   const workspace = (await getWorkspace(deps.db, workspaceId))!;
   const conn = await getDiscordConnection(deps.db, workspaceId);
-  const { hash } = panelPayloadFor(workspace, await listApps(deps.db, workspaceId));
+  const { hash } = panelPayloadFor(workspace, await listApps(deps.db, workspaceId), (await enabledTicketTypes(deps.db, workspaceId)).length > 0);
   const channelChanged = conn?.tickets_channel_id !== panel.channel_id;
 
   if (opts.live && deps.discord) {
@@ -72,7 +74,7 @@ export async function publishPanel(deps: Deps, workspaceId: string, userId: stri
   const workspace = (await getWorkspace(deps.db, workspaceId))!;
   const apps = await listApps(deps.db, workspaceId);
   if (!apps.some((a) => a.enabled)) throw new UserFacingError('Add at least one enabled app before publishing the panel.');
-  const { payload, hash } = panelPayloadFor(workspace, apps);
+  const { payload, hash } = panelPayloadFor(workspace, apps, (await enabledTicketTypes(deps.db, workspaceId)).length > 0);
   const existing = await getPanel(deps.db, workspaceId);
 
   if (existing && existing.channel_id === conn.tickets_channel_id) {

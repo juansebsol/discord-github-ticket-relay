@@ -21,6 +21,7 @@ import { registerAppRoutes } from './routes/apps.js';
 import { registerPanelRoutes } from './routes/panel.js';
 import { registerSubmissionRoutes } from './routes/submissions.js';
 import { registerContributorRoutes } from './routes/contributors.js';
+import { registerTicketTypeRoutes } from './routes/ticket-types.js';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -192,6 +193,7 @@ export async function buildServer(deps: Deps, processor: Processor, opts: { logg
   registerPanelRoutes(app, web);
   registerSubmissionRoutes(app, web);
   registerContributorRoutes(app, web);
+  registerTicketTypeRoutes(app, web);
 
   return app;
 }

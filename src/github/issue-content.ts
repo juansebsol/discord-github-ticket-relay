@@ -17,6 +17,7 @@ export interface IssueContentInput {
   guildId: string | null;
   channelId: string | null;
   isTest: boolean;
+  ticketType?: string | null;
 }
 
 const GITHUB_TITLE_MAX = 256;
@@ -48,8 +49,8 @@ function cell(value: string): string {
   return value.replace(/\|/g, '\\|').replace(/[\r\n]+/g, ' ').trim();
 }
 
-export function buildIssueTitle(appName: string, title: string, isTest: boolean): string {
-  const prefix = `${isTest ? '[Test] ' : ''}[${appName}] `;
+export function buildIssueTitle(appName: string, title: string, isTest: boolean, typePrefix: string | null = null): string {
+  const prefix = `${isTest ? '[Test] ' : ''}${typePrefix ? `[${typePrefix.replace(/[\[\]\r\n]/g, '').trim()}] ` : ''}[${appName}] `;
   const full = prefix + title.replace(/[\r\n]+/g, ' ').trim();
   return full.length > GITHUB_TITLE_MAX ? `${full.slice(0, GITHUB_TITLE_MAX - 1)}…` : full;
 }
@@ -60,6 +61,7 @@ export function buildIssueBody(input: IssueContentInput): string {
     : input.reporterDisplayName;
   const rows: [string, string][] = [
     ['App', cell(input.appName)],
+    ...(input.ticketType ? ([['Type', cell(input.ticketType)]] as [string, string][]) : []),
     ['Reported by', `${cell(neutralizeGitHubMentions(who))} — Discord user ID \`${input.reporterDiscordId}\``],
     ['Submitted', input.submittedAt.toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC')],
   ];

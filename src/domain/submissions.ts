@@ -32,6 +32,8 @@ export interface AcceptInput {
   reporter: { id: string; displayName: string; username: string | null };
   title: string;
   description: string;
+  /** Chosen ticket type: its label is merged into the app's labels; frozen with the routing. */
+  ticketType?: { name: string; label: string | null; titlePrefix: string | null } | null;
 }
 
 export type AcceptResult =
@@ -87,8 +89,9 @@ export async function acceptSubmission(deps: Pick<Deps, 'db' | 'box'>, input: Ac
          id, workspace_id, ref, source, app_id, app_name, installation_id, repo_id, repo_owner, repo_name, repo_private, labels,
          discord_interaction_id, discord_guild_id, discord_guild_name, discord_channel_id,
          reporter_discord_id, reporter_display_name, reporter_username,
-         payload_enc, content_hash, status, next_attempt_at, interaction_token_enc, interaction_token_expires_at)
-       VALUES ($23, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, 'pending', now_ms(), $21, $22)
+         payload_enc, content_hash, status, next_attempt_at, interaction_token_enc, interaction_token_expires_at,
+         ticket_type_name, title_prefix)
+       VALUES ($23, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, 'pending', now_ms(), $21, $22, $24, $25)
        ON CONFLICT (discord_interaction_id) DO NOTHING
        RETURNING *`,
       [
@@ -102,7 +105,7 @@ export async function acceptSubmission(deps: Pick<Deps, 'db' | 'box'>, input: Ac
         input.app.repo_owner,
         input.app.repo_name,
         input.app.repo_private,
-        input.app.labels,
+        [...new Set([...input.app.labels, ...(input.ticketType?.label ? [input.ticketType.label] : [])])],
         input.interactionId,
         input.guildId,
         input.guildName,
@@ -115,6 +118,8 @@ export async function acceptSubmission(deps: Pick<Deps, 'db' | 'box'>, input: Ac
         input.interactionToken ? box.encrypt(input.interactionToken) : null,
         input.interactionToken ? new Date(Date.now() + INTERACTION_TOKEN_TTL_MS - 30_000) : null,
         randomUUID(),
+        input.ticketType?.name ?? null,
+        input.ticketType ? input.ticketType.titlePrefix : null,
       ],
     );
     if (!rows[0]) {
@@ -125,6 +130,7 @@ export async function acceptSubmission(deps: Pick<Deps, 'db' | 'box'>, input: Ac
       source: input.source,
       repo: `${input.app.repo_owner}/${input.app.repo_name}`,
       labels: input.app.labels,
+      type: input.ticketType?.name ?? null,
     });
     return { kind: 'accepted', submission: rows[0] };
   });
