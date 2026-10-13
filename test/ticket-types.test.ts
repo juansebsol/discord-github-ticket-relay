@@ -62,7 +62,7 @@ describe('ticket types in Discord', () => {
     expect(i1!.body).toContain('| **Type** | Bug report |');
     expect(i2!.title).toBe('[Feature request] [Mobile App] Dark mode'); // no prefix set: uses the name
     expect(i2!.labels).toEqual(['support', 'enhancement']);
-    const page = await env.server.inject({ method: 'GET', url: `/w/${ws.workspace.id}/submissions`, ...get(ws.owner) });
+    const page = await env.server.inject({ method: 'GET', url: `/w/${ws.workspace.id}/tickets`, ...get(ws.owner) });
     expect(page.body).toContain('Bug report');
   });
 
@@ -79,7 +79,7 @@ describe('ticket types in Discord', () => {
 
 describe('ticket types admin', () => {
   it('adds, edits, orders and validates types', async () => {
-    const base = `/w/${ws.workspace.id}/ticket-types`;
+    const base = `/w/${ws.workspace.id}/tickets/types`;
     const bad = await env.server.inject({ method: 'POST', url: base, ...form(ws.owner, { name: '', enabled: '1' }) });
     expect(bad.statusCode).toBe(400);
     await env.server.inject({ method: 'POST', url: base, ...form(ws.owner, { name: 'Bug report', label: 'bug', title_prefix: 'Bug', enabled: '1' }) });
@@ -90,29 +90,30 @@ describe('ticket types admin', () => {
     await env.server.inject({ method: 'POST', url: `${base}/${question!.id}/move`, ...form(ws.owner, { direction: 'up' }) });
     expect((await listTicketTypes(env.db, ws.workspace.id)).map((t) => t.name)).toEqual(['Question', 'Bug report']);
 
-    const page = await env.server.inject({ method: 'GET', url: `/w/${ws.workspace.id}/panel`, ...get(ws.owner) });
-    expect(page.body).toContain('Ticket types');
-    expect(page.body).toContain('What kind of ticket is this?');
+    const types = await env.server.inject({ method: 'GET', url: base, ...get(ws.owner) });
+    expect(types.body).toContain('Ticket types');
     // The repos have "bug" and "support" by default, but not "question".
-    expect(page.body).toContain('<code>question</code> is missing');
+    expect(types.body).toContain('<code>question</code> is missing');
+    const panel = await env.server.inject({ method: 'GET', url: `/w/${ws.workspace.id}/tickets/panel`, ...get(ws.owner) });
+    expect(panel.body).toContain('What kind of ticket is this?');
   });
 
   it('creates missing labels only when the admin clicks the button', async () => {
     await createTicketType(env.db, ws.workspace.id, { name: 'Question', description: null, label: 'question', title_prefix: null, guidance: null, placeholder: null, enabled: true });
-    await env.server.inject({ method: 'GET', url: `/w/${ws.workspace.id}/panel`, ...get(ws.owner) });
+    await env.server.inject({ method: 'GET', url: `/w/${ws.workspace.id}/tickets/types`, ...get(ws.owner) });
     expect(env.github.repos.get(ws.repoIds[0]!)!.labels).not.toContain('question');
-    await env.server.inject({ method: 'POST', url: `/w/${ws.workspace.id}/ticket-types/create-labels`, ...form(ws.owner) });
+    await env.server.inject({ method: 'POST', url: `/w/${ws.workspace.id}/tickets/types/create-labels`, ...form(ws.owner) });
     expect(env.github.repos.get(ws.repoIds[0]!)!.labels).toContain('question');
     expect(env.github.repos.get(ws.repoIds[1]!)!.labels).toContain('question');
   });
 
   it('updates the panel steps and is isolated per workspace', async () => {
     await addTypes();
-    await env.server.inject({ method: 'POST', url: `/w/${ws.workspace.id}/panel/publish`, ...form(ws.owner) });
+    await env.server.inject({ method: 'POST', url: `/w/${ws.workspace.id}/tickets/panel`, ...form(ws.owner, { intent: 'publish' }) });
     const msg = [...env.discord.messages.values()][0]!;
     expect(msg.payload.embeds[0].description).toContain('2. Pick what kind of ticket it is.');
     const other = await makeWorkspace(env, { owner: await makeAdmin(env) });
-    const res = await env.server.inject({ method: 'GET', url: `/w/${ws.workspace.id}/ticket-types/new`, ...get(other.owner) });
+    const res = await env.server.inject({ method: 'GET', url: `/w/${ws.workspace.id}/tickets/types/new`, ...get(other.owner) });
     expect(res.statusCode).toBe(404);
   });
 });

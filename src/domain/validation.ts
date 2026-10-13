@@ -26,8 +26,8 @@ export async function validateWorkspace(deps: Deps, workspaceId: string, base: s
   const checks: Check[] = [];
   const add = (c: Check) => checks.push(c);
 
-  if (!deps.github) add({ area: 'deployment', status: 'error', title: 'GitHub App credentials are not configured on this deployment', detail: `Missing: ${deps.config.missing.github.join(', ')}`, fix: { label: 'Provider setup', href: `${base}/provider-setup` } });
-  if (!deps.discord) add({ area: 'deployment', status: 'error', title: 'Discord application credentials are not configured on this deployment', detail: `Missing: ${deps.config.missing.discord.join(', ')}`, fix: { label: 'Provider setup', href: `${base}/provider-setup` } });
+  if (!deps.github) add({ area: 'deployment', status: 'error', title: 'GitHub App credentials are not configured on this deployment', detail: `Missing: ${deps.config.missing.github.join(', ')}`, fix: { label: 'Deployment', href: `${base}/deployment` } });
+  if (!deps.discord) add({ area: 'deployment', status: 'error', title: 'Discord application credentials are not configured on this deployment', detail: `Missing: ${deps.config.missing.discord.join(', ')}`, fix: { label: 'Deployment', href: `${base}/deployment` } });
 
   // ---- GitHub
   const gh = await getGitHubConnection(deps.db, workspaceId);
@@ -67,13 +67,13 @@ export async function validateWorkspace(deps: Deps, workspaceId: string, base: s
       if (dc.status !== 'active') await setDiscordStatus(deps.db, workspaceId, 'active', null);
       add({ area: 'discord', status: 'ok', title: `Bot is in the “${access.guild.name}” server` });
       if (!dc.tickets_channel_id) {
-        add({ area: 'discord', status: 'error', title: 'No tickets channel selected', fix: { label: 'Choose channel', href: `${base}/setup/discord` } });
+        add({ area: 'discord', status: 'error', title: 'No tickets channel selected', fix: { label: 'Choose channel', href: `${base}/tickets/panel#channel` } });
       } else {
         const channel = access.channels.find((c) => c.id === dc.tickets_channel_id);
         if (!channel) {
-          add({ area: 'discord', status: 'error', title: `The #${dc.tickets_channel_name ?? 'tickets'} channel no longer exists or is hidden from the bot`, fix: { label: 'Choose channel', href: `${base}/setup/discord` } });
+          add({ area: 'discord', status: 'error', title: `The #${dc.tickets_channel_name ?? 'tickets'} channel no longer exists or is hidden from the bot`, fix: { label: 'Choose channel', href: `${base}/tickets/panel#channel` } });
         } else if (channel.missing.length) {
-          add({ area: 'discord', status: 'error', title: `The bot is missing permissions in #${channel.name}`, detail: `Missing: ${channel.missing.join(', ')}. Grant them to the bot's role in the channel settings.`, fix: { label: 'Check again', href: `${base}/setup/discord` } });
+          add({ area: 'discord', status: 'error', title: `The bot is missing permissions in #${channel.name}`, detail: `Missing: ${channel.missing.join(', ')}. Grant them to the bot's role in the channel settings.`, fix: { label: 'Check again', href: `${base}/tickets/panel` } });
         } else {
           discordOk = true;
           add({ area: 'discord', status: 'ok', title: `The bot can post in #${channel.name}` });

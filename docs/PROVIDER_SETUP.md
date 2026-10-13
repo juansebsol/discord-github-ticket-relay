@@ -5,7 +5,7 @@ operator who runs the server does them. Admins never repeat them. Everything els
 (choosing accounts, servers, channels, repositories, apps and labels) happens in the admin
 UI.
 
-The admin UI's **Deployment setup** page shows the exact URLs below for your `PUBLIC_URL`,
+The console's **Deployment** page shows the exact URLs below for your `PUBLIC_URL`,
 with copy buttons, and whether each provider is configured.
 
 Throughout, `https://relay.example.com` stands for your `PUBLIC_URL`.
@@ -90,5 +90,6 @@ the Discord member who reported it.
 
 ## After setup
 
-Restart the app with the new variables. The **Deployment setup** page then shows both
-providers as *Configured*. Admins can sign in and follow the four setup steps in the UI.
+Restart the app with the new variables. The **Deployment** page then shows both providers
+as *Working*. Admins can sign in and follow the three setup steps (GitHub, Discord, Apps &
+repositories), then publish the panels from **Tickets › Panel** and **Contributor Roles › Panel**.

@@ -1,12 +1,20 @@
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { html, raw, type SafeHtml } from '../lib/html.js';
 import type { Membership } from '../domain/workspaces.js';
-import type { Role, SubmissionStatus, UserRow, WorkspaceRow } from '../domain/types.js';
+import { can, ROLE_LABELS, type MemberAccess } from '../domain/permissions.js';
+import type { Role, UserRow, WorkspaceRow } from '../domain/types.js';
+import { avatar, csrfField, discordAvatar, icon, iconBtn, initials, menu, notice, type IconName } from './ui.js';
+
+export type StepState = 'done' | 'todo' | 'problem';
 
 export interface SetupProgress {
-  github: 'done' | 'todo' | 'problem';
-  discord: 'done' | 'todo' | 'problem';
-  apps: 'done' | 'todo' | 'problem';
-  panel: 'done' | 'todo' | 'problem';
+  github: StepState;
+  discord: StepState;
+  apps: StepState;
+  panel: StepState;
   attention: number;
 }
 
@@ -18,181 +26,163 @@ export interface PageContext {
   role?: Role;
   memberships?: Membership[];
   progress?: SetupProgress;
+  /** The viewer's role and permissions in this workspace (filters the navigation). */
+  membership?: MemberAccess;
 }
 
-export function csrfField(csrf: string): SafeHtml {
-  return html`<input type="hidden" name="_csrf" value="${csrf}">`;
-}
+const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'public');
 
-export function button(label: string, opts: { variant?: string; loading?: string; name?: string; value?: string; disabled?: boolean } = {}): SafeHtml {
-  return html`<button type="submit" class="btn ${opts.variant ?? ''}" ${opts.name ? raw(`name="${opts.name}"`) : ''} ${opts.value !== undefined ? html`value="${opts.value}"` : ''} ${opts.disabled ? raw('disabled') : ''} ${opts.loading ? html`data-loading-text="${opts.loading}"` : ''}><span class="spinner" aria-hidden="true"></span> ${label}</button>`;
-}
-
-/** A one-button POST form (all state-changing actions are POSTs protected by CSRF tokens). */
-export function postButton(
-  action: string,
-  label: string,
-  csrf: string,
-  opts: { variant?: string; confirm?: string; loading?: string; fields?: Record<string, string>; disabled?: boolean } = {},
-): SafeHtml {
-  return html`<form method="post" action="${action}" class="inline-form" ${opts.confirm ? html`data-confirm="${opts.confirm}"` : ''}>
-    ${csrfField(csrf)}
-    ${Object.entries(opts.fields ?? {}).map(([k, v]) => html`<input type="hidden" name="${k}" value="${v}">`)}
-    ${button(label, { variant: opts.variant, loading: opts.loading, disabled: opts.disabled })}
-  </form>`;
-}
-
-export function badge(text: string, tone: 'ok' | 'warn' | 'danger' | 'info' | 'plain' | '' = ''): SafeHtml {
-  return html`<span class="badge ${tone}">${text}</span>`;
-}
-
-export const STATUS_LABELS: Record<SubmissionStatus, [string, 'ok' | 'warn' | 'danger' | 'info' | '']> = {
-  pending: ['Queued', 'info'],
-  processing: ['Filing…', 'info'],
-  created: ['Created', 'ok'],
-  failed: ['Failed', 'danger'],
-  uncertain: ['Needs check', 'warn'],
-  dismissed: ['Closed', ''],
-};
-
-export function statusBadge(status: SubmissionStatus): SafeHtml {
-  const [text, tone] = STATUS_LABELS[status];
-  return badge(text, tone);
-}
-
-export function alert(type: 'success' | 'error' | 'info' | 'warn', content: SafeHtml | string): SafeHtml {
-  return html`<div class="alert ${type}" role="${type === 'error' ? 'alert' : 'status'}">${content}</div>`;
-}
-
-export function formatDate(d: Date | null | undefined): string {
-  if (!d) return '—';
-  return d.toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
-}
-
-export function timeAgo(d: Date, now = Date.now()): string {
-  const s = Math.round((now - d.getTime()) / 1000);
-  if (s < 0) {
-    const f = -s;
-    if (f < 60) return `in ${f}s`;
-    if (f < 3600) return `in ${Math.round(f / 60)} min`;
-    return `in ${Math.round(f / 3600)} h`;
+/** Content hash for cache busting, so a deploy never serves stale CSS or JS. */
+function assetVersion(file: string): string {
+  try {
+    return createHash('sha256').update(readFileSync(path.join(PUBLIC_DIR, file))).digest('hex').slice(0, 10);
+  } catch {
+    return '0';
   }
-  if (s < 60) return 'just now';
-  if (s < 3600) return `${Math.floor(s / 60)} min ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
-  return `${Math.floor(s / 86400)} d ago`;
+}
+const CSS_VERSION = assetVersion('app.css');
+const JS_VERSION = assetVersion('app.js');
+
+function head(title: string): SafeHtml {
+  return html`<meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>${title} · Ticket Relay</title>
+  <link rel="icon" type="image/png" href="/static/logo.png">
+  <link rel="stylesheet" href="/static/app.css?v=${CSS_VERSION}">
+  <script src="/static/app.js?v=${JS_VERSION}" defer></script>`;
 }
 
-export function discordAvatar(user: Pick<UserRow, 'discord_user_id' | 'avatar'>): string | null {
-  return user.avatar ? `https://cdn.discordapp.com/avatars/${user.discord_user_id}/${user.avatar}.png?size=64` : null;
+/** Icons that app.js clones for toasts and copy feedback. */
+const ICON_TEMPLATES = html`<template id="icon-templates">
+  <span data-i="ok">${icon('circle-check', 16, 'ok lead')}</span><span data-i="warn">${icon('triangle-alert', 16, 'warn lead')}</span>
+  <span data-i="danger">${icon('circle-x', 16, 'danger lead')}</span><span data-i="info">${icon('info', 16, 'muted lead')}</span>
+  <span data-i="check">${icon('check', 14, 'ok')}</span><span data-i="check-16">${icon('check', 16, 'ok')}</span><span data-i="x">${icon('x', 16)}</span>
+</template>`;
+
+/** The generic confirmation dialog filled in by app.js from a form's data-confirm-* attributes. */
+const CONFIRM_DIALOG = html`<dialog class="dialog" id="confirm-dialog" aria-labelledby="confirm-title">
+  <div class="dlg-h"><h2 id="confirm-title"></h2>${iconBtn('x', 'Close', { size: 'sm', attrs: raw('data-dialog-close') })}</div>
+  <div class="dlg-b"><p id="confirm-body"></p></div>
+  <div class="dlg-f"><button type="button" class="btn" data-dialog-close>Cancel</button><button type="button" class="btn primary" id="confirm-ok"></button></div>
+</dialog>`;
+
+function navItem(href: string, label: string, name: IconName, active: boolean, trail: SafeHtml | string = ''): SafeHtml {
+  return html`<a href="${href}" class="nav-item" ${active ? raw('aria-current="page"') : ''}>${icon(name)}<span>${label}</span>${trail ? html`<span class="trail">${trail}</span>` : ''}</a>`;
 }
 
-function stepDot(state: 'done' | 'todo' | 'problem', n: number): SafeHtml {
-  return html`<span class="step-dot ${state === 'done' ? 'done' : state === 'problem' ? 'problem' : ''}" aria-hidden="true">${state === 'done' ? '✓' : state === 'problem' ? '!' : String(n)}</span>`;
+function stepMark(state: StepState): SafeHtml {
+  if (state === 'done') return html`${icon('circle-check', 14, 'ok')}<span class="sr-only"> (done)</span>`;
+  if (state === 'problem') return html`${icon('triangle-alert', 14, 'warn')}<span class="sr-only"> (needs attention)</span>`;
+  return html`${icon('circle-dashed', 14, 'faint')}<span class="sr-only"> (not done)</span>`;
 }
 
-function navLink(href: string, label: string, active: boolean, lead: SafeHtml | string = '', trail: SafeHtml | string = ''): SafeHtml {
-  return html`<a href="${href}" class="${active ? 'active' : ''}" ${active ? raw('aria-current="page"') : ''}>${lead}${label}${trail}</a>`;
+export function roleLabel(access: MemberAccess): string {
+  if (access.role === 'moderator' && !access.can_act_tickets) return 'Moderator · View only';
+  return ROLE_LABELS[access.role];
 }
 
-const ICONS = {
-  overview: '◎',
-  submissions: '☰',
-  contributors: '★',
-  settings: '⚙',
-  guide: '?',
-};
-
-function icon(name: keyof typeof ICONS): SafeHtml {
-  return html`<span class="step-dot" aria-hidden="true">${ICONS[name]}</span>`;
+function toastsFor(flash: PageContext['flash']): SafeHtml {
+  const kind = flash?.type === 'success' ? 'ok' : flash?.type === 'warn' ? 'warn' : 'info';
+  return html`<div class="toasts" id="toasts" role="status" aria-live="polite">${flash && flash.type !== 'error'
+    ? html`<div class="toast" data-auto>${icon(kind === 'ok' ? 'circle-check' : kind === 'warn' ? 'triangle-alert' : 'info', 16, `${kind === 'info' ? 'muted' : kind} lead`)}<span>${flash.message}</span>${iconBtn('x', 'Dismiss', { size: 'xs', attrs: raw('data-toast-close') })}</div>`
+    : ''}</div>`;
 }
 
 export function layout(ctx: PageContext, opts: { title: string; active: string; body: SafeHtml }): string {
   const ws = ctx.workspace;
   const base = ws ? `/w/${ws.id}` : '';
   const p = ctx.progress;
-  const sidebar = ws
-    ? html`
-      <nav class="nav" aria-label="Main">
-        ${navLink(base, 'Overview', opts.active === 'overview', icon('overview'))}
-        <div class="nav-label">Setup</div>
-        ${navLink(`${base}/setup/github`, 'Connect GitHub', opts.active === 'github', stepDot(p?.github ?? 'todo', 1))}
-        ${navLink(`${base}/setup/discord`, 'Connect Discord', opts.active === 'discord', stepDot(p?.discord ?? 'todo', 2))}
-        ${navLink(`${base}/apps`, 'Apps', opts.active === 'apps', stepDot(p?.apps ?? 'todo', 3))}
-        ${navLink(`${base}/panel`, 'Validate & publish', opts.active === 'panel', stepDot(p?.panel ?? 'todo', 4))}
-        <div class="nav-label">Manage</div>
-        ${navLink(`${base}/submissions`, 'Submissions', opts.active === 'submissions', icon('submissions'), p?.attention ? html`<span class="count" title="${p.attention} need attention">${String(p.attention)}</span>` : '')}
-        ${navLink(`${base}/contributors`, 'Contributor roles', opts.active === 'contributors', icon('contributors'))}
-        ${navLink(`${base}/settings`, 'Settings & admins', opts.active === 'settings', icon('settings'))}
-        ${navLink(`${base}/provider-setup`, 'Deployment setup', opts.active === 'provider', icon('guide'))}
+  const access = ctx.membership;
+  const a = opts.active;
+  const attention = p?.attention ? badge(p.attention) : '';
+  const manage = access ? can(access, 'manage') : false;
+
+  const nav = ws && access
+    ? html`<nav class="nav" aria-label="Main">
+        ${navItem(base, 'Overview', 'layout-dashboard', a === 'overview')}
+        ${manage ? html`<div class="nav-label">General setup</div>
+          ${navItem(`${base}/setup/github`, 'GitHub', 'github', a === 'github', stepMark(p?.github ?? 'todo'))}
+          ${navItem(`${base}/setup/discord`, 'Discord', 'message-circle', a === 'discord', stepMark(p?.discord ?? 'todo'))}
+          ${navItem(`${base}/apps`, 'Apps & repositories', 'boxes', a === 'apps', stepMark(p?.apps ?? 'todo'))}` : ''}
+        <div class="nav-label">Utilities</div>
+        ${navItem(`${base}/tickets`, 'Tickets', 'ticket', a === 'tickets', attention)}
+        ${can(access, 'contrib.view') ? navItem(`${base}/contributors`, 'Contributor Roles', 'award', a === 'contributors') : ''}
+        ${manage ? html`<div class="nav-label">Workspace</div>
+          ${navItem(`${base}/members`, 'Members & permissions', 'users', a === 'members')}
+          ${navItem(`${base}/settings`, 'Settings', 'settings', a === 'settings')}
+          ${navItem(`${base}/deployment`, 'Deployment', 'server', a === 'deployment')}` : ''}
       </nav>`
     : html``;
 
-  const switcher =
-    ws && ctx.memberships && ctx.memberships.length > 1
-      ? html`<div class="ws-switch"><label class="small muted" for="workspace-switch">Workspace</label>
-          <select id="workspace-switch">${ctx.memberships.map((m) => html`<option value="/w/${m.workspace.id}" ${m.workspace.id === ws.id ? raw('selected') : ''}>${m.workspace.name}</option>`)}</select></div>`
-      : ws
-        ? html`<div class="ws-switch small muted">${ws.name}</div>`
-        : html``;
+  const wsButton = ws
+    ? menu(
+        [
+          ...(ctx.memberships ?? []).map((m) => ({ href: `/w/${m.workspace.id}`, label: m.workspace.name, current: m.workspace.id === ws.id })),
+          'sep',
+          { href: '/workspaces', label: 'All workspaces' },
+        ],
+        {
+          trigger: (id) => html`<button type="button" class="ws" aria-haspopup="menu" aria-expanded="false" aria-controls="${id}" data-menu="${id}" title="Switch workspace"><span class="ws-tile" aria-hidden="true">${initials(ws.name, 2)}</span><span class="ws-name">${ws.name}</span>${icon('chevrons-up-down', 14)}</button>`,
+        },
+      )
+    : html``;
 
-  const avatar = discordAvatar(ctx.user);
+  const name = ctx.user.display_name ?? ctx.user.username;
   const page = html`<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>${opts.title} · Ticket Relay</title>
-  <link rel="icon" type="image/png" href="/static/logo.png">
-  <link rel="stylesheet" href="/static/app.css">
-  <script src="/static/app.js" defer></script>
+  ${head(opts.title)}
 </head>
 <body>
+<div class="topbar">
+  <button type="button" class="icon-btn" id="menu-btn" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false">${icon('menu')}${p?.attention ? raw('<span class="dot" aria-hidden="true"></span>') : ''}</button>
+  <div class="brand"><img src="/static/logo.png" alt="" width="24" height="24"><span>Ticket Relay</span></div>
+</div>
 <div class="shell">
-  <aside class="sidebar">
-    <div class="brand"><img class="brand-logo" src="/static/logo.png" alt="" width="28" height="28"> Ticket Relay</div>
-    ${switcher}
-    ${sidebar}
-    <div class="sidebar-footer">
-      <div class="identity compact">
-        ${avatar ? html`<img class="avatar sm" src="${avatar}" alt="">` : ''}
-        <span>${ctx.user.display_name ?? ctx.user.username}</span>
-      </div>
-      <a href="/workspaces">All workspaces</a> ·
-      <form method="post" action="/logout">${csrfField(ctx.csrf)}<button class="link-button">Sign out</button></form>
+  <aside class="sidebar" id="sidebar" aria-label="Sidebar">
+    <div class="brand"><img src="/static/logo.png" alt="" width="24" height="24"><span>Ticket Relay</span>${iconBtn('x', 'Close menu', { size: 'sm', cls: 'drawer-only', attrs: raw('id="drawer-close"') })}</div>
+    ${wsButton}
+    ${nav}
+    <div class="side-foot">
+      ${avatar(name, 28, { src: discordAvatar(ctx.user) })}
+      <div class="who"><div class="who-name">${name}</div>${access ? html`<div class="who-role">${roleLabel(access)}</div>` : ''}</div>
+      <form method="post" action="/logout" class="inline-form">${csrfField(ctx.csrf)}${iconBtn('log-out', 'Sign out', { size: 'sm', submit: true })}</form>
     </div>
   </aside>
   <main class="main" id="main">
-    ${ctx.flash ? alert(ctx.flash.type === 'error' ? 'error' : ctx.flash.type === 'success' ? 'success' : 'info', ctx.flash.message) : ''}
-    ${opts.body}
+    <div class="page">
+      ${ctx.flash?.type === 'error' ? notice('danger', null, ctx.flash.message) : ''}
+      ${opts.body}
+    </div>
   </main>
 </div>
+${toastsFor(ctx.flash)}
+${CONFIRM_DIALOG}
+${ICON_TEMPLATES}
 </body>
 </html>`;
   return page.value;
 }
 
+function badge(n: number): SafeHtml {
+  return html`<span class="badge warn" title="${String(n)} need attention">${String(n)}</span>`;
+}
+
 /** Standalone pages (sign-in, invitations, errors) without the app shell. */
-export function simplePage(title: string, body: SafeHtml): string {
+export function simplePage(title: string, body: SafeHtml, opts: { flash?: PageContext['flash'] } = {}): string {
   return html`<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>${title} · Ticket Relay</title>
-  <link rel="icon" type="image/png" href="/static/logo.png">
-  <link rel="stylesheet" href="/static/app.css">
-  <script src="/static/app.js" defer></script>
+  ${head(title)}
 </head>
 <body>
-  <div class="center-page"><div class="auth-card">
-    <div class="brand"><img class="brand-logo" src="/static/logo.png" alt="" width="28" height="28"> Ticket Relay</div>
-    <div class="card">${body}</div>
-  </div></div>
+  <main class="center-page"><div class="auth">
+    <div class="brand"><img src="/static/logo.png" alt="" width="24" height="24"><span>Ticket Relay</span></div>
+    <div class="card"><div class="card-b">${body}</div></div>
+  </div></main>
+  ${toastsFor(opts.flash ?? null)}
+  ${CONFIRM_DIALOG}
+  ${ICON_TEMPLATES}
 </body>
 </html>`.value;
-}
-
-export function pageHead(title: string, description?: string, actions?: SafeHtml): SafeHtml {
-  return html`<div class="page-head"><div><h1>${title}</h1>${description ? html`<p>${description}</p>` : ''}</div>${actions ? html`<div class="row">${actions}</div>` : ''}</div>`;
 }

@@ -6,7 +6,7 @@ import { checkPanel } from '../../domain/panel.js';
 import { createApp, deleteApp, getApp, getGitHubConnection, listApps, moveApp, setAppEnabled, updateApp } from '../../domain/store.js';
 import { UserFacingError, type AppRow, type Deps } from '../../domain/types.js';
 import { html, raw } from '../../lib/html.js';
-import { alert, badge, button, csrfField, pageHead, postButton } from '../layout.js';
+import { avatar, badge, csrfField, empty, icon, iconBtn, labelTag, linkBtn, menu, notice, pageHeader, pill, plural, selectWrap, submitBtn, tag } from '../ui.js';
 import { setFlash } from '../session.js';
 import type { Web, WorkspaceRequestContext } from '../server.js';
 
@@ -66,82 +66,123 @@ export function registerAppRoutes(app: FastifyInstance, web: Web): void {
     if (!ctx) return reply;
     const apps = await listApps(deps.db, ctx.workspace.id);
     const panel = await checkPanel(deps, ctx.workspace.id, { live: false });
+    // Repository health from the (cached) installation repository list, when GitHub is reachable.
+    const gh = await getGitHubConnection(deps.db, ctx.workspace.id);
+    const repoInfo = new Map<number, RepoInfo>();
+    if (gh && gh.status === 'active' && deps.github) {
+      try {
+        for (const r of await getInstallationRepos(deps, gh.installation_id)) repoInfo.set(r.id, r);
+      } catch {
+        // Unknown health is shown as normal; the Panel tab runs the full checks.
+      }
+    }
+    const ticketState = (a: AppRow) => {
+      if (!a.enabled) return tag('Off');
+      const r = repoInfo.get(a.repo_id);
+      if (repoInfo.size && !r) return pill('No access', 'danger');
+      if (r?.archived) return pill('Archived', 'warn');
+      if (r && !r.hasIssues) return pill('Issues disabled', 'warn');
+      return html`<span class="inline" aria-label="Files tickets" title="Files tickets">${icon('circle-check', 16, 'ok')}</span>`;
+    };
     const b = ctx.base;
     const repoUse = new Map<number, number>();
     for (const a of apps) repoUse.set(a.repo_id, (repoUse.get(a.repo_id) ?? 0) + 1);
+    const addApp = linkBtn(`${b}/apps/new`, 'Add app', { variant: 'primary', icon: 'plus' });
 
     const body = html`
-      ${pageHead('Step 3 · Apps', 'The apps members can pick in the ticket panel. Each app files its tickets in one GitHub repository; several apps can share a repository.', html`<a class="btn primary" href="${b}/apps/new">Add app</a>`)}
-      ${panel.state === 'published' && panel.outdated ? alert('info', html`<p>The panel in Discord doesn’t show your latest changes yet. <a href="${b}/panel">Update the panel</a>.</p>`) : ''}
+      ${pageHeader({
+        eyebrow: 'General setup · Step 3 of 3',
+        title: 'Apps & repositories',
+        after: apps.length ? badge(apps.length) : '',
+        description: 'The apps members pick in Discord, each mapped to a GitHub repository. Tickets and Contributor Roles both use this list.',
+        actions: addApp,
+      })}
+      ${panel.state === 'published' && panel.outdated
+        ? notice('info', 'The ticket panel in Discord doesn’t show your latest changes yet', 'Members still see the old list of apps.', { action: linkBtn(`${b}/tickets/panel`, 'Update panel', { size: 'sm' }) })
+        : ''}
       <div class="card">
         ${apps.length === 0
-          ? html`<div class="empty"><h3>No apps yet</h3><p>Add the first app people can file tickets for, for example “Mobile app” or “Billing portal”.</p><a class="btn primary" href="${b}/apps/new">Add your first app</a></div>`
-          : html`<div class="table-wrap"><table>
-              <thead><tr><th>Order</th><th>App (shown to members)</th><th>Files issues in</th><th>Labels</th><th>Status</th><th></th></tr></thead>
-              <tbody>${apps.map((a, i) => html`<tr class="${a.enabled ? '' : 'disabled'}">
-                <td class="nowrap">
-                  ${postButton(`${b}/apps/${a.id}/move`, '↑', ctx.csrf, { variant: 'sm', fields: { direction: 'up' }, disabled: i === 0 })}
-                  ${postButton(`${b}/apps/${a.id}/move`, '↓', ctx.csrf, { variant: 'sm', fields: { direction: 'down' }, disabled: i === apps.length - 1 })}
-                </td>
-                <td><strong>${a.name}</strong>${a.description ? html`<div class="sub">${a.description}</div>` : ''}</td>
-                <td><span class="mono">${a.repo_owner}/${a.repo_name}</span> ${a.repo_private ? badge('Private', 'plain') : badge('Public', 'warn')}${repoUse.get(a.repo_id)! > 1 ? html`<div class="sub">Shared with ${repoUse.get(a.repo_id)! - 1} other app${repoUse.get(a.repo_id)! > 2 ? 's' : ''}</div>` : ''}</td>
-                <td>${a.labels.length ? a.labels.map((l) => html`<span class="badge plain">${l}</span> `) : html`<span class="muted">—</span>`}</td>
-                <td>${a.enabled ? badge('Enabled', 'ok') : badge('Disabled', '')}</td>
-                <td class="nowrap">
-                  <a class="btn sm" href="${b}/apps/${a.id}/edit">Edit</a>
-                  ${postButton(`${b}/apps/${a.id}/toggle`, a.enabled ? 'Disable' : 'Enable', ctx.csrf, { variant: 'sm' })}
-                  ${postButton(`${b}/apps/${a.id}/delete`, 'Remove', ctx.csrf, { variant: 'sm danger', confirm: `Remove “${a.name}”? Members won’t be able to pick it after you update the panel. Past submissions are kept.` })}
-                </td></tr>`)}
-              </tbody></table></div>
-              <p class="small muted">Disabled apps are hidden from the panel. If there are more than 25 enabled apps, the panel shows the first 24 and a “More apps…” option that opens a page-by-page list.</p>`}
+          ? empty('boxes', 'No apps yet', 'Add the first app members can file tickets for, for example “Mobile app” or “Billing portal”.', addApp)
+          : html`<div class="card-b flush"><div class="table-wrap wide"><table>
+              <thead><tr><th>App</th><th>Repository</th><th class="center">Tickets</th><th class="center">Contributor Roles</th><th>Extra labels</th><th class="actions"><span class="sr-only">Actions</span></th></tr></thead>
+              <tbody>${apps.map((a, i) => {
+                const shared = repoUse.get(a.repo_id)! - 1;
+                return html`<tr class="${a.enabled ? '' : 'off'}">
+                  <td><span class="who-cell">${avatar(a.name, 28, { square: true, letters: 2 })}<span><span class="cell-title">${a.name}</span>${a.description ? html`<span class="sub">${a.description}</span>` : ''}</span></span></td>
+                  <td><span class="inline nowrap">${icon('folder-git-2', 14, 'muted')}<span class="mono">${a.repo_owner}/${a.repo_name}</span>${tag(a.repo_private ? 'Private' : 'Public', { icon: a.repo_private ? 'lock' : 'globe' })}</span>${shared > 0 ? html`<div class="sub">Shared with ${plural(shared, 'other app')}</div>` : ''}</td>
+                  <td class="center">${ticketState(a)}</td>
+                  <td class="center">${a.contributor_enabled ? html`<span class="inline" aria-label="Counts for Contributor Roles" title="Counts for Contributor Roles">${icon('circle-check', 16, 'ok')}</span>` : html`<span class="em" aria-label="Not counted">—</span>`}</td>
+                  <td>${a.labels.length ? html`<div class="tags">${a.labels.map((l) => labelTag(l))}</div>` : html`<span class="em">—</span>`}</td>
+                  <td class="actions"><div class="row">
+                    ${iconBtn('pencil', `Edit ${a.name}`, { size: 'sm', href: `${b}/apps/${a.id}/edit` })}
+                    ${menu([
+                      i > 0 ? { post: `${b}/apps/${a.id}/move`, label: 'Move up', icon: 'arrow-up', fields: { direction: 'up' } } : null,
+                      i < apps.length - 1 ? { post: `${b}/apps/${a.id}/move`, label: 'Move down', icon: 'arrow-down', fields: { direction: 'down' } } : null,
+                      { post: `${b}/apps/${a.id}/toggle`, label: a.enabled ? 'Hide from the panel' : 'Show on the panel', icon: a.enabled ? 'eye-off' : 'eye' },
+                      'sep',
+                      { post: `${b}/apps/${a.id}/delete`, label: 'Remove app…', icon: 'trash-2', danger: true, confirm: { title: `Remove “${a.name}”?`, body: 'Members can’t pick it after you update the panel. Past tickets are kept.', label: 'Remove app', danger: true } },
+                    ], { csrf: ctx.csrf, label: `More actions for ${a.name}` })}
+                  </div></td></tr>`;
+              })}
+              </tbody></table></div></div>
+              <div class="card-note">Hidden apps don’t appear on the panel. With more than 25 apps, the panel shows 24 and a “More apps…” option that opens a page-by-page list.</div>`}
       </div>`;
-    return web.render(reply, ctx, 'Apps', 'apps', body);
+    return web.render(reply, ctx, 'Apps & repositories', 'apps', body);
   });
 
   async function renderForm(ctx: WorkspaceRequestContext, reply: FastifyReply, existing: AppRow | null, values: FormValues, errors: string[] = []) {
     const b = ctx.base;
     const gh = await getGitHubConnection(deps.db, ctx.workspace.id);
     const title = existing ? `Edit ${existing.name}` : 'Add an app';
+    const header = pageHeader({
+      crumbs: [{ href: `${b}/apps`, label: 'Apps & repositories' }, { label: existing ? existing.name : 'New app' }],
+      title,
+      description: 'Members only see the name and description. The repository stays behind the scenes.',
+    });
     if (!gh || !deps.github) {
-      return web.render(reply, ctx, title, 'apps', html`${pageHead(title)}${alert('warn', html`<p>Connect GitHub first so you can choose a repository. <a href="${b}/setup/github">Connect GitHub</a></p>`)}`);
+      return web.render(reply, ctx, title, 'apps', html`${header}${notice('warn', 'Connect GitHub first', 'You need a connected GitHub account to choose a repository.', { action: linkBtn(`${b}/setup/github`, 'Connect GitHub', { size: 'sm' }) })}`);
     }
     let repos: RepoInfo[] = [];
     let repoError = '';
     try {
       repos = await getInstallationRepos(deps, gh.installation_id);
     } catch {
-      repoError = 'Could not load repositories from GitHub. Reload the page to try again.';
+      repoError = 'Couldn’t load repositories from GitHub. Reload the page to try again.';
     }
     const action = existing ? `${b}/apps/${existing.id}` : `${b}/apps`;
     const body = html`
-      ${pageHead(title, 'Members only see the name and description. The repository stays behind the scenes.')}
-      ${errors.length ? alert('error', html`<p><strong>Please fix the following:</strong></p><ul>${errors.map((e) => html`<li>${e}</li>`)}</ul>`) : ''}
-      ${repoError ? alert('error', repoError) : ''}
+      ${header}
+      ${errors.length ? notice('danger', 'Please fix the following', html`<ul>${errors.map((e) => html`<li>${e}</li>`)}</ul>`) : ''}
+      ${repoError ? notice('danger', null, repoError) : ''}
       <form method="post" action="${action}" class="card">
         ${csrfField(ctx.csrf)}
-        <div class="field"><label for="name">Name</label><input id="name" type="text" name="name" value="${values.name}" required maxlength="80" placeholder="e.g. Mobile app"><div class="hint">Shown in the app picker in Discord.</div></div>
-        <div class="field"><label for="description">Short description <span class="muted">(optional)</span></label><input id="description" type="text" name="description" value="${values.description}" maxlength="100" placeholder="e.g. iOS and Android app"><div class="hint">Helps members pick the right app. Up to 100 characters.</div></div>
-        <div class="field"><label for="repo">GitHub repository</label>
-          <select id="repo" name="repo_id" required>
-            <option value="">Choose a repository…</option>
-            ${repos.map((r) => {
-              const unusable = r.archived ? ' — archived' : !r.hasIssues ? ' — Issues disabled' : '';
-              return html`<option value="${String(r.id)}" data-private="${String(r.private)}" ${values.repoId === r.id ? raw('selected') : ''} ${unusable ? raw('disabled') : ''}>${r.fullName}${r.private ? ' (private)' : ' (public)'}${unusable}</option>`;
-            })}
-          </select>
-          <div class="hint" id="repo-visibility"></div>
-          ${repos.length === 0 && !repoError ? html`<div class="hint">No repositories are shared with the GitHub App yet. <a href="${b}/setup/github">Manage repository access</a>.</div>` : ''}
-        </div>
-        <div class="field"><span class="label-text"><strong>Labels</strong> <span class="muted">(optional)</span></span>
-          <div class="hint">Existing labels from the repository to add to every ticket for this app.</div>
-          <div class="label-list" id="label-list" data-endpoint="${b}/apps/labels" data-selected="${JSON.stringify(values.labels)}">
-            ${values.labels.map((l) => html`<label class="checkbox"><input type="checkbox" name="labels" value="${l}" checked> ${l}</label>`)}
-            ${values.labels.length ? '' : html`<span class="muted small">Choose a repository to see its labels.</span>`}
+        <div class="card-b"><div class="fields">
+          <div class="fields-2">
+            <div class="field"><label for="name">Name</label><input id="name" type="text" name="name" value="${values.name}" required maxlength="80" placeholder="Mobile app"><div class="hint">Shown in the app menu in Discord.</div></div>
+            <div class="field"><label for="description">Short description <span class="opt">(optional)</span></label><input id="description" type="text" name="description" value="${values.description}" maxlength="100" placeholder="iOS and Android"><div class="hint">Helps members pick the right app. Up to 100 characters.</div></div>
           </div>
-        </div>
-        <div class="field"><label class="checkbox"><input type="checkbox" name="enabled" value="1" ${values.enabled ? raw('checked') : ''}> Enabled (shown in the panel)</label></div>
-        <div class="row">${button(existing ? 'Save changes' : 'Add app', { variant: 'primary', loading: 'Saving…' })}<a class="btn" href="${b}/apps">Cancel</a></div>
-        ${existing ? html`<p class="small muted">Changing the repository only affects new tickets. Tickets already submitted keep going to the repository they were submitted for.</p>` : ''}
+          <div class="field"><label for="repo">GitHub repository</label>
+            ${selectWrap(html`<select id="repo" name="repo_id" required>
+              <option value="">Choose a repository…</option>
+              ${repos.map((r) => {
+                const unusable = r.archived ? ' · archived' : !r.hasIssues ? ' · Issues disabled' : '';
+                return html`<option value="${String(r.id)}" data-private="${String(r.private)}" ${values.repoId === r.id ? raw('selected') : ''} ${unusable ? raw('disabled') : ''}>${r.fullName}${r.private ? ' (private)' : ' (public)'}${unusable}</option>`;
+              })}
+            </select>`)}
+            <div class="hint" id="repo-visibility"></div>
+            ${repos.length === 0 && !repoError ? html`<div class="hint">No repositories are shared with the GitHub App yet. <a href="${b}/setup/github">Manage repository access</a>.</div>` : ''}
+          </div>
+          <div class="field"><span class="label">Labels <span class="opt">(optional)</span></span>
+            <div class="hint">Existing labels from the repository, added to every ticket for this app.</div>
+            <div class="check-list mt-8" id="label-list" data-endpoint="${b}/apps/labels" data-selected="${JSON.stringify(values.labels)}">
+              ${values.labels.map((l) => html`<label class="check"><input type="checkbox" name="labels" value="${l}" checked><span class="mono">${l}</span></label>`)}
+              ${values.labels.length ? '' : html`<span class="muted small">Choose a repository to see its labels.</span>`}
+            </div>
+          </div>
+          <label class="check"><input type="checkbox" name="enabled" value="1" ${values.enabled ? raw('checked') : ''}> Show this app on the panel</label>
+          ${existing ? html`<p class="small muted">Changing the repository only affects new tickets. Tickets already submitted stay with the repository they were filed for.</p>` : ''}
+        </div></div>
+        <div class="card-f"><span></span><div class="end">${linkBtn(`${b}/apps`, 'Cancel')}${submitBtn(existing ? 'Save changes' : 'Add app', { variant: 'primary', loading: 'Saving…' })}</div></div>
       </form>`;
     return web.render(reply, ctx, title, 'apps', body);
   }
@@ -188,7 +229,7 @@ export function registerAppRoutes(app: FastifyInstance, web: Web): void {
       if (err instanceof UserFacingError) return renderForm(ctx, reply.code(400), existing, result.values, [err.message]);
       throw err;
     }
-    setFlash(reply, 'success', existing ? `Saved “${input.name}”.` : `Added “${input.name}”. Update the panel to show it in Discord.`);
+    setFlash(reply, 'success', existing ? `Saved “${input.name}”` : `Added “${input.name}”. Update the panel to show it in Discord.`);
     return reply.redirect(`${ctx.base}/apps`);
   }
 
@@ -201,7 +242,7 @@ export function registerAppRoutes(app: FastifyInstance, web: Web): void {
     const existing = await getApp(deps.db, ctx.workspace.id, (req.params as { appId: string }).appId);
     if (!existing) return reply.callNotFound();
     await setAppEnabled(deps.db, ctx.workspace.id, existing.id, !existing.enabled);
-    setFlash(reply, 'success', `${existing.name} ${existing.enabled ? 'disabled' : 'enabled'}. Update the panel to reflect this in Discord.`);
+    setFlash(reply, 'success', `“${existing.name}” ${existing.enabled ? 'hidden from' : 'shown on'} the panel. Update the panel to reflect this in Discord.`);
     return reply.redirect(`${ctx.base}/apps`);
   });
 

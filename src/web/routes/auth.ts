@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { DiscordApiError } from '../../discord/client.js';
 import { BOT_INSTALL_PERMISSIONS } from '../../discord/permissions.js';
+import { can } from '../../domain/permissions.js';
 import { consumeState, createState } from '../../domain/oauth-state.js';
 import { saveDiscordGuild } from '../../domain/store.js';
 import { UserFacingError } from '../../domain/types.js';
@@ -16,7 +17,9 @@ import {
 } from '../../domain/workspaces.js';
 import { randomToken, safeEqual, sha256 } from '../../lib/crypto.js';
 import { html } from '../../lib/html.js';
-import { alert, button, csrfField, simplePage } from '../layout.js';
+import { ROLE_LABELS } from '../../domain/permissions.js';
+import { simplePage } from '../layout.js';
+import { csrfField, icon, initials, linkBtn, notice, submitBtn } from '../ui.js';
 import { createSession, destroySession, setFlash, setSessionCookie } from '../session.js';
 import type { Web } from '../server.js';
 
@@ -41,16 +44,15 @@ export function registerAuthRoutes(app: FastifyInstance, web: Web): void {
     if (req.auth) return reply.redirect(next);
     const error = (req.query as { error?: string }).error;
     const body = html`
-      <h1>Sign in</h1>
-      <p class="muted">Administrators sign in with their Discord account. Members who submit tickets never need to sign in here.</p>
-      ${error ? alert('error', error) : ''}
+      <div><h1>Sign in</h1><p class="muted small">Owners, admins and moderators sign in with Discord. Members who open tickets never need to sign in here.</p></div>
+      ${error ? notice('danger', null, error) : ''}
       ${deps.discord
-        ? html`<a class="btn discord lg" href="/auth/discord?next=${encodeURIComponent(next)}">Sign in with Discord</a>`
-        : alert('warn', html`<p><strong>Sign-in is not available yet.</strong> The Discord application credentials have not been configured on this deployment (${deps.config.missing.discord.join(', ')}). See <code>docs/PROVIDER_SETUP.md</code>.</p>`)}
+        ? linkBtn(`/auth/discord?next=${encodeURIComponent(next)}`, 'Sign in with Discord', { variant: 'primary', size: 'lg', block: true, icon: 'message-circle' })
+        : notice('warn', 'Sign-in isn’t available yet', html`The Discord application credentials aren’t configured on this deployment (${deps.config.missing.discord.join(', ')}). See <code>docs/PROVIDER_SETUP.md</code>.`)}
       ${deps.config.devLogin
-        ? html`<hr class="divider"><form method="post" action="/dev-login"><p class="small muted">Local development sign-in (disabled in production).</p>
-            <div class="field"><label for="dev-name">Name</label><input id="dev-name" type="text" name="name" value="Local Admin" required maxlength="40"></div>
-            <button class="btn" type="submit">Continue as local admin</button></form>`
+        ? html`<hr><form method="post" action="/dev-login" class="fields"><p class="xs muted">Local development sign-in (disabled in production).</p>
+            <div class="field"><label for="dev-name">Name</label><input id="dev-name" type="text" class="full" name="name" value="Local Admin" required maxlength="40"></div>
+            ${submitBtn('Continue as local admin', { block: true })}</form>`
         : ''}`;
     return reply.type('text/html').send(simplePage('Sign in', body));
   });
@@ -106,7 +108,8 @@ export function registerAuthRoutes(app: FastifyInstance, web: Web): void {
     // Bot installation: bind the server to the workspace that started the flow.
     const wid = state.workspace_id!;
     const back = `/w/${wid}/setup/discord`;
-    if (!req.auth || req.auth.session.id !== state.session_id || !(await getMembership(deps.db, req.auth.user.id, wid))) {
+    const botMember = req.auth ? await getMembership(deps.db, req.auth.user.id, wid) : null;
+    if (!req.auth || req.auth.session.id !== state.session_id || !botMember || !can(botMember, 'manage')) {
       return reply.redirect('/login');
     }
     if (q.error || !q.code) {
@@ -118,7 +121,7 @@ export function registerAuthRoutes(app: FastifyInstance, web: Web): void {
       const token = await deps.discord.exchangeCode(q.code, discordRedirect);
       if (!token.guild) throw new UserFacingError('Discord did not report which server the bot was added to. Please try again.');
       await saveDiscordGuild(deps.db, wid, token.guild, req.auth.user.id);
-      setFlash(reply, 'success', `The bot was added to “${token.guild.name}”. Now choose the tickets channel.`);
+      setFlash(reply, 'success', `The bot was added to “${token.guild.name}”. Choose the tickets channel on the Tickets › Panel tab.`);
     } catch (err) {
       setFlash(reply, 'error', err instanceof UserFacingError ? err.message : 'Could not complete the bot installation. Please try again.');
       deps.log.warn({ err: (err as Error).message }, 'bot installation callback failed');
@@ -152,19 +155,19 @@ export function registerAuthRoutes(app: FastifyInstance, web: Web): void {
     const mayCreate = await canCreateWorkspace(deps.db, deps.config, auth.user);
     const body = html`
       <h1>Your workspaces</h1>
-      ${ctx.flash ? alert(ctx.flash.type === 'error' ? 'error' : 'success', ctx.flash.message) : ''}
+      ${ctx.flash?.type === 'error' ? notice('danger', null, ctx.flash.message) : ''}
       ${memberships.length
-        ? html`<div class="stack">${memberships.map((m) => html`<a class="btn" href="/w/${m.workspace.id}">${m.workspace.name} <span class="muted small">(${m.role})</span></a>`)}</div><hr class="divider">`
-        : html`<p class="muted">You are not a member of any workspace yet.</p>`}
+        ? html`<div class="ws-list">${memberships.map((m) => html`<a href="/w/${m.workspace.id}"><span class="ws-tile" aria-hidden="true">${initials(m.workspace.name, 2)}</span><span class="grow"><span class="name">${m.workspace.name}</span><span class="sub">${ROLE_LABELS[m.role]}</span></span>${icon('chevron-right')}</a>`)}</div>`
+        : html`<p class="muted small">You’re not a member of any workspace yet.</p>`}
       ${mayCreate
-        ? html`<form method="post" action="/workspaces">${csrfField(ctx.csrf)}
+        ? html`<form method="post" action="/workspaces" class="fields">${csrfField(ctx.csrf)}
             <div class="field"><label for="ws-name">Create a workspace</label>
-            <input id="ws-name" type="text" name="name" placeholder="e.g. Acme Support" required maxlength="80">
+            <input id="ws-name" type="text" class="full" name="name" placeholder="Acme Support" required maxlength="80">
             <div class="hint">A workspace holds one GitHub connection, one Discord server and its apps.</div></div>
-            ${button('Create workspace', { variant: 'primary' })}</form>`
-        : html`<p class="muted small">To get access, ask an owner of an existing workspace for an invitation link.</p>`}
-      <hr class="divider"><form method="post" action="/logout">${csrfField(ctx.csrf)}<button class="link-button">Sign out</button></form>`;
-    return reply.type('text/html').send(simplePage('Workspaces', body));
+            ${submitBtn('Create workspace', { variant: 'primary', block: true, icon: 'plus' })}</form>`
+        : html`<p class="muted small">To get access, ask the owner of an existing workspace for an invitation link.</p>`}
+      <hr><form method="post" action="/logout" class="spread">${csrfField(ctx.csrf)}<span class="small muted">Signed in as ${auth.user.display_name ?? auth.user.username}</span>${submitBtn('Sign out', { variant: 'ghost muted', size: 'sm', icon: 'log-out' })}</form>`;
+    return reply.type('text/html').send(simplePage('Workspaces', body, { flash: ctx.flash }));
   });
 
   app.post('/workspaces', async (req, reply) => {
@@ -185,10 +188,10 @@ export function registerAuthRoutes(app: FastifyInstance, web: Web): void {
     const invite = await findInvite(deps.db, token);
     const ctx = web.pageContext(req, reply);
     const body = invite
-      ? html`<h1>Join ${invite.workspace_name}</h1>
-          <p class="muted">You were invited to help manage tickets for this workspace as an admin.</p>
-          <form method="post" action="/invite/${token}">${csrfField(ctx.csrf)}${button('Accept invitation', { variant: 'primary' })}</form>`
-      : html`<h1>Invitation unavailable</h1><p class="muted">This invitation link is invalid, expired or has already been used. Ask the workspace owner for a new one.</p><a class="btn" href="/">Back to the app</a>`;
+      ? html`<div><h1>Join ${invite.workspace_name}</h1>
+          <p class="muted small">You were invited as ${invite.role === 'moderator' ? 'a moderator. You’ll see the tickets inbox; an admin decides what else you can do.' : 'an admin. You’ll be able to manage the whole integration.'}</p></div>
+          <form method="post" action="/invite/${token}">${csrfField(ctx.csrf)}${submitBtn('Accept invitation', { variant: 'primary', block: true })}</form>`
+      : html`<div><h1>Invitation unavailable</h1><p class="muted small">This invitation link is invalid, expired or has already been used. Ask the workspace owner for a new one.</p></div>${linkBtn('/', 'Back to the console', { block: true })}`;
     return reply.type('text/html').send(simplePage('Invitation', body));
   });
 
@@ -196,7 +199,7 @@ export function registerAuthRoutes(app: FastifyInstance, web: Web): void {
     const auth = web.requireUser(req, reply);
     if (!auth) return reply;
     const wid = await acceptInvite(deps.db, (req.params as { token: string }).token, auth.user.id);
-    setFlash(reply, 'success', 'Welcome! You now have admin access to this workspace.');
+    setFlash(reply, 'success', 'Welcome. You now have access to this workspace.');
     return reply.redirect(`/w/${wid}`);
   });
 

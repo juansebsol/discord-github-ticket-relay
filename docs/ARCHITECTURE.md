@@ -28,15 +28,18 @@ Discord endpoint, OAuth) and one or more queue workers.
   them with one atomic `UPDATE … RETURNING` under SQLite's write lock, plus a 90s lease.
   WAL mode and a busy timeout let processes share the file on one host.
 - **Server-rendered admin UI.** No frontend build. A small progressive-enhancement script, a
-  strict CSP, and no credentials in the browser.
+  strict CSP, and no credentials in the browser. Icons are Lucide SVGs inlined from
+  `src/web/icon-data.ts` (regenerate with `node scripts/build-icons.mjs`).
 
 ### Tenancy
 
 - All data is scoped to a **workspace**: one GitHub App installation and one Discord server.
 - A Discord server maps to exactly one workspace, because interactions are routed by `guild_id`.
   This is enforced by a unique constraint.
-- Admins authenticate with Discord OAuth and hold an `owner` or `admin` role per workspace.
-  Non-members receive 404 on workspace routes.
+- People sign in with Discord OAuth and hold an `owner`, `admin` or `moderator` role per
+  workspace. Moderators see the tickets inbox; admins grant them *Act on tickets* and
+  *See verifications* per person. Routes need `manage` unless they opt in to a lower
+  permission (`src/domain/permissions.ts`). Non-members receive 404 on workspace routes.
 - Workspace creation is limited to `PLATFORM_ADMIN_DISCORD_IDS`. If that list is empty, only the
   first user of a fresh deployment can create one. `OPEN_WORKSPACE_CREATION=true` lifts the limit.
 
@@ -96,7 +99,7 @@ stable user ID are recorded in the body.
 | `GET /oauth/github/callback` | Browser | One-time state. Installation verified via `GET /user/installations`. |
 | `POST /github/webhook` | GitHub | HMAC-SHA256 (`X-Hub-Signature-256`). 404 when no secret is configured. |
 | `GET /healthz` | Load balancer | none (DB ping) |
-| `/w/:workspaceId/*` | Admins | Session cookie, workspace membership, CSRF on POST |
+| `/w/:workspaceId/*` | Owners, admins, moderators | Session cookie, workspace membership and role permission, CSRF on POST |
 
 ## Data model
 

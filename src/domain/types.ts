@@ -42,7 +42,7 @@ export interface UserRow {
   avatar: string | null;
 }
 
-export type Role = 'owner' | 'admin';
+export type Role = 'owner' | 'admin' | 'moderator';
 
 export interface GitHubConnectionRow {
   workspace_id: string;

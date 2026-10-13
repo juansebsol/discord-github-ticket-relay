@@ -17,7 +17,7 @@ afterAll(async () => {
 describe('admin authorization and workspace isolation', () => {
   it('requires sign-in for every admin page', async () => {
     const ws = await makeWorkspace(env);
-    for (const url of ['/workspaces', `/w/${ws.workspace.id}`, `/w/${ws.workspace.id}/apps`, `/w/${ws.workspace.id}/submissions`]) {
+    for (const url of ['/workspaces', `/w/${ws.workspace.id}`, `/w/${ws.workspace.id}/apps`, `/w/${ws.workspace.id}/tickets`]) {
       const res = await env.server.inject({ method: 'GET', url });
       expect(res.statusCode, url).toBe(302);
       expect(res.headers.location).toBe('/login');
@@ -27,7 +27,7 @@ describe('admin authorization and workspace isolation', () => {
   it('hides other workspaces entirely (404, not 403)', async () => {
     const a = await makeWorkspace(env);
     const b = await makeWorkspace(env);
-    const pages = ['', '/apps', '/settings', '/submissions', '/panel', '/setup/github', '/setup/discord', `/apps/${b.apps[0]!.id}/edit`];
+    const pages = ['', '/apps', '/settings', '/members', '/tickets', '/tickets/panel', '/contributors', '/setup/github', '/setup/discord', `/apps/${b.apps[0]!.id}/edit`];
     for (const p of pages) {
       const res = await env.server.inject({ method: 'GET', url: `/w/${b.workspace.id}${p}`, ...get(a.owner) });
       expect(res.statusCode, p).toBe(404);
@@ -38,7 +38,7 @@ describe('admin authorization and workspace isolation', () => {
     const del = await env.server.inject({ method: 'POST', url: `/w/${a.workspace.id}/apps/${b.apps[0]!.id}/delete`, ...form(a.owner) });
     expect(del.statusCode).toBe(404);
     expect(await listApps(env.db, b.workspace.id)).toHaveLength(1);
-    const publish = await env.server.inject({ method: 'POST', url: `/w/${b.workspace.id}/panel/publish`, ...form(a.owner) });
+    const publish = await env.server.inject({ method: 'POST', url: `/w/${b.workspace.id}/tickets/panel`, ...form(a.owner, { intent: 'publish' }) });
     expect(publish.statusCode).toBe(404);
   });
 
@@ -66,8 +66,8 @@ describe('admin authorization and workspace isolation', () => {
     const intruder = await makeAdmin(env, 'intruder');
     expect((await env.server.inject({ method: 'POST', url: `/invite/${token}`, ...form(intruder) })).statusCode).toBe(404);
     // Admins (non-owners) can't invite or remove people.
-    expect((await env.server.inject({ method: 'POST', url: `/w/${ws.workspace.id}/settings/invites`, ...form(invitee) })).statusCode).toBe(404);
-    expect((await env.server.inject({ method: 'POST', url: `/w/${ws.workspace.id}/settings/members/${ws.owner.user.id}/remove`, ...form(invitee) })).statusCode).toBe(404);
+    expect((await env.server.inject({ method: 'POST', url: `/w/${ws.workspace.id}/members/invites`, ...form(invitee) })).statusCode).toBe(403);
+    expect((await env.server.inject({ method: 'POST', url: `/w/${ws.workspace.id}/members/${ws.owner.user.id}/remove`, ...form(invitee) })).statusCode).toBe(403);
   });
 
   it('restricts workspace creation to the first user or configured platform admins', async () => {
@@ -83,7 +83,7 @@ describe('admin authorization and workspace isolation', () => {
 
   it('never renders credentials in pages', async () => {
     const ws = await makeWorkspace(env);
-    for (const p of ['', '/provider-setup', '/setup/github', '/setup/discord', '/panel']) {
+    for (const p of ['', '/deployment', '/setup/github', '/setup/discord', '/tickets/panel', '/contributors/panel', '/members']) {
       const res = await env.server.inject({ method: 'GET', url: `/w/${ws.workspace.id}${p}`, ...get(ws.owner) });
       expect(res.statusCode, p).toBe(200);
       for (const secret of ['bot-token', 'discord-secret', 'gh-secret', 'webhook-secret', 'PRIVATE KEY']) expect(res.body, `${p} leaks ${secret}`).not.toContain(secret);
@@ -124,14 +124,13 @@ describe('integration configuration and validation', () => {
     const ws = await makeWorkspace(env);
     const guild = env.discord.guilds.get(ws.guildId)!;
     guild.channels.push({ id: '777', type: 0, name: 'locked', position: 1, permission_overwrites: [{ id: `${ws.guildId}9`, type: 0, allow: '0', deny: String(1n << 11n) }] });
-    const page = await env.server.inject({ method: 'GET', url: `/w/${ws.workspace.id}/setup/discord`, ...get(ws.owner) });
-    expect(page.body).toContain('#locked');
-    expect(page.body).toContain('Send Messages');
+    const page = await env.server.inject({ method: 'GET', url: `/w/${ws.workspace.id}/tickets/panel`, ...get(ws.owner) });
+    expect(page.body).toContain('#locked (bot missing: Send Messages');
 
-    const locked = await env.server.inject({ method: 'POST', url: `/w/${ws.workspace.id}/setup/discord/channel`, ...form(ws.owner, { channel_id: '777' }) });
+    const locked = await env.server.inject({ method: 'POST', url: `/w/${ws.workspace.id}/tickets/panel`, ...form(ws.owner, { channel_id: '777', intent: 'save' }) });
     expect(locked.statusCode).toBe(302);
     expect((await getDiscordConnection(env.db, ws.workspace.id))!.tickets_channel_id).toBe(ws.channelId);
-    const foreign = await env.server.inject({ method: 'POST', url: `/w/${ws.workspace.id}/setup/discord/channel`, ...form(ws.owner, { channel_id: '123456' }) });
+    const foreign = await env.server.inject({ method: 'POST', url: `/w/${ws.workspace.id}/tickets/panel`, ...form(ws.owner, { channel_id: '123456', intent: 'save' }) });
     expect(foreign.statusCode).toBe(302);
     expect((await getDiscordConnection(env.db, ws.workspace.id))!.tickets_channel_id).toBe(ws.channelId);
   });
@@ -140,14 +139,14 @@ describe('integration configuration and validation', () => {
     const ws = await makeWorkspace(env, { apps: [{ name: 'Mobile App', labels: ['bug'] }, { name: 'Website', repoIndex: 1 }] });
     env.github.repos.get(ws.repoIds[1]!)!.has_issues = false;
     env.github.repos.get(ws.repoIds[0]!)!.labels = [];
-    const page = await env.server.inject({ method: 'GET', url: `/w/${ws.workspace.id}/panel`, ...get(ws.owner) });
+    const page = await env.server.inject({ method: 'GET', url: `/w/${ws.workspace.id}/tickets/panel`, ...get(ws.owner) });
     expect(page.body).toContain('Website: Issues are disabled');
     expect(page.body).toContain('label bug no longer exists');
-    expect(page.body).toContain('The ticket panel has not been published yet');
-    expect(page.body).toMatch(/<button type="submit" class="btn primary"[^>]*disabled/);
+    expect(page.body).toContain('Not published');
+    expect(page.body).not.toContain('value="publish"'); // problems block publishing
 
     env.discord.botGuildIds.delete(ws.guildId);
-    const removed = await env.server.inject({ method: 'GET', url: `/w/${ws.workspace.id}/panel`, ...get(ws.owner) });
+    const removed = await env.server.inject({ method: 'GET', url: `/w/${ws.workspace.id}/tickets/panel`, ...get(ws.owner) });
     expect(removed.body).toContain('The bot is not in this Discord server');
     expect((await getDiscordConnection(env.db, ws.workspace.id))!.status).toBe('removed');
   });
@@ -230,8 +229,8 @@ describe('integration configuration and validation', () => {
 describe('panel publishing', () => {
   it('publishes once, then edits the same message in place', async () => {
     const ws = await makeWorkspace(env);
-    const url = `/w/${ws.workspace.id}/panel/publish`;
-    await env.server.inject({ method: 'POST', url, ...form(ws.owner) });
+    const url = `/w/${ws.workspace.id}/tickets/panel`;
+    await env.server.inject({ method: 'POST', url, ...form(ws.owner, { intent: 'publish' }) });
     const panel = (await getPanel(env.db, ws.workspace.id))!;
     expect(env.discord.messages.get(panel.message_id)!.channelId).toBe(ws.channelId);
     expect(env.discord.messages.get(panel.message_id)!.payload.allowed_mentions).toEqual({ parse: [] });
@@ -240,7 +239,7 @@ describe('panel publishing', () => {
     const apps = await env.server.inject({ method: 'GET', url: `/w/${ws.workspace.id}/apps`, ...get(ws.owner) });
     expect(apps.body).toContain('doesn’t show your latest changes');
 
-    await env.server.inject({ method: 'POST', url, ...form(ws.owner) });
+    await env.server.inject({ method: 'POST', url, ...form(ws.owner, { intent: 'publish' }) });
     const after = (await getPanel(env.db, ws.workspace.id))!;
     expect(after.message_id).toBe(panel.message_id);
     expect(env.discord.messages.size).toBe(1);
@@ -250,24 +249,24 @@ describe('panel publishing', () => {
 
   it('re-posts a deleted panel and moves it when the channel changes', async () => {
     const ws = await makeWorkspace(env);
-    const url = `/w/${ws.workspace.id}/panel/publish`;
-    await env.server.inject({ method: 'POST', url, ...form(ws.owner) });
+    const url = `/w/${ws.workspace.id}/tickets/panel`;
+    await env.server.inject({ method: 'POST', url, ...form(ws.owner, { intent: 'publish' }) });
     const first = (await getPanel(env.db, ws.workspace.id))!;
     env.discord.messages.delete(first.message_id);
 
-    const page = await env.server.inject({ method: 'GET', url: `/w/${ws.workspace.id}/panel`, ...get(ws.owner) });
-    expect(page.body).toContain('The ticket panel was deleted from Discord');
+    const page = await env.server.inject({ method: 'GET', url: `/w/${ws.workspace.id}/tickets/panel`, ...get(ws.owner) });
+    expect(page.body).toContain('Deleted in Discord');
     expect((await getPanel(env.db, ws.workspace.id))!.status).toBe('missing');
 
-    await env.server.inject({ method: 'POST', url, ...form(ws.owner) });
+    await env.server.inject({ method: 'POST', url, ...form(ws.owner, { intent: 'publish' }) });
     const second = (await getPanel(env.db, ws.workspace.id))!;
     expect(second.message_id).not.toBe(first.message_id);
     expect(second.status).toBe('published');
 
     const guild = env.discord.guilds.get(ws.guildId)!;
     guild.channels.push({ id: '880', type: 0, name: 'help', position: 2 });
-    await env.server.inject({ method: 'POST', url: `/w/${ws.workspace.id}/setup/discord/channel`, ...form(ws.owner, { channel_id: '880' }) });
-    await env.server.inject({ method: 'POST', url, ...form(ws.owner) });
+    await env.server.inject({ method: 'POST', url: `/w/${ws.workspace.id}/tickets/panel`, ...form(ws.owner, { channel_id: '880', intent: 'save' }) });
+    await env.server.inject({ method: 'POST', url, ...form(ws.owner, { intent: 'publish' }) });
     const moved = (await getPanel(env.db, ws.workspace.id))!;
     expect(moved.channel_id).toBe('880');
     expect(env.discord.messages.has(second.message_id)).toBe(false);
@@ -277,7 +276,7 @@ describe('panel publishing', () => {
   it('explains Discord permission errors when publishing', async () => {
     const ws = await makeWorkspace(env);
     env.discord.failNextCreate = { status: 403, code: 50013 };
-    const res = await env.server.inject({ method: 'POST', url: `/w/${ws.workspace.id}/panel/publish`, ...form(ws.owner) });
+    const res = await env.server.inject({ method: 'POST', url: `/w/${ws.workspace.id}/tickets/panel`, ...form(ws.owner, { intent: 'publish' }) });
     expect(res.statusCode).toBe(302);
     expect(await getPanel(env.db, ws.workspace.id)).toBeNull();
     const flash = res.cookies.find((c) => c.name === 'tr_flash')!.value;
@@ -286,16 +285,16 @@ describe('panel publishing', () => {
 
   it('creates a test issue only when the admin explicitly sends one', async () => {
     const ws = await makeWorkspace(env);
-    await env.server.inject({ method: 'GET', url: `/w/${ws.workspace.id}/panel`, ...get(ws.owner) });
+    await env.server.inject({ method: 'GET', url: `/w/${ws.workspace.id}/tickets/panel`, ...get(ws.owner) });
     expect(env.github.createCalls).toBe(0);
-    const res = await env.server.inject({ method: 'POST', url: `/w/${ws.workspace.id}/panel/test`, ...form(ws.owner, { app_id: ws.apps[0]!.id }) });
+    const res = await env.server.inject({ method: 'POST', url: `/w/${ws.workspace.id}/tickets/panel/test`, ...form(ws.owner, { app_id: ws.apps[0]!.id }) });
     expect(res.statusCode).toBe(302);
-    expect(res.headers.location).toMatch(new RegExp(`/w/${ws.workspace.id}/submissions/`));
+    expect(res.headers.location).toMatch(new RegExp(`/w/${ws.workspace.id}/tickets/`));
     const issue = env.github.allIssues()[0]!;
     expect(issue.title).toBe('[Test] [Mobile App] Ticket Relay connection test');
     expect(issue.body).toContain('This is a test ticket');
     const detail = await env.server.inject({ method: 'GET', url: res.headers.location as string, ...get(ws.owner) });
-    expect(detail.body).toContain('Created');
+    expect(detail.body).toContain('Filed');
   });
 });
 
@@ -307,10 +306,10 @@ describe('missing deployment configuration', () => {
     const ws = await createWorkspace(bare.db, { ...bare.deps.config, openWorkspaceCreation: true }, owner.user, 'Bare');
     const overview = await bare.server.inject({ method: 'GET', url: `/w/${ws.id}`, ...get(owner) });
     expect(overview.body).toContain('Deployment setup incomplete');
-    const setup = await bare.server.inject({ method: 'GET', url: `/w/${ws.id}/provider-setup`, ...get(owner) });
+    const setup = await bare.server.inject({ method: 'GET', url: `/w/${ws.id}/deployment`, ...get(owner) });
     expect(setup.body).toContain('DISCORD_BOT_TOKEN');
     expect(setup.body).toContain('https://relay.example.test/discord/interactions');
-    for (const url of ['/setup/github/install', '/setup/github/link', '/setup/discord/install', '/setup/discord/server', '/setup/discord/channel']) {
+    for (const url of ['/setup/github/install', '/setup/github/link', '/setup/discord/install', '/setup/discord/server', '/tickets/panel']) {
       const res = await bare.server.inject({ method: 'POST', url: `/w/${ws.id}${url}`, ...form(owner) });
       expect(res.statusCode, url).toBe(302);
     }
@@ -340,16 +339,16 @@ describe('GitHub App credential problems', () => {
     expect(flash).toMatch(/secrets\/sec\.pem/);
     expect(await getGitHubConnection(env.db, ws.id)).toBeNull();
     const page = await env.server.inject({ method: 'GET', url: `/w/${ws.id}/setup/github`, ...get(owner) });
-    expect(page.body).toContain("GitHub App credentials don't work");
+    expect(page.body).toContain('GitHub App credentials don’t work');
   });
 
   it('verifies credentials and catches a wrong slug on the deployment page', async () => {
     const ws = await makeWorkspace(env);
-    const ok = await env.server.inject({ method: 'GET', url: `/w/${ws.workspace.id}/provider-setup`, ...get(ws.owner) });
+    const ok = await env.server.inject({ method: 'GET', url: `/w/${ws.workspace.id}/deployment`, ...get(ws.owner) });
     expect(ok.body).toContain('Credentials work for the GitHub App');
     expect(ok.body).toContain('Bot token works');
     env.github.appSlug = 'ticket-craft';
-    const wrong = await env.server.inject({ method: 'GET', url: `/w/${ws.workspace.id}/provider-setup`, ...get(ws.owner) });
+    const wrong = await env.server.inject({ method: 'GET', url: `/w/${ws.workspace.id}/deployment`, ...get(ws.owner) });
     expect(wrong.body).toContain('Set GITHUB_APP_SLUG=ticket-craft');
   });
 });

@@ -2,6 +2,7 @@ import { withTransaction, type Db, type Queryable } from '../db/database.js';
 import { randomUUID } from 'node:crypto';
 import { randomToken, sha256 } from '../lib/crypto.js';
 import type { Config } from '../config.js';
+import type { MemberAccess } from './permissions.js';
 import { UserFacingError, type Role, type UserRow, type WorkspaceRow } from './types.js';
 
 export async function upsertUser(
@@ -20,31 +21,40 @@ export async function upsertUser(
   return rows[0]!;
 }
 
-export interface Membership {
+export interface Membership extends MemberAccess {
   workspace: WorkspaceRow;
-  role: Role;
+}
+
+const MEMBER_COLUMNS = 'm.role, m.can_act_tickets, m.can_view_contributors';
+
+function toMembership(row: Record<string, unknown>): Membership {
+  const { role, can_act_tickets, can_view_contributors, ...workspace } = row;
+  return {
+    workspace: workspace as unknown as WorkspaceRow,
+    role: role as Role,
+    can_act_tickets: Boolean(can_act_tickets),
+    can_view_contributors: Boolean(can_view_contributors),
+  };
 }
 
 export async function listMemberships(q: Queryable, userId: string): Promise<Membership[]> {
   const { rows } = await q.query(
-    `SELECT w.*, m.role FROM workspace_members m JOIN workspaces w ON w.id = m.workspace_id
+    `SELECT w.*, ${MEMBER_COLUMNS} FROM workspace_members m JOIN workspaces w ON w.id = m.workspace_id
      WHERE m.user_id = $1 ORDER BY w.created_at`,
     [userId],
   );
-  return rows.map(({ role, ...workspace }) => ({ workspace: workspace as WorkspaceRow, role }));
+  return rows.map(toMembership);
 }
 
 /** Returns the membership only if the user belongs to the workspace. */
 export async function getMembership(q: Queryable, userId: string, workspaceId: string): Promise<Membership | null> {
   if (!/^[0-9a-f-]{36}$/i.test(workspaceId)) return null;
   const { rows } = await q.query(
-    `SELECT w.*, m.role FROM workspace_members m JOIN workspaces w ON w.id = m.workspace_id
+    `SELECT w.*, ${MEMBER_COLUMNS} FROM workspace_members m JOIN workspaces w ON w.id = m.workspace_id
      WHERE m.user_id = $1 AND m.workspace_id = $2`,
     [userId, workspaceId],
   );
-  if (!rows[0]) return null;
-  const { role, ...workspace } = rows[0];
-  return { workspace: workspace as WorkspaceRow, role };
+  return rows[0] ? toMembership(rows[0]) : null;
 }
 
 export async function getWorkspace(q: Queryable, id: string): Promise<WorkspaceRow | null> {
@@ -76,29 +86,44 @@ export async function createWorkspace(db: Db, config: Config, user: UserRow, nam
   });
 }
 
-export interface WorkspaceSettingsInput {
-  name: string;
-  rateLimitCount: number;
-  rateLimitWindowMinutes: number;
-  duplicateWindowMinutes: number;
-  retentionDays: number;
-  panelTitle: string | null;
-  panelIntro: string | null;
+/** Workspace name and how long ticket text is kept (Settings page). */
+export async function updateWorkspaceGeneral(q: Queryable, workspaceId: string, s: { name: string; retentionDays: number }): Promise<void> {
+  await q.query('UPDATE workspaces SET name = $2, retention_days = $3, updated_at = now_ms() WHERE id = $1', [workspaceId, s.name, s.retentionDays]);
 }
 
-export async function updateWorkspaceSettings(q: Queryable, workspaceId: string, s: WorkspaceSettingsInput): Promise<void> {
+/** Spam and duplicate limits per Discord member (Tickets › Settings). */
+export async function updateTicketLimits(
+  q: Queryable,
+  workspaceId: string,
+  s: { rateLimitCount: number; rateLimitWindowMinutes: number; duplicateWindowMinutes: number },
+): Promise<void> {
   await q.query(
-    `UPDATE workspaces SET name = $2, rate_limit_count = $3, rate_limit_window_minutes = $4,
-       duplicate_window_minutes = $5, retention_days = $6, panel_title = $7, panel_intro = $8, updated_at = now_ms()
-     WHERE id = $1`,
-    [workspaceId, s.name, s.rateLimitCount, s.rateLimitWindowMinutes, s.duplicateWindowMinutes, s.retentionDays, s.panelTitle, s.panelIntro],
+    'UPDATE workspaces SET rate_limit_count = $2, rate_limit_window_minutes = $3, duplicate_window_minutes = $4, updated_at = now_ms() WHERE id = $1',
+    [workspaceId, s.rateLimitCount, s.rateLimitWindowMinutes, s.duplicateWindowMinutes],
   );
 }
 
+/** Ticket panel heading and introduction (null = default text). */
+export async function updatePanelText(q: Queryable, workspaceId: string, s: { panelTitle: string | null; panelIntro: string | null }): Promise<void> {
+  await q.query('UPDATE workspaces SET panel_title = $2, panel_intro = $3, updated_at = now_ms() WHERE id = $1', [workspaceId, s.panelTitle, s.panelIntro]);
+}
+
+/** Display names for user ids (actors in ticket activity). */
+export async function userNames(q: Queryable, ids: (string | null | undefined)[]): Promise<Map<string, string>> {
+  const unique = [...new Set(ids.filter((id): id is string => typeof id === 'string' && id.length > 0))];
+  if (!unique.length) return new Map();
+  const { rows } = await q.query<{ id: string; name: string }>(
+    'SELECT id, COALESCE(display_name, username) AS name FROM users WHERE id IN (SELECT value FROM json_each($1))',
+    [unique],
+  );
+  return new Map(rows.map((r) => [r.id, r.name]));
+}
+
 export async function listMembers(q: Queryable, workspaceId: string) {
-  const { rows } = await q.query<UserRow & { role: Role; joined_at: Date }>(
-    `SELECT u.*, m.role, m.created_at AS joined_at FROM workspace_members m JOIN users u ON u.id = m.user_id
-     WHERE m.workspace_id = $1 ORDER BY m.role DESC, m.created_at`,
+  const { rows } = await q.query<UserRow & MemberAccess & { joined_at: Date }>(
+    `SELECT u.*, ${MEMBER_COLUMNS}, m.created_at AS joined_at FROM workspace_members m JOIN users u ON u.id = m.user_id
+     WHERE m.workspace_id = $1
+     ORDER BY CASE m.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END, m.created_at`,
     [workspaceId],
   );
   return rows;
@@ -119,24 +144,25 @@ export async function removeMember(db: Db, workspaceId: string, userId: string):
   });
 }
 
-export async function createInvite(q: Queryable, workspaceId: string, createdBy: string): Promise<string> {
+export async function createInvite(q: Queryable, workspaceId: string, createdBy: string, role: 'admin' | 'moderator' = 'admin'): Promise<string> {
   const token = randomToken(24);
   await q.query(
-    `INSERT INTO workspace_invites (id, workspace_id, token_hash, created_by, expires_at)
-     VALUES ($4, $1, $2, $3, now_ms() + 604800000)`,
-    [workspaceId, sha256(token), createdBy, randomUUID()],
+    `INSERT INTO workspace_invites (id, workspace_id, token_hash, created_by, expires_at, role)
+     VALUES ($4, $1, $2, $3, now_ms() + 604800000, $5)`,
+    [workspaceId, sha256(token), createdBy, randomUUID(), role],
   );
   return token;
 }
 
 export async function listInvites(q: Queryable, workspaceId: string) {
   const { rows } = await q.query(
-    `SELECT id, created_at, expires_at FROM workspace_invites
-     WHERE workspace_id = $1 AND used_at IS NULL AND revoked_at IS NULL AND expires_at > now_ms()
-     ORDER BY created_at DESC`,
+    `SELECT i.id, i.role, i.created_at, i.expires_at, COALESCE(u.display_name, u.username) AS created_by_name
+     FROM workspace_invites i LEFT JOIN users u ON u.id = i.created_by
+     WHERE i.workspace_id = $1 AND i.used_at IS NULL AND i.revoked_at IS NULL AND i.expires_at > now_ms()
+     ORDER BY i.created_at DESC`,
     [workspaceId],
   );
-  return rows as { id: string; created_at: Date; expires_at: Date }[];
+  return rows as { id: string; role: 'admin' | 'moderator'; created_at: Date; expires_at: Date; created_by_name: string | null }[];
 }
 
 export async function revokeInvite(q: Queryable, workspaceId: string, inviteId: string): Promise<void> {
@@ -145,11 +171,11 @@ export async function revokeInvite(q: Queryable, workspaceId: string, inviteId: 
 
 export async function findInvite(q: Queryable, token: string) {
   const { rows } = await q.query(
-    `SELECT i.id, i.workspace_id, w.name AS workspace_name FROM workspace_invites i JOIN workspaces w ON w.id = i.workspace_id
+    `SELECT i.id, i.workspace_id, i.role, w.name AS workspace_name FROM workspace_invites i JOIN workspaces w ON w.id = i.workspace_id
      WHERE i.token_hash = $1 AND i.used_at IS NULL AND i.revoked_at IS NULL AND i.expires_at > now_ms()`,
     [sha256(token)],
   );
-  return (rows[0] as { id: string; workspace_id: string; workspace_name: string } | undefined) ?? null;
+  return (rows[0] as { id: string; workspace_id: string; role: 'admin' | 'moderator'; workspace_name: string } | undefined) ?? null;
 }
 
 export async function acceptInvite(db: Db, token: string, userId: string): Promise<string> {
@@ -157,14 +183,37 @@ export async function acceptInvite(db: Db, token: string, userId: string): Promi
     const { rows } = await c.query(
       `UPDATE workspace_invites SET used_at = now_ms(), used_by = $2
        WHERE token_hash = $1 AND used_at IS NULL AND revoked_at IS NULL AND expires_at > now_ms()
-       RETURNING workspace_id`,
+       RETURNING workspace_id, role`,
       [sha256(token), userId],
     );
     if (!rows[0]) throw new UserFacingError('This invitation link is invalid, expired or has already been used.', 404);
     await c.query(
-      `INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'admin') ON CONFLICT DO NOTHING`,
-      [rows[0].workspace_id, userId],
+      `INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
+      [rows[0].workspace_id, userId, rows[0].role],
     );
     return rows[0].workspace_id as string;
   });
+}
+
+/** Owner only: switch a member between Admin and Moderator. The owner's own role can't change here. */
+export async function setMemberRole(q: Queryable, workspaceId: string, userId: string, role: 'admin' | 'moderator'): Promise<void> {
+  const { rows } = await q.query<{ role: Role }>('SELECT role FROM workspace_members WHERE workspace_id = $1 AND user_id = $2', [workspaceId, userId]);
+  if (!rows[0]) throw new UserFacingError('That person is not a member of this workspace.', 404);
+  if (rows[0].role === 'owner') throw new UserFacingError('The owner’s role can’t be changed.');
+  await q.query('UPDATE workspace_members SET role = $3 WHERE workspace_id = $1 AND user_id = $2', [workspaceId, userId, role]);
+}
+
+/** Owners and admins: what a moderator may do beyond viewing tickets. */
+export async function setModeratorPermissions(
+  q: Queryable,
+  workspaceId: string,
+  userId: string,
+  p: { canActTickets: boolean; canViewContributors: boolean },
+): Promise<void> {
+  const res = await q.query(
+    `UPDATE workspace_members SET can_act_tickets = $3, can_view_contributors = $4
+     WHERE workspace_id = $1 AND user_id = $2 AND role = 'moderator'`,
+    [workspaceId, userId, p.canActTickets, p.canViewContributors],
+  );
+  if (!res.rowCount) throw new UserFacingError('Only moderators have adjustable permissions.', 404);
 }

@@ -6,8 +6,11 @@ import { consumeState, createState } from '../../domain/oauth-state.js';
 import { clearRepoCache, getInstallationRepos } from '../../domain/repos.js';
 import { deleteGitHubConnection, getGitHubConnection, listApps, saveGitHubConnection } from '../../domain/store.js';
 import { getMembership } from '../../domain/workspaces.js';
+import { can } from '../../domain/permissions.js';
 import { escapeHtml, html, raw } from '../../lib/html.js';
-import { alert, badge, button, csrfField, pageHead, postButton, simplePage } from '../layout.js';
+import type { RepoInfo } from '../../github/client.js';
+import { simplePage } from '../layout.js';
+import { avatar, badge, choices, csrfField, empty, icon, linkBtn, menu, notice, pageHeader, pill, plural, postBtn, setting, submitBtn, tag, type IconName } from '../ui.js';
 import { setFlash } from '../session.js';
 import type { Web } from '../server.js';
 
@@ -27,66 +30,84 @@ export function registerGitHubRoutes(app: FastifyInstance, web: Web): void {
     const conn = await getGitHubConnection(deps.db, ctx.workspace.id);
     const b = ctx.base;
 
-    let reposSection = html``;
+    let repos: RepoInfo[] | null = null;
+    let repoError = '';
+    const usedBy = new Map<number, string[]>();
     if (conn && deps.github) {
       try {
-        const repos = await getInstallationRepos(deps, conn.installation_id, { fresh: true });
-        const apps = await listApps(deps.db, ctx.workspace.id);
-        const used = new Map<number, number>();
-        for (const a of apps) used.set(a.repo_id, (used.get(a.repo_id) ?? 0) + 1);
-        reposSection = repos.length
-          ? html`<div class="table-wrap"><table><thead><tr><th>Repository</th><th>Visibility</th><th>Issues</th><th>Used by</th></tr></thead><tbody>
-              ${repos.map((r) => html`<tr><td><a href="${r.htmlUrl}" target="_blank" rel="noopener noreferrer">${r.fullName}</a>${r.archived ? html` ${badge('Archived', 'warn')}` : ''}</td>
-                <td>${r.private ? 'Private' : 'Public'}</td><td>${r.hasIssues ? badge('Enabled', 'ok') : badge('Disabled', 'danger')}</td>
-                <td>${used.get(r.id) ? `${used.get(r.id)} app${used.get(r.id)! > 1 ? 's' : ''}` : html`<span class="muted">—</span>`}</td></tr>`)}
-            </tbody></table></div>`
-          : html`<div class="empty"><h3>No repositories shared yet</h3><p>Choose which repositories the app can access in GitHub, then reload this page.</p></div>`;
+        repos = await getInstallationRepos(deps, conn.installation_id, { fresh: true });
+        for (const a of await listApps(deps.db, ctx.workspace.id)) usedBy.set(a.repo_id, [...(usedBy.get(a.repo_id) ?? []), a.name]);
       } catch (err) {
         const removed = err instanceof GitHubApiError && (err.status === 404 || err.status === 401);
-        reposSection = alert('error', removed ? 'GitHub says the app is no longer installed on this account. Reconnect GitHub below.' : 'Could not load repositories from GitHub right now. Reload to try again.');
+        repoError = removed ? 'GitHub says the app is no longer installed on this account. Reinstall it from the menu above.' : 'Couldn’t load repositories from GitHub right now. Reload to try again.';
       }
     }
-
     const credentials = deps.github && (!conn || conn.status !== 'active') ? await checkGitHubCredentials(deps) : null;
+    const status = !conn
+      ? pill('Not connected', 'neutral')
+      : conn.status === 'active'
+        ? pill('Connected', 'ok')
+        : conn.status === 'suspended'
+          ? pill('Suspended', 'warn')
+          : pill(conn.status === 'removed' ? 'App uninstalled' : 'Problem', 'danger');
+    const settingsUrl = conn ? installationSettingsUrl(conn) : '';
 
-    const connectButtons = html`<div class="row">
-      ${postButton(`${b}/setup/github/install`, conn ? 'Reinstall or change account' : 'Install the GitHub App', ctx.csrf, { variant: conn ? '' : 'github primary', disabled: !deps.github })}
-      ${postButton(`${b}/setup/github/link`, 'Link an existing installation', ctx.csrf, { disabled: !deps.github })}
-    </div>`;
+    const actions = conn
+      ? [
+          linkBtn(settingsUrl, 'Manage on GitHub', { trail: 'arrow-up-right', external: true }),
+          menu([
+            { post: `${b}/setup/github/install`, label: 'Reinstall or change account', icon: 'refresh-cw' },
+            { post: `${b}/setup/github/link`, label: 'Link an existing installation', icon: 'link' },
+            'sep',
+            { post: `${b}/setup/github/disconnect`, label: 'Disconnect GitHub…', icon: 'unplug', danger: true, confirm: { title: 'Disconnect GitHub?', body: 'New tickets can’t be filed and contributor verification stops until you reconnect. Apps and history are kept.', label: 'Disconnect', danger: true } },
+          ], { csrf: ctx.csrf, size: 'md' }),
+        ]
+      : [];
 
+    const disabledRepos = (repos ?? []).filter((r) => !r.hasIssues && usedBy.has(r.id));
     const body = html`
-      ${pageHead('Step 1 · Connect GitHub', 'Tickets become issues in your GitHub repositories. Install the Ticket Relay GitHub App on the account or organization that owns them.')}
-      ${!deps.github ? alert('warn', html`<p><strong>The GitHub App has not been registered for this deployment yet.</strong> Whoever runs the server needs to complete the <a href="${b}/provider-setup">deployment setup</a> first.</p>`) : ''}
-      ${credentials && !credentials.ok ? alert('error', html`<p><strong>The server's GitHub App credentials don't work.</strong> ${credentials.detail}</p><p class="small">Fix <code>.env</code> or <code>secrets/sec.pem</code> on the server, then run <code>pm2 restart all --update-env</code>.</p>`) : ''}
+      ${pageHeader({ eyebrow: 'General setup · Step 1 of 3', title: 'GitHub', after: status, description: 'The GitHub App files tickets as issues and reads contributions for Contributor Roles.', actions })}
+      ${!deps.github ? notice('warn', 'The GitHub App isn’t registered for this deployment yet', 'Whoever runs the server needs to finish the deployment setup first.', { action: linkBtn(`${b}/deployment`, 'Open Deployment', { size: 'sm' }) }) : ''}
+      ${credentials && !credentials.ok ? notice('danger', 'The server’s GitHub App credentials don’t work', html`${credentials.detail} Fix <code>.env</code> or <code>secrets/sec.pem</code> on the server, then run <code>pm2 restart all --update-env</code>.`) : ''}
+      ${conn?.status_detail ? notice(conn.status === 'active' ? 'info' : 'danger', null, conn.status_detail) : ''}
+      ${disabledRepos.map((r) => notice('warn', `Issues are disabled in ${r.fullName}`, `Tickets for ${usedBy.get(r.id)!.join(', ')} fail until Issues are turned on.`, { action: linkBtn(`${r.htmlUrl}/settings`, 'Open repository settings', { size: 'sm', trail: 'arrow-up-right', external: true }) }))}
       ${conn
         ? html`<div class="card">
-            <div class="card-head"><h2>Connection</h2>${badge(conn.status === 'active' ? 'Connected' : conn.status === 'suspended' ? 'Suspended' : conn.status === 'removed' ? 'App uninstalled' : 'Problem', conn.status === 'active' ? 'ok' : 'danger')}</div>
-            <div class="identity">${conn.account_avatar_url ? html`<img class="avatar square" src="${conn.account_avatar_url}" alt="">` : ''}
-              <div><strong>${conn.account_login}</strong><div class="muted small">${conn.account_type} · ${conn.repository_selection === 'all' ? 'Access to all repositories' : 'Access to selected repositories'}</div></div></div>
-            ${conn.status_detail ? alert(conn.status === 'active' ? 'info' : 'error', conn.status_detail) : ''}
-            <hr class="divider">
-            <div class="row">
-              <a class="btn" href="${installationSettingsUrl(conn)}" target="_blank" rel="noopener noreferrer">Change repository access on GitHub</a>
-              ${connectButtons}
-              ${postButton(`${b}/setup/github/disconnect`, 'Disconnect', ctx.csrf, { variant: 'danger', confirm: 'Disconnect GitHub? New tickets cannot be filed until you connect again. Your apps and history are kept.' })}
-            </div>
+            <div class="card-h"><div><h2>Installation</h2><div class="desc">Installed on ${conn.account_login} with access to ${conn.repository_selection === 'all' ? 'all' : 'selected'} repositories.</div></div></div>
+            ${setting('Account', null, html`<span class="row">${avatar(conn.account_login, 32, { src: conn.account_avatar_url, square: true, letters: 2 })}<span class="name">${conn.account_login}</span>${tag(conn.account_type)}</span>`)}
+            ${setting('Repository access', 'Only these repositories can be chosen for apps.', html`<span class="value">${conn.repository_selection === 'all' ? 'All repositories' : `Selected${repos ? ` · ${plural(repos.length, 'repository', 'repositories')}` : ''}`}</span>${linkBtn(settingsUrl, 'Change on GitHub', { variant: 'ghost', size: 'sm', trail: 'arrow-up-right', external: true })}`)}
+            ${setting('Permissions', 'It never changes code.', html`<div class="tags">${tag('Issues: write')}${tag('Pull requests: read')}${tag('Contents: read')}</div>`)}
           </div>
-          <div class="card"><div class="card-head"><h2>Repositories the app can access</h2></div>
-            <p class="muted small">Only these repositories can be chosen for apps. The app can read basic repository details and labels, and create issues. It cannot read your code.</p>
-            ${reposSection}
+          <div class="card">
+            <div class="card-h"><h2>Repositories</h2>${repos ? badge(repos.length) : ''}</div>
+            <div class="card-b flush">${repoError
+              ? html`<div class="card-b">${notice('danger', null, repoError)}</div>`
+              : repos && repos.length
+                ? html`<div class="table-wrap"><table>
+                    <thead><tr><th>Repository</th><th>Visibility</th><th>Issues</th><th>Used by</th></tr></thead>
+                    <tbody>${repos.map((r) => html`<tr>
+                      <td><a class="inline mono" href="${r.htmlUrl}" target="_blank" rel="noopener noreferrer">${icon('folder-git-2', 14, 'muted')}${r.fullName}</a>${r.archived ? html` ${tag('Archived')}` : ''}</td>
+                      <td>${tag(r.private ? 'Private' : 'Public', { icon: r.private ? 'lock' : 'globe' })}</td>
+                      <td>${r.hasIssues ? html`<span class="inline small">${icon('circle-check', 14, 'ok')}Enabled</span>` : pill('Disabled', 'warn')}</td>
+                      <td class="small">${usedBy.get(r.id)?.join(', ') ?? html`<span class="em">—</span>`}</td></tr>`)}
+                    </tbody></table></div>`
+                : empty('folder-git-2', 'No repositories shared yet', 'Choose which repositories the app can access on GitHub, then reload this page.', linkBtn(settingsUrl, 'Choose on GitHub', { trail: 'arrow-up-right', external: true }))}</div>
           </div>`
         : html`<div class="card">
-            <h2>How it works</h2>
-            <ol>
-              <li>You will be sent to GitHub to install the app. Pick the account or organization that owns your repositories.</li>
-              <li>Choose <strong>Only select repositories</strong> and pick the ones that should receive tickets (you can change this later).</li>
-              <li>GitHub asks you to authorize the app. This only confirms that you have access to the installation; we do not keep your personal GitHub token.</li>
-              <li>You come back here and see the connected account and its repositories.</li>
-            </ol>
-            <p class="muted small">The app needs <strong>Issues: Read and write</strong> (to create issues and read labels) and <strong>Metadata: Read-only</strong> (required by GitHub to see repository names and settings). Contributor roles also use <strong>Pull requests</strong> and <strong>Contents</strong> (read-only) to check merged pull requests and commits. It never changes code. Installing on an organization may need approval from an organization owner.</p>
-            ${connectButtons}
+            <div class="card-h"><div><h2>Connect GitHub</h2><div class="desc">Install the app on the account or organization that owns your repositories.</div></div></div>
+            <div class="card-b"><ol class="steps">
+              <li><span>You’re sent to GitHub to install the app. Pick the account or organization that owns your repositories.</span></li>
+              <li><span>Choose <strong>Only select repositories</strong> and pick the ones that should receive tickets. You can change this later.</span></li>
+              <li><span>GitHub asks you to authorize the app. This only confirms you have access to the installation; your personal GitHub token isn’t kept.</span></li>
+              <li><span>You come back here and see the connected account and its repositories.</span></li>
+            </ol></div>
+            ${setting('Permissions', 'Issues to create issues and read labels. Pull requests and Contents are read-only, for Contributor Roles. Installing on an organization may need an owner’s approval.', html`<div class="tags">${tag('Issues: write')}${tag('Pull requests: read')}${tag('Contents: read')}</div>`)}
+            <div class="card-f"><span></span><div class="end">
+              ${postBtn(`${b}/setup/github/link`, 'Link existing installation', ctx.csrf, { disabled: !deps.github })}
+              ${postBtn(`${b}/setup/github/install`, 'Install the GitHub App', ctx.csrf, { variant: 'primary', icon: 'github', disabled: !deps.github })}
+            </div></div>
           </div>`}`;
-    return web.render(reply, ctx, 'Connect GitHub', 'github', body);
+    return web.render(reply, ctx, 'GitHub', 'github', body);
   });
 
   app.post('/w/:wid/setup/github/install', async (req, reply) => {
@@ -141,19 +162,25 @@ export function registerGitHubRoutes(app: FastifyInstance, web: Web): void {
     if (state?.purpose === 'contributor_verify' && deps.github) {
       // A Discord member returning from GitHub sign-in on the contributor panel.
       const result = await completeVerification(deps, state, q.error ? undefined : q.code);
-      const icon = result.outcome === 'verified' ? '✅' : result.outcome === 'error' ? '⚠️' : 'ℹ️';
-      return reply.type('text/html').send(simplePage('Contributor verification', html`<h1>${icon} ${result.outcome === 'verified' ? `You are verified${result.roleName ? `: ${result.roleName}` : ''}` : result.outcome === 'not_contributor' ? 'Not enough contributions yet' : result.outcome === 'conflict' ? 'Account already linked' : 'Verification failed'}</h1>
-        <p>${raw(escapeHtml(result.explanation).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>'))}</p>
-        <p class="muted">You can close this tab and return to Discord.</p>`));
+      const view = {
+        verified: { icon: 'circle-check', tone: 'ok', title: `You are verified${result.roleName ? `: ${result.roleName}` : ''}` },
+        not_contributor: { icon: 'info', tone: 'muted', title: 'Not enough contributions yet' },
+        conflict: { icon: 'triangle-alert', tone: 'warn', title: 'Account already linked' },
+        error: { icon: 'circle-x', tone: 'danger', title: 'Verification failed' },
+      }[result.outcome] as { icon: IconName; tone: string; title: string };
+      return reply.type('text/html').send(simplePage('Contributor verification', html`<div class="auth-result"><span class="circle">${icon(view.icon, 20, view.tone)}</span><h1>${view.title}</h1>
+        <p class="muted">${raw(escapeHtml(result.explanation).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>'))}</p>
+        <p class="small muted">You can close this tab and return to Discord.</p></div>`));
     }
     if (!state || !deps.github) {
       return reply.type('text/html').send(simplePage('Finish connecting GitHub', html`<h1>Almost done</h1>
-        <p>The app was installed on GitHub, but this link can't be matched to a workspace (it may have expired, or the installation was started from GitHub directly).</p>
-        <p class="muted">Open your workspace's <strong>Connect GitHub</strong> page and choose <strong>Link an existing installation</strong>.</p><a class="btn primary" href="/">Go to the app</a>`));
+        <p class="muted">The app was installed on GitHub, but this link can’t be matched to a workspace. It may have expired, or the installation was started from GitHub directly.</p>
+        <p class="muted">Open your workspace’s <strong>GitHub</strong> page and choose <strong>Link an existing installation</strong> from its menu.</p>${linkBtn('/', 'Go to the console', { variant: 'primary', block: true })}`));
     }
     const wid = state.workspace_id!;
     const back = `/w/${wid}/setup/github`;
-    if (!req.auth || req.auth.session.id !== state.session_id || !(await getMembership(deps.db, req.auth.user.id, wid))) {
+    const ghMember = req.auth ? await getMembership(deps.db, req.auth.user.id, wid) : null;
+    if (!req.auth || req.auth.session.id !== state.session_id || !ghMember || !can(ghMember, 'manage')) {
       return reply.redirect('/login');
     }
     if (q.setup_action === 'request') {
@@ -193,10 +220,10 @@ export function registerGitHubRoutes(app: FastifyInstance, web: Web): void {
     const body = html`
       <h1>Choose a GitHub account</h1>
       <p class="muted">The app is installed on several accounts you can access. Which one should this workspace use?</p>
-      <form method="post" action="/oauth/github/choose">${csrfField(req.auth.session.csrf_token)}
+      <form method="post" action="/oauth/github/choose" class="stack">${csrfField(req.auth.session.csrf_token)}
         <input type="hidden" name="state" value="${pickState}">
-        <div class="stack">${installations.map((i, n) => html`<label class="checkbox"><input type="radio" name="installation_id" value="${String(i.id)}" ${n === 0 ? 'checked' : ''}> ${i.accountLogin} <span class="muted small">(${i.accountType})</span></label>`)}</div>
-        <hr class="divider">${button('Connect', { variant: 'primary' })}
+        ${choices('installation_id', installations.map((i) => ({ value: String(i.id), title: i.accountLogin, desc: i.accountType })), String(installations[0]!.id))}
+        ${submitBtn('Connect', { variant: 'primary', block: true })}
       </form>`;
     return reply.type('text/html').send(simplePage('Choose account', body));
   });
@@ -206,7 +233,8 @@ export function registerGitHubRoutes(app: FastifyInstance, web: Web): void {
     const state = await consumeState(deps.db, body.state, ['github_install']);
     if (!state || state.data.mode !== 'pick' || !req.auth || req.auth.session.id !== state.session_id || !deps.github) return reply.redirect('/');
     const wid = state.workspace_id!;
-    if (!(await getMembership(deps.db, req.auth.user.id, wid))) return reply.redirect('/');
+    const chooser = await getMembership(deps.db, req.auth.user.id, wid);
+    if (!chooser || !can(chooser, 'manage')) return reply.redirect('/');
     const id = Number(body.installation_id);
     if (!(state.data.allowed as number[]).includes(id)) {
       setFlash(reply, 'error', 'That installation is not available to you.');

@@ -19,7 +19,8 @@ and filed by a GitHub App. Reporters never need a GitHub account.
 ## Features
 
 - **Discord-native:** members open tickets from a panel in your server and get a private confirmation with the issue link. No GitHub account needed.
-- **Admin console:** guided setup, map apps to repos and labels, ticket history with retry.
+- **Admin console:** guided setup, map apps to repos and labels, a tickets inbox with retry, link and close.
+- **Moderators:** view-only by default; admins choose per person who can act on tickets or see verifications.
 - **Ticket types:** members pick a type (e.g. Bug report, Feature request); each adds its GitHub label and a `[Bug]` title prefix.
 - **Contributor roles:** a second panel where members sign in with GitHub and get a role based on their merged PRs or commits across all your apps, e.g. Junior Contributor at 1, Contributor at 10.
 - **Reliable:** duplicate and rate-limit protection; never files the same issue twice.
@@ -27,7 +28,7 @@ and filed by a GitHub App. Reporters never need a GitHub account.
 
 ## Screenshots
 
-**Overview:** connection status, ticket counts and recent submissions.
+**Overview:** tickets needing attention, utility stats and the latest tickets.
 
 ![Admin console overview](docs/images/admin-overview.png)
 

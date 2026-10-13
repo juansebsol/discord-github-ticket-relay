@@ -1,171 +1,208 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { getDiscordConnection, getGitHubConnection, getPanel, listApps } from '../../domain/store.js';
-import { countByStatus, decryptPayload, listSubmissions } from '../../domain/submissions.js';
-import { UserFacingError, type SubmissionRow } from '../../domain/types.js';
-import {
-  createInvite,
-  listInvites,
-  listMembers,
-  removeMember,
-  revokeInvite,
-  updateWorkspaceSettings,
-} from '../../domain/workspaces.js';
-import { DEFAULT_PANEL_INTRO, DEFAULT_PANEL_TITLE } from '../../discord/messages.js';
+import { checkContributorPanel, contributorApps, getContributorSettings, listManualRoles, listTiers, verificationStats } from '../../domain/contributors.js';
 import { checkDiscordCredentials, checkGitHubCredentials, type CredentialCheck } from '../../domain/credentials.js';
-import { html, type SafeHtml } from '../../lib/html.js';
-import { alert, badge, button, csrfField, discordAvatar, formatDate, pageHead, postButton, statusBadge, timeAgo } from '../layout.js';
+import { checkPanel } from '../../domain/panel.js';
+import { can } from '../../domain/permissions.js';
+import { getDiscordConnection, getGitHubConnection, listApps } from '../../domain/store.js';
+import { countByStatus, decryptPayload, filedThisWeek, listSubmissions } from '../../domain/submissions.js';
+import { enabledTicketTypes } from '../../domain/ticket-types.js';
+import { updateWorkspaceGeneral, userNames } from '../../domain/workspaces.js';
+import { html, raw, type SafeHtml } from '../../lib/html.js';
+import type { StepState } from '../layout.js';
 import { setFlash } from '../session.js';
-import type { Web, WorkspaceRequestContext } from '../server.js';
+import type { Web } from '../server.js';
+import {
+  copyField,
+  csrfField,
+  empty,
+  icon,
+  iconBtn,
+  linkBtn,
+  locked,
+  notice,
+  pageHeader,
+  pill,
+  plural,
+  setting,
+  submitBtn,
+  tag,
+  type IconName,
+} from '../ui.js';
+import { ticketList } from './tickets.js';
 
-/** Submission history table. `titleOf` decrypts the stored ticket title for display. */
-export function submissionsTable(base: string, rows: Awaited<ReturnType<typeof listSubmissions>>['rows'], titleOf: (s: SubmissionRow) => string | null): SafeHtml {
-  if (!rows.length) {
-    return html`<div class="empty"><h3>No tickets yet</h3><p>Submissions will appear here as soon as members use the ticket panel in Discord.</p></div>`;
-  }
-  return html`<div class="table-wrap"><table>
-    <thead><tr><th>Ticket</th><th>App</th><th>Reporter</th><th>Status</th><th>GitHub issue</th></tr></thead>
-    <tbody>${rows.map(
-      (s) => html`<tr>
-        <td><a class="title" href="${base}/submissions/${s.id}">${titleOf(s) ?? s.ref}</a><div class="sub"><span class="mono">${s.ref}</span> · ${timeAgo(s.created_at)}</div></td>
-        <td>${s.app_name}${s.source === 'admin_test' ? html` ${badge('Test', 'info')}` : ''}${s.ticket_type_name ? html`<div class="sub">${s.ticket_type_name}</div>` : ''}</td>
-        <td>${s.reporter_display_name}<div class="sub">${s.reporter_username ? `@${s.reporter_username}` : s.reporter_discord_id}</div></td>
-        <td>${statusBadge(s.status)}</td>
-        <td>${s.issue_url ? html`<a href="${s.issue_url}" target="_blank" rel="noopener noreferrer">${s.repo_name}#${s.issue_number}</a>` : html`<span class="muted">—</span>`}</td>
-      </tr>`,
-    )}</tbody></table></div>`;
+function stat(href: string, label: string, value: number, warn = false): SafeHtml {
+  return html`<a class="stat" href="${href}"><div class="l">${label}</div><div class="v${warn && value > 0 ? ' warn' : ''}">${String(value)}${warn && value > 0 ? icon('triangle-alert', 14) : ''}</div></a>`;
+}
+
+function utilityCard(o: { icon: IconName; title: string; meta: string; problem?: SafeHtml | null; stats: SafeHtml; links: SafeHtml }): SafeHtml {
+  return html`<div class="card">
+    <div class="card-h"><div><div class="title">${icon(o.icon)}<h2>${o.title}</h2></div><div class="desc">${o.meta}</div></div>${o.problem ?? ''}</div>
+    <div class="stats">${o.stats}</div>
+    <div class="card-f plain"><div class="row gap-4">${o.links}</div></div>
+  </div>`;
 }
 
 export function registerWorkspaceRoutes(app: FastifyInstance, web: Web): void {
   const { deps } = web;
 
+  // ---- Overview ---------------------------------------------------------------------------------
+
   app.get('/w/:wid', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply);
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'view' });
     if (!ctx) return reply;
     const wid = ctx.workspace.id;
-    const [gh, dc, apps, panel, counts, recent] = await Promise.all([
+    const b = ctx.base;
+    const [gh, dc, apps, counts, recent, filed, settings, tiers, manual, vstats, types] = await Promise.all([
       getGitHubConnection(deps.db, wid),
       getDiscordConnection(deps.db, wid),
       listApps(deps.db, wid),
-      getPanel(deps.db, wid),
       countByStatus(deps.db, wid),
-      listSubmissions(deps.db, wid, { limit: 8, offset: 0 }),
+      listSubmissions(deps.db, wid, { limit: 5, offset: 0 }),
+      filedThisWeek(deps.db, wid),
+      getContributorSettings(deps.db, wid),
+      listTiers(deps.db, wid),
+      listManualRoles(deps.db, wid),
+      verificationStats(deps.db, wid),
+      enabledTicketTypes(deps.db, wid),
     ]);
     const p = ctx.progress!;
-    const setupDone = p.github === 'done' && p.discord === 'done' && p.apps === 'done' && p.panel === 'done';
-    const enabledApps = apps.filter((a) => a.enabled).length;
-    const b = ctx.base;
+    const names = await userNames(deps.db, recent.rows.map((r) => r.resolved_by));
+    const enabledApps = apps.filter((a) => a.enabled);
+    const contribRepos = new Set(contributorApps(apps).map((a) => a.repo_id)).size;
+    const manage = can(ctx.membership, 'manage');
+    const act = can(ctx.membership, 'tickets.act');
+    const contribView = can(ctx.membership, 'contrib.view');
+    const queued = counts.pending + counts.processing;
 
-    const step = (n: number, state: 'done' | 'todo' | 'problem', title: string, text: string, href: string, cta: string) => html`
-      <div class="step">
-        <span class="step-dot ${state === 'done' ? 'done' : state === 'problem' ? 'problem' : ''}">${state === 'done' ? '✓' : state === 'problem' ? '!' : String(n)}</span>
-        <div><h3>${title}</h3><p>${text}</p></div>
-        <a class="btn ${state === 'done' ? '' : 'primary'}" href="${href}">${state === 'done' ? 'Review' : cta}</a>
-      </div>`;
+    const attentionNotice = p.attention
+      ? notice('warn', `${plural(p.attention, 'ticket')} need${p.attention === 1 ? 's' : ''} attention`,
+          act
+            ? [counts.uncertain ? `${counts.uncertain} couldn’t be confirmed on GitHub` : '', counts.failed ? `${counts.failed} failed` : ''].filter(Boolean).join(' and ') + '.'
+            : 'Admins can retry or close them. You can view them.',
+          { action: linkBtn(`${b}/tickets?status=attention`, act ? 'Review' : 'View', { size: 'sm' }) })
+      : '';
+
+    const latest = html`<div class="card">
+      <div class="card-h"><h2>Latest tickets</h2>${recent.rows.length ? linkBtn(`${b}/tickets?status=all`, 'View all', { variant: 'ghost', size: 'sm', trail: 'arrow-right' }) : ''}</div>
+      <div class="card-b flush">${recent.rows.length
+        ? ticketList(b, recent.rows, (s) => decryptPayload(deps.box, s)?.title ?? null, names, { compact: true })
+        : empty('inbox', 'No tickets yet', 'Tickets appear here as soon as members use the panel in Discord.')}</div>
+    </div>`;
+
+    const ticketsCard = (links: SafeHtml, problem: SafeHtml | null) => utilityCard({
+      icon: 'ticket',
+      title: 'Tickets',
+      meta: manage
+        ? [dc?.tickets_channel_name ? `#${dc.tickets_channel_name}` : 'No channel yet', plural(enabledApps.length, 'app'), types.length ? plural(types.length, 'ticket type') : null].filter(Boolean).join(' · ')
+        : dc?.tickets_channel_name ? `From #${dc.tickets_channel_name}` : 'From the ticket panel in Discord',
+      problem,
+      stats: html`${stat(`${b}/tickets?status=filed`, 'Filed this week', filed)}${stat(`${b}/tickets?status=attention`, 'Need attention', p.attention, true)}${stat(`${b}/tickets?status=open`, 'Queued', queued)}`,
+      links,
+    });
+    const contribCard = (links: SafeHtml, problem: SafeHtml | null) => utilityCard({
+      icon: 'award',
+      title: 'Contributor Roles',
+      meta: manage
+        ? settings.channel_name || tiers.length
+          ? [settings.channel_name ? `#${settings.channel_name}` : 'No channel yet', plural(tiers.length + manual.length, 'role'), plural(contribRepos, 'repository', 'repositories')].join(' · ')
+          : 'Not set up yet'
+        : settings.channel_name ? `From #${settings.channel_name}` : 'From the contributor panel in Discord',
+      problem,
+      stats: html`${stat(`${b}/contributors?result=verified`, 'Verified', vstats.verified)}${stat(`${b}/contributors?result=all`, 'This week', vstats.thisWeek)}${stat(`${b}/contributors?result=conflict`, 'Conflicts', vstats.conflicts, true)}`,
+      links,
+    });
+    const go = (href: string, label: string, trail = true) => linkBtn(href, label, { variant: 'ghost', size: 'sm', trail: trail ? 'arrow-right' : undefined });
+
+    if (!manage) {
+      // Moderators: what needs attention, the latest tickets and what they're allowed to do.
+      const accessRow = (label: string, allowed: boolean, always = false) => html`<div class="line sm"><span class="grow small">${label}</span>${allowed
+        ? html`<span class="locked">${icon('circle-check', 14, 'ok')}${always ? 'Always' : 'Allowed'}</span>`
+        : locked('Not allowed')}</div>`;
+      const body = html`
+        ${pageHeader({ title: 'Overview', description: `${ctx.workspace.name} · You're a moderator` })}
+        ${attentionNotice}
+        <div class="g2">
+          ${ticketsCard(go(`${b}/tickets`, 'Open inbox'), null)}
+          ${contribView ? contribCard(go(`${b}/contributors`, 'Verifications'), null) : ''}
+        </div>
+        <div class="g-2-1">
+          ${latest}
+          <div class="card"><div class="card-h"><div><h2>Your access</h2><div class="desc">Set by admins in Members &amp; permissions.</div></div></div>
+            <div>${accessRow('View tickets', true, true)}${accessRow('Act on tickets', act)}${accessRow('Contributor verifications', contribView)}</div></div>
+        </div>`;
+      return web.render(reply, ctx, 'Overview', 'overview', body);
+    }
+
+    const [panelState, contribPanel] = await Promise.all([checkPanel(deps, wid, { live: false }), checkContributorPanel(deps, wid, dc, { live: false })]);
+    const steps: { state: StepState; icon: IconName; name: string; detail: string; href: string; cta: string }[] = [
+      {
+        state: p.github, icon: 'github', name: 'GitHub', href: `${b}/setup/github`, cta: 'Connect GitHub',
+        detail: gh ? `${gh.account_login} · ${gh.repository_selection === 'all' ? 'all repositories' : 'selected repositories'}${gh.status !== 'active' ? ` · ${gh.status}` : ''}` : 'Install the GitHub App on the account that owns your repositories.',
+      },
+      {
+        state: p.discord, icon: 'message-circle', name: 'Discord', href: `${b}/setup/discord`, cta: 'Connect Discord',
+        detail: dc ? `${dc.guild_name} · ${dc.status === 'active' ? 'bot ready' : 'bot removed'}` : 'Add the bot to your Discord server.',
+      },
+      {
+        state: p.apps, icon: 'boxes', name: 'Apps & repositories', href: `${b}/apps`, cta: 'Add apps',
+        detail: apps.length ? `${plural(enabledApps.length, 'app')} enabled` : 'Choose the apps members can pick and where each one files issues.',
+      },
+    ];
+    const done = steps.filter((s) => s.state === 'done').length;
+    const stepRow = (s: (typeof steps)[number]) => html`<a class="line setup-row" href="${s.href}">${icon(s.icon, 16, 'muted')}<span class="grow"><span class="name">${s.name}</span><span class="small muted"> · ${s.detail}</span></span>${s.state === 'done'
+      ? icon('circle-check', 14, 'ok')
+      : s.state === 'problem' ? icon('triangle-alert', 14, 'warn') : icon('circle-dashed', 14, 'faint')}</a>`;
+    const setupDone = done === steps.length;
+    const nextStep = steps.find((s) => s.state !== 'done');
+
+    const ticketProblem = panelState.state === 'missing' ? pill('Panel deleted', 'warn') : panelState.state === 'not_published' ? pill('Not published', 'neutral') : null;
+    const contribProblem = !settings.enabled ? pill('Off', 'neutral') : contribPanel.state === 'missing' ? pill('Panel deleted', 'warn') : contribPanel.state === 'not_published' ? pill('Not published', 'neutral') : null;
 
     const body = html`
-      ${pageHead(ctx.workspace.name, setupDone ? 'Tickets submitted in Discord are being filed as GitHub issues.' : 'Finish these steps to start receiving tickets from Discord.')}
-      ${(!deps.github || !deps.discord) ? alert('warn', html`<p><strong>Deployment setup incomplete.</strong> Some provider credentials are not configured on the server yet, so parts of the setup are unavailable. <a href="${b}/provider-setup">See what is missing</a>.</p>`) : ''}
-      ${p.attention ? alert('warn', html`<p><strong>${p.attention} submission${p.attention > 1 ? 's need' : ' needs'} attention.</strong> Some tickets failed or could not be confirmed. <a href="${b}/submissions?status=attention">Review them</a>.</p>`) : ''}
-
-      ${!setupDone ? html`<div class="card"><div class="card-head"><h2>Setup</h2></div><div class="steps">
-        ${step(1, p.github, 'Connect GitHub', gh ? `Connected to ${gh.account_login}${gh.status !== 'active' ? ` — ${gh.status}` : ''}` : 'Install the GitHub App on the account that owns your repositories.', `${b}/setup/github`, 'Connect GitHub')}
-        ${step(2, p.discord, 'Connect Discord', dc ? (dc.tickets_channel_id ? `${dc.guild_name} · #${dc.tickets_channel_name}` : `${dc.guild_name} · choose a tickets channel`) : 'Add the bot to your server and choose the tickets channel.', `${b}/setup/discord`, 'Connect Discord')}
-        ${step(3, p.apps, 'Add your apps', apps.length ? `${enabledApps} of ${apps.length} apps enabled` : 'Tell the bot which apps people can file tickets for, and where each one goes.', `${b}/apps`, 'Add apps')}
-        ${step(4, p.panel, 'Validate and publish', panel ? (panel.status === 'missing' ? 'The panel was deleted from Discord.' : `Published ${timeAgo(panel.published_at)}`) : 'Check everything and post the ticket panel in Discord.', `${b}/panel`, 'Validate & publish')}
-      </div></div>` : ''}
-
-      <div class="grid grid-4">
-        <div class="card stat"><div class="num">${counts.created}</div><div class="label">Tickets filed</div></div>
-        <div class="card stat"><div class="num">${counts.pending + counts.processing}</div><div class="label">In progress</div></div>
-        <div class="card stat"><div class="num">${counts.uncertain}</div><div class="label">Need checking</div></div>
-        <div class="card stat"><div class="num">${counts.failed}</div><div class="label">Failed</div></div>
+      ${pageHeader({ title: 'Overview', description: `${ctx.workspace.name}${dc ? ` · ${dc.guild_name} on Discord` : ''}` })}
+      ${!deps.github || !deps.discord
+        ? notice('warn', 'Deployment setup incomplete', 'Some provider credentials aren’t configured on the server, so parts of setup are unavailable.', { action: linkBtn(`${b}/deployment`, 'Open Deployment', { size: 'sm' }) })
+        : ''}
+      ${!setupDone ? html`<div class="card">
+          <div class="card-h"><div><h2>Finish setup</h2><div class="desc">${String(done)} of ${String(steps.length)} steps done. Tickets start flowing once all three are connected.</div></div>${nextStep ? linkBtn(nextStep.href, nextStep.cta, { variant: 'primary', size: 'sm' }) : ''}</div>
+          <div>${steps.map(stepRow)}</div></div>` : ''}
+      ${attentionNotice}
+      <div class="g2">
+        ${ticketsCard(html`${go(`${b}/tickets`, 'Open inbox')}${go(`${b}/tickets/panel`, 'Panel', false)}`, ticketProblem)}
+        ${contribCard(html`${go(`${b}/contributors`, 'Verifications')}${go(`${b}/contributors/roles`, 'Roles', false)}`, contribProblem)}
       </div>
-
-      <div class="grid grid-2">
-        <div class="card">
-          <div class="card-head"><h2>GitHub</h2>${gh ? badge(gh.status === 'active' ? 'Connected' : gh.status === 'suspended' ? 'Suspended' : 'Disconnected', gh.status === 'active' ? 'ok' : 'danger') : badge('Not connected', 'warn')}</div>
-          ${gh ? html`<div class="identity">${gh.account_avatar_url ? html`<img class="avatar square" src="${gh.account_avatar_url}" alt="">` : ''}<div><strong>${gh.account_login}</strong><div class="muted small">${gh.account_type} · ${gh.repository_selection === 'all' ? 'all repositories' : 'selected repositories'}</div></div></div>
-            ${gh.status_detail ? html`<p class="small muted">${gh.status_detail}</p>` : ''}` : html`<p class="muted">Not connected yet.</p>`}
-          <a class="btn sm" href="${b}/setup/github">${gh && gh.status !== 'active' ? 'Reconnect' : 'Manage'}</a>
-        </div>
-        <div class="card">
-          <div class="card-head"><h2>Discord</h2>${dc ? badge(dc.status === 'active' ? (dc.tickets_channel_id ? 'Connected' : 'Choose a channel') : 'Disconnected', dc.status === 'active' ? (dc.tickets_channel_id ? 'ok' : 'warn') : 'danger') : badge('Not connected', 'warn')}</div>
-          ${dc ? html`<p><strong>${dc.guild_name}</strong><br><span class="muted small">${dc.tickets_channel_id ? `Tickets channel: #${dc.tickets_channel_name}` : 'No tickets channel selected'}</span></p>
-            <p class="small muted">Panel: ${panel ? (panel.status === 'missing' ? 'deleted from Discord' : `published ${timeAgo(panel.published_at)}`) : 'not published'}</p>` : html`<p class="muted">Not connected yet.</p>`}
-          <a class="btn sm" href="${b}/setup/discord">${dc && dc.status !== 'active' ? 'Reconnect' : 'Manage'}</a>
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="card-head"><h2>Recent submissions</h2><a class="btn sm" href="${b}/submissions">View all</a></div>
-        ${submissionsTable(b, recent.rows, (s) => decryptPayload(deps.box, s)?.title ?? null)}
-      </div>`;
+      ${latest}
+      ${setupDone ? html`<details class="card setup-done">
+          <summary>${icon('circle-check', 16, 'ok')}<span>Setup complete</span><span class="small muted truncate">GitHub · Discord · ${plural(enabledApps.length, 'app')}</span>${icon('chevron-down', 16, 'chev')}</summary>
+          <div>${steps.map(stepRow)}</div></details>` : ''}`;
     return web.render(reply, ctx, 'Overview', 'overview', body);
   });
 
-  // ---- Settings & admins ----------------------------------------------------------------------
-
-  async function renderSettings(ctx: WorkspaceRequestContext, reply: Parameters<typeof web.render>[0], extra: { inviteUrl?: string; errors?: string[] } = {}) {
-    const ws = ctx.workspace;
-    const [members, invites] = await Promise.all([listMembers(deps.db, ws.id), listInvites(deps.db, ws.id)]);
-    const isOwner = ctx.role === 'owner';
-    const num = (name: string, label: string, value: number, min: number, max: number, hint: string) => html`
-      <div class="field"><label for="${name}">${label}</label><input id="${name}" type="number" name="${name}" value="${String(value)}" min="${String(min)}" max="${String(max)}" required><div class="hint">${hint}</div></div>`;
-    const body = html`
-      ${pageHead('Settings & admins', 'Workspace preferences, member limits and who can manage this workspace.')}
-      ${extra.errors?.length ? alert('error', html`<p>${extra.errors.join(' ')}</p>`) : ''}
-      <form method="post" action="${ctx.base}/settings" class="card">
-        ${csrfField(ctx.csrf)}
-        <div class="card-head"><h2>General</h2></div>
-        <div class="field"><label for="name">Workspace name</label><input id="name" type="text" name="name" value="${ws.name}" required maxlength="80"></div>
-        <div class="field"><label for="panel_title">Panel heading</label><input id="panel_title" type="text" name="panel_title" value="${ws.panel_title ?? ''}" maxlength="200" placeholder="${DEFAULT_PANEL_TITLE}"><div class="hint">Shown at the top of the ticket panel in Discord. Leave empty for the default.</div></div>
-        <div class="field"><label for="panel_intro">Panel introduction</label><textarea id="panel_intro" name="panel_intro" maxlength="1500" placeholder="${DEFAULT_PANEL_INTRO}">${ws.panel_intro ?? ''}</textarea><div class="hint">After changing the panel text, update the panel from “Validate &amp; publish”.</div></div>
-        <hr class="divider">
-        <h2>Spam and duplicate protection</h2>
-        <div class="grid grid-2">
-          ${num('rate_limit_count', 'Tickets per person', ws.rate_limit_count, 1, 100, 'How many tickets one member can submit within the time window.')}
-          ${num('rate_limit_window_minutes', 'Time window (minutes)', ws.rate_limit_window_minutes, 1, 1440, 'For example 5 tickets per 10 minutes.')}
-          ${num('duplicate_window_minutes', 'Duplicate detection (minutes)', ws.duplicate_window_minutes, 0, 1440, 'Identical tickets from the same person within this time are not filed twice. 0 turns this off.')}
-          ${num('retention_days', 'Keep ticket text for (days)', ws.retention_days, 1, 365, 'Copies of ticket text kept here for troubleshooting are deleted after this many days. Unresolved tickets are kept for at least 90 days.')}
-        </div>
-        ${button('Save settings', { variant: 'primary', loading: 'Saving…' })}
-      </form>
-
-      <div class="card">
-        <div class="card-head"><h2>Admins</h2></div>
-        <p class="muted small">Admins can manage the integration and see every submission. Owners can also invite and remove admins.</p>
-        <div class="table-wrap"><table><thead><tr><th>Person</th><th>Role</th><th>Joined</th><th></th></tr></thead><tbody>
-          ${members.map((m) => {
-            const avatar = discordAvatar(m);
-            return html`<tr><td><div class="identity">${avatar ? html`<img class="avatar sm" src="${avatar}" alt="">` : ''}<div>${m.display_name ?? m.username}<div class="sub">@${m.username}</div></div></div></td>
-              <td>${m.role === 'owner' ? badge('Owner', 'info') : badge('Admin', '')}</td><td class="nowrap">${formatDate(m.joined_at)}</td>
-              <td>${isOwner && m.id !== ctx.user.id ? postButton(`${ctx.base}/settings/members/${m.id}/remove`, 'Remove', ctx.csrf, { variant: 'sm danger', confirm: `Remove ${m.display_name ?? m.username} from this workspace?` }) : ''}</td></tr>`;
-          })}
-        </tbody></table></div>
-        ${isOwner ? html`<hr class="divider">
-          <h3>Invite an admin</h3>
-          <p class="muted small">Create a one-time link and send it to the person privately. It expires after 7 days. They sign in with Discord to accept it.</p>
-          ${extra.inviteUrl ? html`<div class="alert success"><p><strong>Invitation link created.</strong> Copy it now; it will not be shown again.</p><div class="copy-field"><input id="invite-url" type="text" readonly value="${extra.inviteUrl}"><button type="button" class="btn" data-copy="invite-url">Copy</button></div></div>` : ''}
-          ${postButton(`${ctx.base}/settings/invites`, 'Create invitation link', ctx.csrf)}
-          ${invites.length ? html`<p class="small muted">Open invitations: ${invites.map((i) => html`<span class="nowrap">created ${timeAgo(i.created_at)} ${postButton(`${ctx.base}/settings/invites/${i.id}/revoke`, 'Revoke', ctx.csrf, { variant: 'sm' })}</span> `)}</p>` : ''}` : ''}
-      </div>`;
-    return web.render(reply, ctx, 'Settings', 'settings', body);
-  }
+  // ---- Workspace settings -----------------------------------------------------------------------
 
   app.get('/w/:wid/settings', async (req, reply) => {
     const ctx = await web.requireWorkspace(req, reply);
     if (!ctx) return reply;
-    return renderSettings(ctx, reply);
+    const ws = ctx.workspace;
+    const body = html`
+      ${pageHeader({ title: 'Settings', description: 'Workspace-wide settings. Each utility has its own settings tab.' })}
+      <form method="post" action="${ctx.base}/settings" class="card" data-dirty>
+        ${csrfField(ctx.csrf)}
+        <div class="card-h"><h2>Workspace</h2></div>
+        ${setting('Workspace name', 'Shown in the sidebar and on invitations.', html`<input id="name" type="text" name="name" value="${ws.name}" required maxlength="80">`, { for: 'name' })}
+        ${setting('Keep ticket text', 'Encrypted copies kept for troubleshooting and retries. Unresolved tickets keep theirs for at least 90 days.',
+          html`<input type="number" id="retention_days" name="retention_days" value="${String(ws.retention_days)}" min="1" max="365" required aria-label="Days to keep ticket text"><span class="connector">days</span>`)}
+        <div class="card-f"><div class="end">
+          <button type="button" class="btn" data-discard data-dirty-enable>Cancel</button>
+          ${submitBtn('Save changes', { variant: 'primary', loading: 'Saving…', attrs: raw('data-dirty-enable') })}
+        </div></div>
+      </form>`;
+    return web.render(reply, ctx, 'Settings', 'settings', body);
   });
 
   const settingsSchema = z.object({
     name: z.string().trim().min(1, 'Enter a workspace name.').max(80),
-    panel_title: z.string().trim().max(200).optional().default(''),
-    panel_intro: z.string().trim().max(1500).optional().default(''),
-    rate_limit_count: z.coerce.number().int().min(1).max(100),
-    rate_limit_window_minutes: z.coerce.number().int().min(1).max(1440),
-    duplicate_window_minutes: z.coerce.number().int().min(0).max(1440),
     retention_days: z.coerce.number().int().min(1).max(365),
   });
 
@@ -174,93 +211,60 @@ export function registerWorkspaceRoutes(app: FastifyInstance, web: Web): void {
     if (!ctx) return reply;
     const parsed = settingsSchema.safeParse(req.body);
     if (!parsed.success) {
-      return renderSettings(ctx, reply.code(400), { errors: ['Please check the values: all numbers must be within the allowed ranges.'] });
+      setFlash(reply, 'error', 'Enter a workspace name and keep ticket text for 1 to 365 days.');
+      return reply.redirect(`${ctx.base}/settings`);
     }
-    const s = parsed.data;
-    await updateWorkspaceSettings(deps.db, ctx.workspace.id, {
-      name: s.name,
-      panelTitle: s.panel_title || null,
-      panelIntro: s.panel_intro || null,
-      rateLimitCount: s.rate_limit_count,
-      rateLimitWindowMinutes: s.rate_limit_window_minutes,
-      duplicateWindowMinutes: s.duplicate_window_minutes,
-      retentionDays: s.retention_days,
-    });
-    setFlash(reply, 'success', 'Settings saved.');
+    await updateWorkspaceGeneral(deps.db, ctx.workspace.id, { name: parsed.data.name, retentionDays: parsed.data.retention_days });
+    setFlash(reply, 'success', 'Settings saved');
     return reply.redirect(`${ctx.base}/settings`);
   });
 
-  app.post('/w/:wid/settings/invites', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply, { owner: true });
-    if (!ctx) return reply;
-    const token = await createInvite(deps.db, ctx.workspace.id, ctx.user.id);
-    return renderSettings(ctx, reply, { inviteUrl: web.publicUrl(`/invite/${token}`) });
-  });
+  // ---- Deployment (one-time provider registration) ----------------------------------------------
 
-  app.post('/w/:wid/settings/invites/:inviteId/revoke', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply, { owner: true });
-    if (!ctx) return reply;
-    await revokeInvite(deps.db, ctx.workspace.id, (req.params as { inviteId: string }).inviteId);
-    setFlash(reply, 'success', 'Invitation revoked.');
-    return reply.redirect(`${ctx.base}/settings`);
-  });
+  app.get('/w/:wid/provider-setup', async (req, reply) => reply.redirect(`/w/${(req.params as { wid: string }).wid}/deployment`));
 
-  app.post('/w/:wid/settings/members/:userId/remove', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply, { owner: true });
-    if (!ctx) return reply;
-    try {
-      await removeMember(deps.db, ctx.workspace.id, (req.params as { userId: string }).userId);
-      setFlash(reply, 'success', 'Admin removed.');
-    } catch (err) {
-      if (!(err instanceof UserFacingError)) throw err;
-      setFlash(reply, 'error', err.message);
-    }
-    return reply.redirect(`${ctx.base}/settings`);
-  });
-
-  // ---- Deployment / provider setup reference ---------------------------------------------------
-
-  app.get('/w/:wid/provider-setup', async (req, reply) => {
+  app.get('/w/:wid/deployment', async (req, reply) => {
     const ctx = await web.requireWorkspace(req, reply);
     if (!ctx) return reply;
     const c = deps.config;
-    const url = (id: string, value: string) => html`<div class="copy-field"><input id="${id}" type="text" readonly value="${value}"><button type="button" class="btn" data-copy="${id}">Copy</button></div>`;
     const [discordCheck, githubCheck] = await Promise.all([checkDiscordCredentials(deps), checkGitHubCredentials(deps)]);
-    const status = (missing: string[], check: CredentialCheck) =>
-      missing.length
-        ? html`${badge('Incomplete', 'danger')} <span class="small muted">Missing: ${missing.join(', ')}</span>`
-        : check.ok
-          ? badge('Working', 'ok')
-          : badge('Credentials rejected', 'danger');
-    const checkLine = (check: CredentialCheck, missing: string[]) =>
-      missing.length ? '' : alert(check.ok ? 'success' : 'error', check.detail);
+    const state = (missing: string[], check: CredentialCheck) =>
+      missing.length ? pill('Incomplete', 'warn') : check.ok ? pill('Working', 'ok') : pill('Credentials rejected', 'danger');
+    const detail = (missing: string[], check: CredentialCheck) => (missing.length ? `Missing: ${missing.join(', ')}` : check.detail);
+    const allOk = !c.missing.discord.length && !c.missing.github.length && discordCheck.ok && githubCheck.ok;
+    const provider = (o: { icon: IconName; name: string; missing: string[]; check: CredentialCheck; label: string }) => html`<div class="line provider">
+      <span class="tile">${icon(o.icon)}</span>
+      <div class="grow"><div class="name">${o.name}</div><div class="sub">${detail(o.missing, o.check)}</div></div>
+      ${state(o.missing, o.check)}${iconBtn('refresh-cw', `Re-test ${o.label} credentials`, { size: 'sm', href: `${ctx.base}/deployment` })}</div>`;
+    const env = (names: string[]) => html`<div class="tags">${names.map((n) => html`<code>${n}</code>`)}</div>`;
     const body = html`
-      ${pageHead('Deployment setup', 'One-time provider registration that has to happen on GitHub and Discord themselves. Whoever operates this deployment does this once; day-to-day setup happens in the other pages.')}
+      ${pageHeader({
+        title: 'Deployment',
+        after: allOk ? pill('All configured', 'ok') : pill('Needs attention', 'warn'),
+        description: 'One-time provider registration, done by whoever runs the server. Secret values are never shown here.',
+      })}
       <div class="card">
-        <div class="card-head"><h2>Discord application</h2>${status(c.missing.discord, discordCheck)}</div>
-        ${checkLine(discordCheck, c.missing.discord)}
-        <p class="muted small">In the Discord Developer Portal (Applications → your app):</p>
-        <ol class="small">
-          <li>General Information → <strong>Interactions Endpoint URL</strong>:</li>
-        </ol>
-        ${url('discord-interactions', web.publicUrl('/discord/interactions'))}
-        <ol class="small" start="2"><li>OAuth2 → <strong>Redirects</strong>: add this URL (used for admin sign-in and for adding the bot):</li></ol>
-        ${url('discord-redirect', web.publicUrl('/oauth/discord/callback'))}
-        <ol class="small" start="3"><li>Bot → keep <strong>Public Bot</strong> off unless other workspaces on this deployment should add it. No privileged intents are needed.</li>
-        <li>Server variables: <code>DISCORD_APPLICATION_ID</code>, <code>DISCORD_PUBLIC_KEY</code>, <code>DISCORD_CLIENT_SECRET</code>, <code>DISCORD_BOT_TOKEN</code>.</li></ol>
+        <div class="card-h"><h2>Providers</h2></div>
+        ${provider({ icon: 'bot', name: 'Discord application', missing: c.missing.discord, check: discordCheck, label: 'Discord' })}
+        ${provider({ icon: 'github', name: 'GitHub App', missing: c.missing.github, check: githubCheck, label: 'GitHub' })}
       </div>
+
       <div class="card">
-        <div class="card-head"><h2>GitHub App</h2>${status(c.missing.github, githubCheck)}</div>
-        ${checkLine(githubCheck, c.missing.github)}
-        <p class="muted small">In GitHub → Settings → Developer settings → GitHub Apps → New GitHub App:</p>
-        <ol class="small"><li><strong>Callback URL</strong> (must be the first callback URL), with “Request user authorization (OAuth) during installation” turned on:</li></ol>
-        ${url('github-callback', web.publicUrl('/oauth/github/callback'))}
-        <ol class="small" start="2"><li><strong>Webhook URL</strong> (optional but recommended, so uninstalls show up here immediately) with a webhook secret:</li></ol>
-        ${url('github-webhook', web.publicUrl('/github/webhook'))}
-        <ol class="small" start="3"><li>Repository permissions: <strong>Issues: Read and write</strong> and <strong>Metadata: Read-only</strong>. For contributor roles, also <strong>Pull requests: Read-only</strong> and <strong>Contents: Read-only</strong>. Nothing else. Subscribe to no extra events.</li>
-        <li>Server variables: <code>GITHUB_APP_ID</code>, <code>GITHUB_APP_SLUG</code>, <code>GITHUB_CLIENT_ID</code>, <code>GITHUB_CLIENT_SECRET</code>, <code>GITHUB_APP_PRIVATE_KEY</code>, and optionally <code>GITHUB_WEBHOOK_SECRET</code> ${c.github?.webhookSecret ? badge('webhook on', 'ok') : badge('webhook off', '')}.</li></ol>
+        <div class="card-h"><div><h2>Discord Developer Portal</h2><div class="desc">Applications › your app.</div></div>${linkBtn('https://discord.com/developers/applications', 'Open portal', { variant: 'ghost', size: 'sm', trail: 'arrow-up-right', external: true })}</div>
+        ${setting('Interactions endpoint URL', 'General Information. Discord sends panel clicks and forms here.', copyField('discord-interactions', web.publicUrl('/discord/interactions'), 'Interactions endpoint URL'), { top: true })}
+        ${setting('OAuth2 redirect', 'OAuth2 › Redirects. Used for console sign-in and for adding the bot.', copyField('discord-redirect', web.publicUrl('/oauth/discord/callback'), 'OAuth2 redirect'), { top: true })}
+        ${setting('Bot', 'Keep Public Bot off unless other workspaces on this deployment should add it. No privileged intents are needed.', tag('No intents'))}
+        ${setting('Server variables', 'Set in .env on the server.', env(['DISCORD_APPLICATION_ID', 'DISCORD_PUBLIC_KEY', 'DISCORD_CLIENT_SECRET', 'DISCORD_BOT_TOKEN']), { stacked: true })}
       </div>
-      <p class="muted small">The full guide is in <code>docs/PROVIDER_SETUP.md</code> in the project repository. Secret values are never shown in this interface.</p>`;
-    return web.render(reply, ctx, 'Deployment setup', 'provider', body);
+
+      <div class="card">
+        <div class="card-h"><div><h2>GitHub App</h2><div class="desc">Settings › Developer settings › GitHub Apps.</div></div>${linkBtn('https://github.com/settings/apps', 'Open settings', { variant: 'ghost', size: 'sm', trail: 'arrow-up-right', external: true })}</div>
+        ${setting('Callback URL', 'Must be the first callback URL. Turn on “Request user authorization (OAuth) during installation”.', copyField('github-callback', web.publicUrl('/oauth/github/callback'), 'Callback URL'), { top: true })}
+        ${setting('Webhook URL', html`Optional but recommended, so uninstalls show up right away. ${c.github?.webhookSecret ? tag('Webhook secret set', { icon: 'circle-check' }) : tag('No webhook secret')}`, copyField('github-webhook', web.publicUrl('/github/webhook'), 'Webhook URL'), { top: true })}
+        ${setting('Repository permissions', 'Nothing else is needed, and no extra events.', html`<div class="tags">${tag('Issues: read and write')}${tag('Metadata: read')}${tag('Pull requests: read')}${tag('Contents: read')}</div>`, { top: true })}
+        ${setting('Server variables', 'Set in .env on the server. The private key can be a path, such as secrets/sec.pem.', env(['GITHUB_APP_ID', 'GITHUB_APP_SLUG', 'GITHUB_CLIENT_ID', 'GITHUB_CLIENT_SECRET', 'GITHUB_APP_PRIVATE_KEY', 'GITHUB_WEBHOOK_SECRET']), { stacked: true })}
+        <div class="card-note">The full guide is in <code>docs/PROVIDER_SETUP.md</code>. After changing <code>.env</code> or <code>secrets/sec.pem</code>, run <code>pm2 restart all --update-env</code>.</div>
+      </div>`;
+    return web.render(reply, ctx, 'Deployment', 'deployment', body);
   });
 }

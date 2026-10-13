@@ -1,47 +1,389 @@
-// Progressive enhancement for the admin UI. Every page works without this script.
+// Progressive enhancement for the admin console: menus, dialogs, confirmations, copy buttons,
+// toasts, the mobile drawer, live previews and dirty-state footers. Forms still submit without it.
 (function () {
-  // Confirmation prompts for destructive or outward-facing actions.
-  document.addEventListener('submit', function (event) {
-    var form = event.target;
-    var message = form.getAttribute('data-confirm');
-    if (message && !window.confirm(message)) {
-      event.preventDefault();
+  'use strict';
+  var root = document.documentElement;
+  root.classList.add('js');
+  var reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  function $(sel, ctx) { return (ctx || document).querySelector(sel); }
+  function $$(sel, ctx) { return Array.prototype.slice.call((ctx || document).querySelectorAll(sel)); }
+  function iconNode(name) {
+    var tpl = document.getElementById('icon-templates');
+    var el = tpl && tpl.content.querySelector('[data-i="' + name + '"]');
+    return el ? el.firstElementChild.cloneNode(true) : document.createElement('span');
+  }
+
+  // ---- Toasts ---------------------------------------------------------------------------------
+
+  function dismiss(t) {
+    if (!t || !t.parentNode) return;
+    t.classList.add('leave');
+    setTimeout(function () { if (t.parentNode) t.parentNode.removeChild(t); }, reduceMotion ? 0 : 160);
+  }
+  function arm(t, ms) { setTimeout(function () { dismiss(t); }, ms); }
+  function toast(message, kind) {
+    var region = document.getElementById('toasts');
+    if (!region) return;
+    var t = document.createElement('div');
+    t.className = 'toast enter';
+    t.appendChild(iconNode(kind || 'ok'));
+    var span = document.createElement('span');
+    span.textContent = message;
+    t.appendChild(span);
+    region.appendChild(t);
+    requestAnimationFrame(function () { t.classList.remove('enter'); });
+    arm(t, kind === 'danger' ? 6000 : 2600);
+  }
+  window.trToast = toast;
+  $$('.toast[data-auto]').forEach(function (t) { arm(t, 4000); });
+  document.addEventListener('click', function (e) {
+    var close = e.target.closest('[data-toast-close]');
+    if (close) dismiss(close.closest('.toast'));
+  });
+
+  // ---- Menus ----------------------------------------------------------------------------------
+
+  var openMenu = null;
+  function closeMenu(focusTrigger) {
+    if (!openMenu) return;
+    var m = openMenu;
+    openMenu = null;
+    m.panel.classList.remove('shown', 'open');
+    m.trigger.setAttribute('aria-expanded', 'false');
+    if (focusTrigger) m.trigger.focus();
+  }
+  function placeMenu(trigger, panel) {
+    var r = trigger.getBoundingClientRect();
+    panel.style.left = '0px';
+    panel.style.top = '0px';
+    var w = panel.offsetWidth, h = panel.offsetHeight;
+    var vw = document.documentElement.clientWidth, vh = window.innerHeight;
+    var left = trigger.classList.contains('ws') ? r.left : r.right - w;
+    left = Math.max(8, Math.min(left, vw - w - 8));
+    var top = r.bottom + 4;
+    if (vh - r.bottom < Math.min(h + 12, 200) && r.top > h + 12) top = r.top - h - 4;
+    top = Math.max(8, Math.min(top, vh - h - 8));
+    panel.style.left = left + 'px';
+    panel.style.top = top + 'px';
+    if (trigger.classList.contains('ws')) panel.style.minWidth = r.width + 'px';
+  }
+  function items(panel) { return $$('.menu-item:not([disabled])', panel); }
+  function toggleMenu(trigger) {
+    var panel = document.getElementById(trigger.getAttribute('data-menu'));
+    if (!panel) return;
+    if (openMenu && openMenu.panel === panel) return closeMenu(true);
+    closeMenu(false);
+    panel.classList.add('open');
+    placeMenu(trigger, panel);
+    trigger.setAttribute('aria-expanded', 'true');
+    openMenu = { trigger: trigger, panel: panel };
+    requestAnimationFrame(function () { panel.classList.add('shown'); });
+    var first = items(panel)[0];
+    if (first) first.focus();
+  }
+  document.addEventListener('click', function (e) {
+    var trigger = e.target.closest('[data-menu]');
+    if (trigger) { e.preventDefault(); toggleMenu(trigger); return; }
+    if (openMenu && !openMenu.panel.contains(e.target)) closeMenu(false);
+  });
+  document.addEventListener('keydown', function (e) {
+    if (!openMenu) return;
+    var list = items(openMenu.panel);
+    var i = list.indexOf(document.activeElement);
+    if (e.key === 'Escape') { e.preventDefault(); closeMenu(true); }
+    else if (e.key === 'ArrowDown') { e.preventDefault(); (list[i + 1] || list[0]).focus(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); (list[i - 1] || list[list.length - 1]).focus(); }
+    else if (e.key === 'Home') { e.preventDefault(); list[0].focus(); }
+    else if (e.key === 'End') { e.preventDefault(); list[list.length - 1].focus(); }
+    else if (e.key === 'Tab') closeMenu(false);
+  });
+  window.addEventListener('resize', function () { closeMenu(false); });
+  window.addEventListener('scroll', function () { closeMenu(false); }, true);
+
+  // ---- Dialogs --------------------------------------------------------------------------------
+
+  function openDialog(d) {
+    if (!d || typeof d.showModal !== 'function') return false;
+    d.showModal();
+    var focus = d.querySelector('[autofocus]') ||
+      (d.hasAttribute('data-destructive') ? d.querySelector('.dlg-f [data-dialog-close]') : null) ||
+      d.querySelector('.dlg-b input:not([type=hidden]):not([disabled]), .dlg-b textarea, .dlg-b select') ||
+      d.querySelector('.dlg-f [data-dialog-close]');
+    if (focus) focus.focus();
+    return true;
+  }
+  document.addEventListener('click', function (e) {
+    var opener = e.target.closest('[data-dialog]');
+    if (opener) {
+      closeMenu(false);
+      if (openDialog(document.getElementById(opener.getAttribute('data-dialog')))) e.preventDefault();
       return;
     }
-    // Loading state: disable the submit button so actions aren't sent twice.
-    var button = event.submitter || form.querySelector('button[type="submit"], button:not([type])');
-    if (button) {
+    var closer = e.target.closest('[data-dialog-close]');
+    if (closer) { var d = closer.closest('dialog'); if (d) d.close(); return; }
+    // Clicking the backdrop (the dialog element itself, outside its content) closes it.
+    if (e.target.tagName === 'DIALOG' && e.target.open) {
+      var r = e.target.getBoundingClientRect();
+      if (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom) e.target.close();
+    }
+  });
+
+  // ---- Confirmations and loading states -------------------------------------------------------
+
+  var confirmDialog = document.getElementById('confirm-dialog');
+  var pending = null;
+  if (confirmDialog) {
+    $('#confirm-ok', confirmDialog).addEventListener('click', function () {
+      var p = pending;
+      pending = null;
+      confirmDialog.close();
+      if (!p) return;
+      p.form.setAttribute('data-confirmed', '1');
+      if (p.form.requestSubmit) p.form.requestSubmit(p.submitter || undefined); else p.form.submit();
+    });
+    confirmDialog.addEventListener('close', function () { pending = null; });
+  }
+  document.addEventListener('submit', function (e) {
+    var form = e.target;
+    if (form.hasAttribute('data-confirm-title') && !form.hasAttribute('data-confirmed') && confirmDialog && confirmDialog.showModal) {
+      e.preventDefault();
+      closeMenu(false);
+      pending = { form: form, submitter: e.submitter };
+      $('#confirm-title', confirmDialog).textContent = form.getAttribute('data-confirm-title');
+      $('#confirm-body', confirmDialog).textContent = form.getAttribute('data-confirm-body') || '';
+      var ok = $('#confirm-ok', confirmDialog);
+      ok.textContent = form.getAttribute('data-confirm-label') || 'Confirm';
+      ok.className = 'btn ' + (form.hasAttribute('data-confirm-danger') ? 'danger-solid' : 'primary');
+      if (form.hasAttribute('data-confirm-danger')) confirmDialog.setAttribute('data-destructive', ''); else confirmDialog.removeAttribute('data-destructive');
+      openDialog(confirmDialog);
+      return;
+    }
+    form.removeAttribute('data-confirmed');
+    if (form.hasAttribute('data-async')) return;
+    var button = e.submitter || form.querySelector('button[type="submit"]');
+    if (button && button.classList.contains('btn')) {
       setTimeout(function () {
         button.disabled = true;
         button.classList.add('loading');
-        if (button.dataset.loadingText) button.lastChild.textContent = ' ' + button.dataset.loadingText;
+        var label = button.querySelector('.lbl');
+        if (label && button.dataset.loadingText) label.textContent = button.dataset.loadingText;
       }, 0);
     }
   });
 
-  // Copy buttons.
-  document.addEventListener('click', function (event) {
-    var button = event.target.closest('[data-copy]');
-    if (!button) return;
-    var input = document.getElementById(button.getAttribute('data-copy'));
-    if (!input) return;
-    input.select();
-    navigator.clipboard.writeText(input.value).then(function () {
-      var original = button.textContent;
-      button.textContent = 'Copied';
-      setTimeout(function () { button.textContent = original; }, 1500);
+  // ---- Copy -----------------------------------------------------------------------------------
+
+  document.addEventListener('click', function (e) {
+    var b = e.target.closest('[data-copy],[data-copy-value]');
+    if (!b) return;
+    var value = b.getAttribute('data-copy-value');
+    if (value === null) {
+      var input = document.getElementById(b.getAttribute('data-copy'));
+      if (!input) return;
+      input.select();
+      value = input.value;
+    }
+    closeMenu(false);
+    var done = function () {
+      toast('Copied');
+      var ic = b.querySelector('.ic');
+      if (!ic) return;
+      var check = iconNode(ic.classList.contains('ic-14') ? 'check' : 'check-16');
+      b.replaceChild(check, ic);
+      setTimeout(function () { if (check.parentNode === b) b.replaceChild(ic, check); }, 1500);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(value).then(done, function () { toast('Copy failed. Select the text and copy it manually.', 'warn'); });
+  });
+
+  // ---- Mobile drawer --------------------------------------------------------------------------
+
+  var menuBtn = document.getElementById('menu-btn');
+  var sidebar = document.getElementById('sidebar');
+  var scrim = null;
+  function setDrawer(open) {
+    if (!sidebar || !menuBtn) return;
+    sidebar.classList.toggle('open', open);
+    menuBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    document.body.style.overflow = open ? 'hidden' : '';
+    if (open) {
+      scrim = document.createElement('div');
+      scrim.className = 'scrim';
+      scrim.addEventListener('click', function () { setDrawer(false); });
+      document.body.appendChild(scrim);
+      var c = document.getElementById('drawer-close');
+      if (c) c.focus();
+    } else {
+      if (scrim && scrim.parentNode) scrim.parentNode.removeChild(scrim);
+      scrim = null;
+      menuBtn.focus();
+    }
+  }
+  if (menuBtn) menuBtn.addEventListener('click', function () { setDrawer(!sidebar.classList.contains('open')); });
+  var drawerClose = document.getElementById('drawer-close');
+  if (drawerClose) drawerClose.addEventListener('click', function () { setDrawer(false); });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && sidebar && sidebar.classList.contains('open') && !openMenu) setDrawer(false);
+  });
+
+  // ---- Auto-submitting controls ---------------------------------------------------------------
+
+  // Switches inside form[data-async] save right away (JSON response with a message).
+  document.addEventListener('change', function (e) {
+    var input = e.target;
+    var form = input.form;
+    if (form && form.hasAttribute('data-async')) {
+      var data = new URLSearchParams(new FormData(form));
+      var prev = !input.checked;
+      input.disabled = true;
+      fetch(form.action, { method: 'POST', body: data, credentials: 'same-origin', headers: { accept: 'application/json' } })
+        .then(function (res) {
+          return res.json().catch(function () { return {}; }).then(function (body) {
+            if (!res.ok || !body.ok) throw { shown: body.error || (res.status === 403 ? 'You don’t have permission to change this.' : 'Not saved. Reload the page and try again.') };
+            toast(body.message || 'Saved');
+          });
+        })
+        .catch(function (err) {
+          if (input.type === 'checkbox') input.checked = prev;
+          toast(err && err.shown ? err.shown : 'Not saved. Check your connection and try again.', 'danger');
+        })
+        .then(function () { input.disabled = false; input.focus({ preventScroll: true }); });
+      return;
+    }
+    if (input.hasAttribute('data-autosubmit') && form) form.submit();
+  });
+
+  // ---- Filters --------------------------------------------------------------------------------
+
+  $$('[data-filter-rows]').forEach(function (input) {
+    var scope = document.querySelector(input.getAttribute('data-filter-rows'));
+    var emptyEl = document.getElementById(input.getAttribute('data-filter-empty'));
+    if (!scope) return;
+    function run() {
+      var q = input.value.trim().toLowerCase();
+      var shown = 0;
+      $$('[data-search]', scope).forEach(function (row) {
+        var hit = !q || row.getAttribute('data-search').indexOf(q) !== -1;
+        row.hidden = !hit;
+        if (hit && !row.classList.contains('only-mobile-row')) shown++;
+      });
+      $$('[data-search-wrap]', scope).forEach(function (w) { w.hidden = q && shown === 0; });
+      if (emptyEl) {
+        emptyEl.hidden = !(q && shown === 0);
+        var term = emptyEl.querySelector('[data-term]');
+        if (term) term.textContent = input.value.trim();
+      }
+    }
+    input.addEventListener('input', run);
+    var clear = emptyEl && emptyEl.querySelector('[data-clear-search]');
+    if (clear) clear.addEventListener('click', function (e) { e.preventDefault(); input.value = ''; run(); input.focus(); });
+    run();
+  });
+  $$('[data-toggle-filters]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      var target = document.getElementById(b.getAttribute('data-toggle-filters'));
+      if (!target) return;
+      var show = !target.classList.contains('show');
+      target.classList.toggle('show', show);
+      b.setAttribute('aria-expanded', show ? 'true' : 'false');
     });
   });
 
-  // Workspace switcher.
-  var switcher = document.getElementById('workspace-switch');
-  if (switcher) {
-    switcher.addEventListener('change', function () {
-      if (switcher.value) window.location.href = switcher.value;
-    });
-  }
+  // ---- Counters, live previews and dirty forms ------------------------------------------------
 
-  // App form: load the chosen repository's labels.
+  function escapeHtml(s) {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+  // Tiny Discord-markdown renderer matching the server preview: headings, **bold**, role mentions.
+  function discordHtml(text, roles) {
+    return escapeHtml(text).split('\n').map(function (line) {
+      var out = line
+        .replace(/&lt;@&amp;(\d+)&gt;/g, function (_m, id) { return '<span class="dp-mention">@' + escapeHtml(roles[id] || 'unknown-role') + '</span>'; })
+        .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+      var h = /^#{1,3} (.*)$/.exec(out);
+      return h ? '<span class="dp-h">' + h[1] + '</span>' : out;
+    }).join('<br>');
+  }
+  function syncField(el) {
+    var counter = el.id && document.querySelector('[data-counter-for="' + el.id + '"]');
+    if (counter) counter.textContent = el.value.length + ' / ' + el.getAttribute('maxlength');
+    var target = el.getAttribute('data-preview') && document.getElementById(el.getAttribute('data-preview'));
+    if (target) {
+      var value = el.value.trim() ? el.value : (el.getAttribute('placeholder') || '');
+      if (el.hasAttribute('data-preview-md')) {
+        var rolesEl = document.getElementById('role-names');
+        var roles = rolesEl ? JSON.parse(rolesEl.textContent || '{}') : {};
+        target.innerHTML = discordHtml(value, roles);
+      } else {
+        target.textContent = value;
+      }
+    }
+  }
+  $$('[data-preview],[maxlength][id]').forEach(function (el) {
+    if (el.tagName !== 'INPUT' && el.tagName !== 'TEXTAREA') return;
+    el.addEventListener('input', function () { syncField(el); });
+  });
+
+  $$('form[data-dirty]').forEach(function (form) {
+    function snapshot() { return new URLSearchParams(new FormData(form)).toString(); }
+    var initial = snapshot();
+    function update() {
+      var dirty = snapshot() !== initial;
+      $$('[data-dirty-show]', form).forEach(function (el) { el.hidden = !dirty; });
+      $$('[data-clean-show]', form).forEach(function (el) { el.hidden = dirty; });
+      $$('[data-dirty-enable]', form).forEach(function (el) { el.disabled = !dirty; });
+    }
+    form.addEventListener('input', update);
+    form.addEventListener('change', update);
+    $$('[data-discard]', form).forEach(function (b) {
+      b.addEventListener('click', function () {
+        form.reset();
+        $$('input, textarea', form).forEach(syncField);
+        update();
+      });
+    });
+    update();
+  });
+
+  // "Reset to default" puts each field's default (its placeholder) back.
+  document.addEventListener('click', function (e) {
+    var b = e.target.closest('[data-reset-fields]');
+    if (!b) return;
+    b.getAttribute('data-reset-fields').split(/\s+/).forEach(function (id) {
+      var el = document.getElementById(id);
+      if (!el) return;
+      el.value = el.getAttribute('placeholder') || '';
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  });
+
+  // Whole table rows open their ticket; the title link stays the keyboard target.
+  document.addEventListener('click', function (e) {
+    var tr = e.target.closest('tr.click');
+    if (!tr || e.target.closest('a, button, input, select, label, form')) return;
+    var a = tr.querySelector('a.cell-title');
+    if (!a) return;
+    if (e.metaKey || e.ctrlKey) window.open(a.href, '_blank'); else window.location.href = a.href;
+  });
+
+  // ---- Highlight a row linked from a menu (e.g. "Edit access") --------------------------------
+
+  function flashTarget() {
+    if (!location.hash || location.hash.length < 2) return;
+    var row = document.getElementById(location.hash.slice(1));
+    if (!row || !row.hasAttribute('data-flash')) return;
+    row.scrollIntoView({ block: 'center', behavior: reduceMotion ? 'auto' : 'smooth' });
+    row.classList.remove('flash');
+    void row.offsetWidth;
+    row.classList.add('flash');
+    var first = row.querySelector('input:not([type=hidden])');
+    if (first) first.focus({ preventScroll: true });
+  }
+  window.addEventListener('hashchange', flashTarget);
+  flashTarget();
+
+  // ---- App form: load the chosen repository's labels -----------------------------------------
+
   var repoSelect = document.getElementById('repo');
   var labelBox = document.getElementById('label-list');
   if (repoSelect && labelBox) {
@@ -49,7 +391,7 @@
     var selected = new Set(JSON.parse(labelBox.getAttribute('data-selected') || '[]'));
     var visibility = document.getElementById('repo-visibility');
 
-    function render(message, labels) {
+    var renderLabels = function (message, labels) {
       labelBox.textContent = '';
       if (message) {
         var p = document.createElement('span');
@@ -60,7 +402,7 @@
       }
       labels.forEach(function (name) {
         var label = document.createElement('label');
-        label.className = 'checkbox';
+        label.className = 'check';
         var input = document.createElement('input');
         input.type = 'checkbox';
         input.name = 'labels';
@@ -70,30 +412,33 @@
           if (input.checked) selected.add(name); else selected.delete(name);
         });
         label.appendChild(input);
-        label.appendChild(document.createTextNode(name));
+        var text = document.createElement('span');
+        text.className = 'mono';
+        text.textContent = name;
+        label.appendChild(text);
         labelBox.appendChild(label);
       });
-    }
+    };
 
-    function load() {
+    var load = function () {
       var option = repoSelect.options[repoSelect.selectedIndex];
       if (visibility) {
         var priv = option && option.getAttribute('data-private');
         visibility.textContent = !option || !option.value ? '' : priv === 'true'
-          ? 'Private repository: only people with access can see tickets. Members will be told this.'
-          : 'Public repository: anyone can read tickets filed here. Members will be told this before they submit.';
+          ? 'Private repository: only people with access can see tickets. Members are told this.'
+          : 'Public repository: anyone can read tickets filed here. Members are told this before they submit.';
       }
-      if (!repoSelect.value) return render('Choose a repository to see its labels.');
-      render('Loading labels…');
+      if (!repoSelect.value) return renderLabels('Choose a repository to see its labels.');
+      renderLabels('Loading labels…');
       fetch(endpoint + '?repo=' + encodeURIComponent(repoSelect.value), { credentials: 'same-origin' })
         .then(function (res) { return res.json().then(function (body) { return { ok: res.ok, body: body }; }); })
         .then(function (result) {
-          if (!result.ok) return render(result.body.error || 'Could not load labels.');
-          if (!result.body.labels.length) return render('This repository has no labels.');
-          render(null, result.body.labels);
+          if (!result.ok) return renderLabels(result.body.error || 'Could not load labels.');
+          if (!result.body.labels.length) return renderLabels('This repository has no labels.');
+          renderLabels(null, result.body.labels);
         })
-        .catch(function () { render('Could not load labels. You can save without labels and add them later.'); });
-    }
+        .catch(function () { renderLabels('Could not load labels. You can save without labels and add them later.'); });
+    };
 
     repoSelect.addEventListener('change', function () { selected.clear(); load(); });
     load();

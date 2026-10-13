@@ -6,10 +6,12 @@ import formbody from '@fastify/formbody';
 import fastifyStatic from '@fastify/static';
 import { safeEqual } from '../lib/crypto.js';
 import { html } from '../lib/html.js';
+import { empty, linkBtn, pageHeader } from './ui.js';
 import type { Processor } from '../domain/processor.js';
 import { getDiscordConnection, getGitHubConnection, getPanel, listApps } from '../domain/store.js';
 import { UserFacingError, type Deps, type Role } from '../domain/types.js';
 import { getMembership, listMemberships, type Membership } from '../domain/workspaces.js';
+import { can, type Permission } from '../domain/permissions.js';
 import { layout, simplePage, type PageContext, type SetupProgress } from './layout.js';
 import { loadSession, SESSION_COOKIE, takeFlash, type AuthContext } from './session.js';
 import { registerAuthRoutes } from './routes/auth.js';
@@ -19,7 +21,8 @@ import { registerGitHubRoutes } from './routes/github.js';
 import { registerDiscordRoutes } from './routes/discord.js';
 import { registerAppRoutes } from './routes/apps.js';
 import { registerPanelRoutes } from './routes/panel.js';
-import { registerSubmissionRoutes } from './routes/submissions.js';
+import { registerTicketRoutes } from './routes/tickets.js';
+import { registerMemberRoutes } from './routes/members.js';
 import { registerContributorRoutes } from './routes/contributors.js';
 import { registerTicketTypeRoutes } from './routes/ticket-types.js';
 
@@ -42,10 +45,16 @@ export interface Web {
   processor: Processor;
   /** Requires a signed-in user; redirects to sign-in otherwise. */
   requireUser(req: FastifyRequest, reply: FastifyReply): AuthContext | null;
-  /** Requires membership of the workspace in the URL (404 for non-members, to avoid leaking existence). */
-  requireWorkspace(req: FastifyRequest, reply: FastifyReply, opts?: { owner?: boolean }): Promise<WorkspaceRequestContext | null>;
+  /**
+   * Requires membership of the workspace in the URL (404 for non-members, to avoid leaking
+   * existence) and a permission. Secure by default: without `permission` the route needs
+   * "manage" (owners and admins), so moderators are only let in where a route opts in.
+   */
+  requireWorkspace(req: FastifyRequest, reply: FastifyReply, opts?: { permission?: Permission }): Promise<WorkspaceRequestContext | null>;
   pageContext(req: FastifyRequest, reply: FastifyReply): PageContext;
   render(reply: FastifyReply, ctx: PageContext, title: string, active: string, body: ReturnType<typeof html>): FastifyReply;
+  /** True when the request came from app.js and expects a JSON reply (switches that save right away). */
+  wantsJson(req: FastifyRequest): boolean;
   publicUrl(p: string): string;
   secureCookies: boolean;
 }
@@ -60,7 +69,7 @@ export async function computeProgress(deps: Deps, workspaceId: string): Promise<
   ]);
   return {
     github: !gh ? 'todo' : gh.status === 'active' ? 'done' : 'problem',
-    discord: !dc ? 'todo' : dc.status !== 'active' ? 'problem' : dc.tickets_channel_id ? 'done' : 'todo',
+    discord: !dc ? 'todo' : dc.status !== 'active' ? 'problem' : 'done',
     apps: apps.some((a) => a.enabled) ? 'done' : 'todo',
     panel: !panel ? 'todo' : panel.status === 'missing' ? 'problem' : 'done',
     attention: attention.rows[0]!.n,
@@ -115,24 +124,24 @@ export async function buildServer(deps: Deps, processor: Processor, opts: { logg
     if (url === '/dev-login' && deps.config.devLogin) return;
     const token = (req.body as Record<string, unknown> | undefined)?._csrf;
     if (!req.auth || typeof token !== 'string' || !safeEqual(token, req.auth.session.csrf_token)) {
-      reply.code(403).type('text/html').send(simplePage('Session expired', html`<h1>Your session expired</h1><p class="muted">For your security this action was not performed. Go back, reload the page and try again.</p><a class="btn" href="/">Back to the app</a>`));
+      reply.code(403).type('text/html').send(simplePage('Session expired', html`<h1>Your session expired</h1><p class="muted">For your security this action wasn’t performed. Go back, reload the page and try again.</p>${linkBtn('/', 'Back to the app', { block: true })}`));
     }
   });
 
   app.setErrorHandler((err, req, reply) => {
     if (err instanceof UserFacingError) {
-      reply.code(err.status).type('text/html').send(simplePage('Something went wrong', html`<h1>Something went wrong</h1><p>${err.message}</p><a class="btn" href="/">Back to the app</a>`));
+      reply.code(err.status).type('text/html').send(simplePage('Something went wrong', html`<h1>Something went wrong</h1><p class="muted">${err.message}</p>${linkBtn('/', 'Back to the app', { block: true })}`));
       return;
     }
     const status = (err as { statusCode?: number }).statusCode ?? 500;
     if (status >= 500) req.log.error({ err: (err as Error).message, stack: (err as Error).stack }, 'request failed');
     reply.code(status).type('text/html').send(
-      simplePage('Something went wrong', html`<h1>${status >= 500 ? 'Something went wrong on our side' : 'That request could not be handled'}</h1><p class="muted">Please try again. If it keeps happening, check the server logs.</p><a class="btn" href="/">Back to the app</a>`),
+      simplePage('Something went wrong', html`<h1>${status >= 500 ? 'Something went wrong on our side' : 'That request couldn’t be handled'}</h1><p class="muted">Please try again. If it keeps happening, check the server logs.</p>${linkBtn('/', 'Back to the app', { block: true })}`),
     );
   });
 
   app.setNotFoundHandler((req, reply) => {
-    reply.code(404).type('text/html').send(simplePage('Not found', html`<h1>Page not found</h1><p class="muted">It may have moved, or you may not have access to it.</p><a class="btn" href="/">Back to the app</a>`));
+    reply.code(404).type('text/html').send(simplePage('Not found', html`<h1>Page not found</h1><p class="muted">It may have moved, or you may not have access to it.</p>${linkBtn('/', 'Back to the app', { block: true })}`));
   });
 
   const web: Web = {
@@ -155,8 +164,20 @@ export async function buildServer(deps: Deps, processor: Processor, opts: { logg
       if (!auth) return null;
       const wid = (req.params as { wid?: string }).wid ?? '';
       const membership = await getMembership(deps.db, auth.user.id, wid);
-      if (!membership || (o.owner && membership.role !== 'owner')) {
+      if (!membership) {
         reply.callNotFound();
+        return null;
+      }
+      if (!can(membership, o.permission ?? 'manage')) {
+        reply.code(403);
+        if (web.wantsJson(req)) {
+          reply.send({ ok: false, error: 'You don’t have permission to change this.' });
+          return null;
+        }
+        const ctx = { ...web.pageContext(req, reply), workspace: membership.workspace, role: membership.role, membership, base: `/w/${membership.workspace.id}`, memberships: await listMemberships(deps.db, auth.user.id), progress: await computeProgress(deps, wid) };
+        const scope = can(membership, 'contrib.view') ? 'the tickets inbox and contributor verifications' : 'the tickets inbox';
+        web.render(reply, ctx, 'No access', '', html`${pageHeader({ title: 'No access' })}
+          <div class="card">${empty('lock', 'You don’t have access to this page', `Your role can see ${scope}. Ask an admin or the owner if you need more access.`, linkBtn(`/w/${membership.workspace.id}`, 'Go to overview'))}</div>`);
         return null;
       }
       const [memberships, progress] = await Promise.all([listMemberships(deps.db, auth.user.id), computeProgress(deps, wid)]);
@@ -169,6 +190,9 @@ export async function buildServer(deps: Deps, processor: Processor, opts: { logg
         membership,
         base: `/w/${membership.workspace.id}`,
       };
+    },
+    wantsJson(req) {
+      return String(req.headers.accept ?? '').includes('application/json');
     },
     render(reply, ctx, title, active, body) {
       return reply.type('text/html').send(layout(ctx, { title, active, body }));
@@ -191,7 +215,8 @@ export async function buildServer(deps: Deps, processor: Processor, opts: { logg
   registerDiscordRoutes(app, web);
   registerAppRoutes(app, web);
   registerPanelRoutes(app, web);
-  registerSubmissionRoutes(app, web);
+  registerTicketRoutes(app, web);
+  registerMemberRoutes(app, web);
   registerContributorRoutes(app, web);
   registerTicketTypeRoutes(app, web);
 

@@ -143,6 +143,19 @@ export async function addManualRole(q: Queryable, workspaceId: string, role: { i
   );
 }
 
+/** Changes how many contributions a tier needs and its panel text. */
+export async function updateTier(q: Queryable, workspaceId: string, tierId: string, minContributions: number, note: string | null): Promise<void> {
+  const tiers = await listTiers(q, workspaceId);
+  if (!tiers.some((t) => t.id === tierId)) throw new UserFacingError('That role is no longer a contributor role.', 404);
+  if (tiers.some((t) => t.id !== tierId && t.min_contributions === minContributions)) throw new UserFacingError(`Another role already needs ${minContributions} contribution${minContributions === 1 ? '' : 's'}.`);
+  await q.query('UPDATE contributor_tiers SET min_contributions = $3, note = $4 WHERE workspace_id = $1 AND id = $2', [workspaceId, tierId, minContributions, note]);
+}
+
+export async function updateManualRole(q: Queryable, workspaceId: string, id: string, note: string | null): Promise<void> {
+  const res = await q.query('UPDATE contributor_manual_roles SET note = $3 WHERE workspace_id = $1 AND id = $2', [workspaceId, id, note]);
+  if (!res.rowCount) throw new UserFacingError('That manual role no longer exists.', 404);
+}
+
 export async function deleteManualRole(q: Queryable, workspaceId: string, id: string): Promise<void> {
   await q.query('DELETE FROM contributor_manual_roles WHERE workspace_id = $1 AND id = $2', [workspaceId, id]);
 }
@@ -302,10 +315,12 @@ export type ContributorPanelState =
   | { state: 'missing' }
   | { state: 'published'; outdated: boolean; channelChanged: boolean; link: string | null };
 
-export async function checkContributorPanel(deps: Deps, workspaceId: string, conn: DiscordConnectionRow | null): Promise<ContributorPanelState> {
+/** Compares the posted panel with the current settings. `live: false` skips asking Discord whether it still exists. */
+export async function checkContributorPanel(deps: Deps, workspaceId: string, conn: DiscordConnectionRow | null, opts: { live: boolean } = { live: true }): Promise<ContributorPanelState> {
   const panel = await getContributorPanel(deps.db, workspaceId);
   if (!panel) return { state: 'not_published' };
-  if (deps.discord) {
+  if (!opts.live && panel.status === 'missing') return { state: 'missing' };
+  if (deps.discord && opts.live) {
     try {
       await deps.discord.getMessage(panel.channel_id, panel.message_id);
     } catch (err) {
@@ -570,6 +585,20 @@ export async function listVerifications(q: Queryable, workspaceId: string, limit
     [workspaceId, limit],
   );
   return rows;
+}
+
+/** Counts for the overview: active verifications, attempts this week and unresolved conflicts. */
+export async function verificationStats(q: Queryable, workspaceId: string): Promise<{ verified: number; thisWeek: number; conflicts: number }> {
+  const { rows } = await q.query<{ verified: number; week: number; conflicts: number }>(
+    `SELECT
+       COALESCE(SUM(CASE WHEN result = 'verified' AND revoked_at IS NULL THEN 1 ELSE 0 END), 0) AS verified,
+       COALESCE(SUM(CASE WHEN created_at >= now_ms() - 604800000 THEN 1 ELSE 0 END), 0) AS week,
+       COALESCE(SUM(CASE WHEN result = 'conflict' AND created_at >= now_ms() - 2592000000 THEN 1 ELSE 0 END), 0) AS conflicts
+     FROM contributor_verifications WHERE workspace_id = $1`,
+    [workspaceId],
+  );
+  const r = rows[0]!;
+  return { verified: r.verified, thisWeek: r.week, conflicts: r.conflicts };
 }
 
 /** Removes the role and unlinks the GitHub account so it can be verified again. */

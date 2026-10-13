@@ -206,17 +206,28 @@ export async function getSubmission(q: Queryable, workspaceId: string, id: strin
   return rows[0] ?? null;
 }
 
+export type SubmissionFilter = SubmissionStatus | 'attention' | 'open';
+
 export async function listSubmissions(
   q: Queryable,
   workspaceId: string,
-  opts: { status?: SubmissionStatus | 'attention'; search?: string; limit: number; offset: number },
+  opts: { status?: SubmissionFilter; search?: string; appId?: string; ticketType?: string; limit: number; offset: number },
 ): Promise<{ rows: SubmissionRow[]; total: number }> {
   const where = ['workspace_id = $1'];
   const params: unknown[] = [workspaceId];
   if (opts.status === 'attention') where.push(`status IN ('failed', 'uncertain')`);
+  else if (opts.status === 'open') where.push(`status IN ('pending', 'processing')`);
   else if (opts.status) {
     params.push(opts.status);
     where.push(`status = $${params.length}`);
+  }
+  if (opts.appId) {
+    params.push(opts.appId);
+    where.push(`app_id = $${params.length}`);
+  }
+  if (opts.ticketType) {
+    params.push(opts.ticketType);
+    where.push(`ticket_type_name = $${params.length}`);
   }
   if (opts.search) {
     params.push(`%${opts.search.replace(/[%_\\]/g, '\\$&')}%`);
@@ -242,6 +253,15 @@ export async function countByStatus(q: Queryable, workspaceId: string): Promise<
   const out = { pending: 0, processing: 0, created: 0, failed: 0, uncertain: 0, dismissed: 0 };
   for (const r of rows) out[r.status] = r.n;
   return out;
+}
+
+/** Tickets filed in the last 7 days (overview). */
+export async function filedThisWeek(q: Queryable, workspaceId: string): Promise<number> {
+  const { rows } = await q.query<{ n: number }>(
+    `SELECT count(*) AS n FROM submissions WHERE workspace_id = $1 AND status = 'created' AND COALESCE(completed_at, updated_at) >= now_ms() - 604800000`,
+    [workspaceId],
+  );
+  return rows[0]!.n;
 }
 
 export async function listEvents(q: Queryable, submissionId: string) {

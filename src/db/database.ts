@@ -25,7 +25,7 @@ export interface Queryable {
 
 const DATE_COLUMN = /(^|_)at$/;
 const JSON_COLUMNS = new Set(['labels', 'warnings', 'data', 'detail']);
-const BOOLEAN_COLUMNS = new Set(['enabled', 'repo_private', 'contributor_enabled']);
+const BOOLEAN_COLUMNS = new Set(['enabled', 'repo_private', 'contributor_enabled', 'can_act_tickets', 'can_view_contributors']);
 
 function toParam(value: unknown): unknown {
   if (value === undefined || value === null) return null;

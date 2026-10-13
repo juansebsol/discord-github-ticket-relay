@@ -211,7 +211,7 @@ describe('admin page', () => {
     const tiers = (await env.db.query('SELECT role_name, min_contributions FROM contributor_tiers ORDER BY min_contributions')).rows;
     expect(tiers).toEqual([{ role_name: 'Junior Contributor', min_contributions: 1 }, { role_name: 'Contributor', min_contributions: 10 }]);
 
-    const page = await env.server.inject({ method: 'GET', url: `/w/${ws.workspace.id}/contributors`, ...get(ws.owner) });
+    const page = await env.server.inject({ method: 'GET', url: `/w/${ws.workspace.id}/contributors/panel`, ...get(ws.owner) });
     expect(page.statusCode).toBe(200);
     expect(page.body).toContain('@Junior Contributor at 1+ contribution');
     expect(page.body).toContain('@Contributor at 10+ contributions');
@@ -222,16 +222,16 @@ describe('admin page', () => {
   });
 
   it('saves the panel channel only from the connected server', async () => {
-    const url = `/w/${ws.workspace.id}/contributors/settings`;
-    await env.server.inject({ method: 'POST', url, ...form(ws.owner, { enabled: '1', channel_id: '123' }) });
+    const url = `/w/${ws.workspace.id}/contributors/panel`;
+    await env.server.inject({ method: 'POST', url, ...form(ws.owner, { settings: '1', enabled: '1', channel_id: '123' }) });
     expect((await env.db.query('SELECT * FROM contributor_settings')).rows).toHaveLength(0);
-    await env.server.inject({ method: 'POST', url, ...form(ws.owner, { enabled: '1', channel_id: ws.channelId }) });
+    await env.server.inject({ method: 'POST', url, ...form(ws.owner, { settings: '1', enabled: '1', channel_id: ws.channelId }) });
     expect((await env.db.query('SELECT channel_id, enabled FROM contributor_settings')).rows[0]).toEqual({ channel_id: ws.channelId, enabled: true });
   });
 
   it('publishes a separate panel listing the tiers, and revoke removes every tier role', async () => {
     await enable();
-    await env.server.inject({ method: 'POST', url: `/w/${ws.workspace.id}/panel/publish`, ...form(ws.owner) });
+    await env.server.inject({ method: 'POST', url: `/w/${ws.workspace.id}/tickets/panel`, ...form(ws.owner, { intent: 'publish' }) });
     await env.server.inject({ method: 'POST', url: `/w/${ws.workspace.id}/contributors/publish`, ...form(ws.owner) });
     const ticketPanel = (await getPanel(env.db, ws.workspace.id))!;
     const contributorPanel = (await getContributorPanel(env.db, ws.workspace.id))!;
@@ -254,13 +254,13 @@ describe('admin page', () => {
     await enable();
     const text = `- <@&${JUNIOR_ID}>  - at least 1 merged pull request\n- <@&555>  - given manually to biggest contributors`;
     await env.server.inject({
-      method: 'POST', url: `/w/${ws.workspace.id}/contributors/text`,
+      method: 'POST', url: `/w/${ws.workspace.id}/contributors/panel`,
       ...form(ws.owner, { panel_title: 'Get your contributor role', panel_intro: '', roles_text: text, panel_steps: '', panel_footer: '', button_label: 'Check my GitHub' }),
     });
-    const page = await env.server.inject({ method: 'GET', url: `/w/${ws.workspace.id}/contributors`, ...get(ws.owner) });
-    expect(page.body).toContain('<h4>Get your contributor role</h4>');
+    const page = await env.server.inject({ method: 'GET', url: `/w/${ws.workspace.id}/contributors/panel`, ...get(ws.owner) });
+    expect(page.body).toContain('<h4 id="pv-title">Get your contributor role</h4>');
     expect(page.body).toContain('<span class="dp-mention">@Junior Contributor</span>');
-    expect(page.body).toContain('<span class="dp-button">Check my GitHub</span>');
+    expect(page.body).toContain('<span class="dp-button" id="pv-button">Check my GitHub</span>');
 
     await env.server.inject({ method: 'POST', url: `/w/${ws.workspace.id}/contributors/publish`, ...form(ws.owner) });
     const payload = env.discord.messages.get((await getContributorPanel(env.db, ws.workspace.id))!.message_id)!.payload;
@@ -270,7 +270,7 @@ describe('admin page', () => {
     expect(payload.components[0].components[0].label).toBe('Check my GitHub');
 
     // Saving channel settings keeps the text.
-    await env.server.inject({ method: 'POST', url: `/w/${ws.workspace.id}/contributors/settings`, ...form(ws.owner, { enabled: '1', channel_id: ws.channelId }) });
+    await env.server.inject({ method: 'POST', url: `/w/${ws.workspace.id}/contributors/panel`, ...form(ws.owner, { settings: '1', enabled: '1', channel_id: ws.channelId }) });
     expect((await env.db.query('SELECT panel_title FROM contributor_settings')).rows[0].panel_title).toBe('Get your contributor role');
   });
 
@@ -294,7 +294,7 @@ describe('admin page', () => {
       `- <@&${CORE_ID}> - given manually to biggest contributors`,
     ].join('\n'));
 
-    const page = await env.server.inject({ method: 'GET', url: `/w/${ws1}/contributors`, ...get(ws.owner) });
+    const page = await env.server.inject({ method: 'GET', url: `/w/${ws1}/contributors/panel`, ...get(ws.owner) });
     expect(page.body).toContain('<span class="dp-mention">@Core Contributor</span>');
 
     contributed(500);
