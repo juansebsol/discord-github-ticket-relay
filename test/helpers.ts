@@ -7,7 +7,7 @@ import { createApp as createAppRow, saveDiscordGuild, saveGitHubConnection, setT
 import type { AppRow, UserRow, WorkspaceRow } from '../src/domain/types.js';
 import { createWorkspace, upsertUser } from '../src/domain/workspaces.js';
 import { createSession } from '../src/web/session.js';
-import { FakeDiscord, FakeGitHub, fakeFetch } from './fakes.js';
+import { FakeAnthropic, FakeDiscord, FakeGitHub, fakeFetch } from './fakes.js';
 import { TEST_DATABASE_PATH } from './global-setup.js';
 
 const rsa = generateKeyPairSync('rsa', { modulusLength: 2048 });
@@ -52,20 +52,22 @@ export interface TestEnv extends AppInstance {
   db: Db;
   github: FakeGitHub;
   discord: FakeDiscord;
+  anthropic: FakeAnthropic;
 }
 
-export async function makeApp(opts: { config?: Config; github?: FakeGitHub; discord?: FakeDiscord; db?: Db; instanceId?: string } = {}): Promise<TestEnv> {
+export async function makeApp(opts: { config?: Config; github?: FakeGitHub; discord?: FakeDiscord; anthropic?: FakeAnthropic; db?: Db; instanceId?: string } = {}): Promise<TestEnv> {
   const github = opts.github ?? new FakeGitHub();
   const discord = opts.discord ?? new FakeDiscord();
+  const anthropic = opts.anthropic ?? new FakeAnthropic();
   const db = opts.db ?? testDb();
   const app = await createApp({
     config: opts.config ?? testConfig(),
     db,
-    fetch: fakeFetch(github, discord),
+    fetch: fakeFetch(github, discord, anthropic),
     instanceId: opts.instanceId,
     githubTimeouts: { request: 500, createIssue: 150 },
   });
-  return { ...app, db, github, discord };
+  return { ...app, db, github, discord, anthropic };
 }
 
 export interface Admin {

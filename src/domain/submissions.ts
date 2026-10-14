@@ -208,10 +208,18 @@ export async function getSubmission(q: Queryable, workspaceId: string, id: strin
 
 export type SubmissionFilter = SubmissionStatus | 'attention' | 'open';
 
+export type TriageFilter = 'review' | 'duplicate' | 'spam' | 'high';
+const TRIAGE_FILTERS: Record<TriageFilter, string> = {
+  review: 't.suggestion_count > 0',
+  duplicate: 't.is_duplicate = 1',
+  spam: 't.is_spam = 1',
+  high: "t.priority IN ('critical', 'high')",
+};
+
 export async function listSubmissions(
   q: Queryable,
   workspaceId: string,
-  opts: { status?: SubmissionFilter; search?: string; appId?: string; ticketType?: string; limit: number; offset: number },
+  opts: { status?: SubmissionFilter; search?: string; appId?: string; ticketType?: string; triage?: TriageFilter; limit: number; offset: number },
 ): Promise<{ rows: SubmissionRow[]; total: number }> {
   const where = ['workspace_id = $1'];
   const params: unknown[] = [workspaceId];
@@ -229,6 +237,7 @@ export async function listSubmissions(
     params.push(opts.ticketType);
     where.push(`ticket_type_name = $${params.length}`);
   }
+  if (opts.triage) where.push(`EXISTS (SELECT 1 FROM triage_results t WHERE t.submission_id = submissions.id AND ${TRIAGE_FILTERS[opts.triage]})`);
   if (opts.search) {
     params.push(`%${opts.search.replace(/[%_\\]/g, '\\$&')}%`);
     const p = `$${params.length}`;

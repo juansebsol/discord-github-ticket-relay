@@ -247,6 +247,9 @@ export function registerWorkspaceRoutes(app: FastifyInstance, web: Web): void {
         <div class="card-h"><h2>Providers</h2></div>
         ${provider({ icon: 'bot', name: 'Discord application', missing: c.missing.discord, check: discordCheck, label: 'Discord' })}
         ${provider({ icon: 'github', name: 'GitHub App', missing: c.missing.github, check: githubCheck, label: 'GitHub' })}
+        <div class="line provider"><span class="tile">${icon('bot')}</span>
+          <div class="grow"><div class="name">Claude API <span class="muted">(optional)</span></div><div class="sub">${c.anthropicApiKey ? 'ANTHROPIC_API_KEY is set. Workspaces without their own key use it for triage.' : 'For AI triage. Workspaces add their own key in Tickets › Triage, or set ANTHROPIC_API_KEY as a fallback.'}</div></div>
+          ${c.anthropicApiKey ? pill('Fallback key set', 'ok') : pill('Not set', 'neutral')}</div>
       </div>
 
       <div class="card">

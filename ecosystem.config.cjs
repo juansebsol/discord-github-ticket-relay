@@ -30,5 +30,19 @@ module.exports = {
       max_memory_restart: '256M',
       time: true,
     },
+    {
+      // AI triage of filed tickets (optional; idles until a workspace turns triage on).
+      // Separate from the filing workers: if it stops or Claude is down, filing is unaffected.
+      name: 'ticket-relay-triage',
+      script: 'dist/triage-worker.js',
+      cwd: __dirname,
+      exec_mode: 'fork',
+      instances: 1,
+      env: { NODE_ENV: 'production' },
+      kill_timeout: 10000,
+      exp_backoff_restart_delay: 1000,
+      max_memory_restart: '256M',
+      time: true,
+    },
   ],
 };

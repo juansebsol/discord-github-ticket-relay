@@ -18,7 +18,7 @@ try {
 }
 
 const db = openDatabase(config.databasePath);
-const { server, worker } = await createApp({ config, db, logger: loggerOptions(config.nodeEnv) });
+const { server, worker, triage } = await createApp({ config, db, logger: loggerOptions(config.nodeEnv) });
 
 if (process.env.AUTO_MIGRATE !== 'false') await migrate(db, (m) => server.log.info(m));
 if (config.missing.discord.length) server.log.warn({ missing: config.missing.discord }, 'Discord credentials incomplete; sign-in and the bot are disabled');
@@ -29,6 +29,10 @@ if (config.runWorker) {
   worker.start();
   server.log.info('background worker started');
 }
+if (config.runTriage) {
+  triage.start();
+  server.log.info('triage worker started');
+}
 
 let stopping = false;
 async function shutdown(signal: string) {
@@ -37,6 +41,7 @@ async function shutdown(signal: string) {
   server.log.info({ signal }, 'shutting down');
   await server.close();
   await worker.stop();
+  await triage.stop();
   await db.end();
   process.exit(0);
 }

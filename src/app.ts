@@ -10,6 +10,9 @@ import { GitHubClient } from './github/client.js';
 import { SecretBox } from './lib/crypto.js';
 import type { FetchLike } from './lib/http.js';
 import { buildServer } from './web/server.js';
+import { TriageAi } from './triage/ai.js';
+import { TriageEngine } from './triage/engine.js';
+import { TriageWorker } from './triage/worker.js';
 
 export interface AppOptions {
   config: Config;
@@ -29,6 +32,8 @@ export interface AppInstance {
   deps: Deps;
   processor: Processor;
   worker: Worker;
+  /** AI triage loop; started by index.ts (RUN_TRIAGE) or by the dedicated triage-worker process. */
+  triage: TriageWorker;
 }
 
 export async function createApp(opts: AppOptions): Promise<AppInstance> {
@@ -44,8 +49,9 @@ export async function createApp(opts: AppOptions): Promise<AppInstance> {
     instanceId: opts.instanceId ?? `${process.pid}-${randomUUID().slice(0, 8)}`,
   };
   const processor = new Processor(deps);
-  const server = await buildServer(deps, processor, { logger: opts.logger });
+  const triage = new TriageWorker(new TriageEngine(deps, new TriageAi(fetchImpl)));
+  const server = await buildServer(deps, processor, { logger: opts.logger, triage: triage.engine });
   if (!opts.log && opts.logger) deps.log = server.log;
   const worker = new Worker(deps, processor, { concurrency: opts.workerConcurrency });
-  return { server, deps, processor, worker };
+  return { server, deps, processor, worker, triage };
 }

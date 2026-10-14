@@ -3,7 +3,9 @@ import { z } from 'zod';
 import { checkPanel } from '../../domain/panel.js';
 import { can } from '../../domain/permissions.js';
 import { getDiscordConnection, listApps } from '../../domain/store.js';
-import { countByStatus, decryptPayload, getSubmission, listEvents, listSubmissions, type SubmissionFilter } from '../../domain/submissions.js';
+import { countByStatus, decryptPayload, getSubmission, listEvents, listSubmissions, type SubmissionFilter, type TriageFilter } from '../../domain/submissions.js';
+import { describeAction, triageSummaries, type TriageAction, type TriageResultRow } from '../../triage/engine.js';
+import { getTriageSettings, type Priority } from '../../triage/settings.js';
 import { listTicketTypes } from '../../domain/ticket-types.js';
 import { UserFacingError, type SubmissionRow, type SubmissionStatus } from '../../domain/types.js';
 import { updateTicketLimits, userNames } from '../../domain/workspaces.js';
@@ -44,7 +46,7 @@ import {
 
 const PAGE_SIZE = 25;
 
-export type TicketsTab = 'inbox' | 'panel' | 'types' | 'settings';
+export type TicketsTab = 'inbox' | 'panel' | 'types' | 'triage' | 'settings';
 
 const VIEW_ONLY_TICKETS = 'You can read tickets. Checking GitHub, retrying, linking and closing need the Act on tickets permission. Ask an admin or the owner.';
 
@@ -74,6 +76,7 @@ export async function ticketsHeader(web: Web, ctx: WorkspaceRequestContext, tab:
         { href: `${b}/tickets`, label: 'Inbox', current: tab === 'inbox', count: ctx.progress?.attention },
         { href: `${b}/tickets/panel`, label: 'Panel', current: tab === 'panel' },
         { href: `${b}/tickets/types`, label: 'Ticket types', current: tab === 'types' },
+        { href: `${b}/tickets/triage`, label: 'Triage', current: tab === 'triage' },
         { href: `${b}/tickets/settings`, label: 'Settings', current: tab === 'settings' },
       ])
     : ''}`;
@@ -133,23 +136,45 @@ function issueRef(s: SubmissionRow): SafeHtml {
  * Ticket list: a table on desktop and stacked rows on phones. Rows carry `data-search`
  * (title, reporter, reference, app) for the inbox's instant filter.
  */
-export function ticketList(base: string, rows: SubmissionRow[], titleOf: (s: SubmissionRow) => string | null, names: Map<string, string>, o: { compact?: boolean; listId?: string } = {}): SafeHtml {
+export function ticketList(base: string, rows: SubmissionRow[], titleOf: (s: SubmissionRow) => string | null, names: Map<string, string>, o: { compact?: boolean; triage?: Map<string, TriageSummary> } = {}): SafeHtml {
   const view = rows.map((s) => {
     const title = titleOf(s) ?? s.ref;
     return { s, title, href: `${base}/tickets/${s.id}`, search: [title, s.reporter_display_name, s.reporter_username, s.ref, s.app_name].filter(Boolean).join(' ').toLowerCase(), reason: statusReason(s, names) };
   });
   const test = (s: SubmissionRow) => (s.source === 'admin_test' ? html` ${tag('Test')}` : '');
   return html`<div class="table-wrap only-desktop" data-search-wrap><table>
-      <thead><tr><th>Ticket</th>${o.compact ? '' : html`<th>Reporter</th>`}<th>Status</th>${o.compact ? '' : html`<th>GitHub issue</th>`}<th class="num">Updated</th></tr></thead>
+      <thead><tr><th>Ticket</th>${o.compact ? '' : html`<th>Reporter</th>`}<th>Status</th>${o.triage ? html`<th>Triage</th>` : ''}${o.compact ? '' : html`<th>GitHub issue</th>`}<th class="num">Updated</th></tr></thead>
       <tbody>${view.map((v) => html`<tr class="click" data-search="${v.search}">
         <td><a class="cell-title" href="${v.href}">${v.title}</a>${test(v.s)}<div class="sub">${appLine(v.s)}</div></td>
         ${o.compact ? '' : html`<td><span class="who-cell">${avatar(v.s.reporter_display_name, 20)}<span class="small">${v.s.reporter_display_name}</span></span></td>`}
         <td>${statusPill(v.s.status)}${v.reason && !o.compact ? html`<div class="sub">${v.reason}</div>` : ''}</td>
+        ${o.triage ? html`<td>${triageCell(o.triage.get(v.s.id))}</td>` : ''}
         ${o.compact ? '' : html`<td>${issueRef(v.s)}</td>`}
         <td class="num">${when(v.s.updated_at)}</td></tr>`)}</tbody></table></div>
     <ul class="list only-mobile" data-search-wrap>${view.map((v) => html`<li data-search="${v.search}"><a class="list-row" href="${v.href}">
       <span class="l1">${v.title}</span>${statusPill(v.s.status)}
-      <span class="l2">${[appLine(v.s), v.s.reporter_display_name, timeAgo(v.s.updated_at)].filter(Boolean).join(' · ')}</span></a></li>`)}</ul>`;
+      <span class="l2">${o.triage ? triageCell(o.triage.get(v.s.id), true) : ''}${[appLine(v.s), v.s.reporter_display_name, timeAgo(v.s.updated_at)].filter(Boolean).join(' · ')}</span></a></li>`)}</ul>`;
+}
+
+export type TriageSummary = { status: string; priority: Priority | null; is_duplicate: number; is_spam: number; suggestion_count: number };
+
+const PRIORITY_NAMES: Record<Priority, string> = { critical: 'Critical', high: 'High', medium: 'Medium', low: 'Low' };
+
+export function priorityTag(p: Priority): SafeHtml {
+  return html`<span class="tag"><span class="dot p-${p}" aria-hidden="true"></span>${PRIORITY_NAMES[p]}</span>`;
+}
+
+/** Priority and flags from triage, for the inbox. */
+function triageCell(t: TriageSummary | undefined, compact = false): SafeHtml | string {
+  if (!t || t.status !== 'done') return compact ? '' : html`<span class="em">—</span>`;
+  const parts = [
+    t.priority ? priorityTag(t.priority) : '',
+    t.is_spam ? tag('Spam') : '',
+    t.is_duplicate ? tag('Duplicate') : '',
+    t.suggestion_count ? tag('To review', { icon: 'eye' }) : '',
+  ].filter(Boolean);
+  if (!parts.length) return compact ? '' : html`<span class="em">—</span>`;
+  return html`<span class="tags">${parts}</span>`;
 }
 
 // ---- Inbox filters ---------------------------------------------------------------------------------
@@ -161,6 +186,13 @@ const FILTERS: { key: string; label: string; status?: SubmissionFilter }[] = [
   { key: 'closed', label: 'Closed', status: 'dismissed' },
   { key: 'all', label: 'All' },
 ];
+const TRIAGE_OPTIONS: { value: TriageFilter; label: string }[] = [
+  { value: 'review', label: 'To review' },
+  { value: 'high', label: 'High priority' },
+  { value: 'duplicate', label: 'Duplicates' },
+  { value: 'spam', label: 'Spam' },
+];
+
 /** Old status filter values still work in bookmarked links. */
 const LEGACY_FILTERS: Record<string, string> = { created: 'filed', pending: 'open', processing: 'open', uncertain: 'attention', failed: 'attention', dismissed: 'closed', '': 'all' };
 
@@ -205,9 +237,56 @@ function eventView(e: EventRow, s: SubmissionRow, names: Map<string, string>): {
       return { actor: by, text: html`<span class="actor">${by}</span> linked issue #${String(n ?? '')}` };
     case 'admin_dismissed':
       return { actor: by, text: html`<span class="actor">${by}</span> closed it without filing${s.resolution_note ? ` · ${s.resolution_note}` : ''}` };
+    case 'triage_done': {
+      const applied = Array.isArray(d.applied) ? (d.applied as string[]) : [];
+      const suggested = Array.isArray(d.suggested) ? (d.suggested as string[]) : [];
+      const text = [applied.length ? `applied ${applied.join(', ')}` : '', suggested.length ? `suggested ${suggested.join(', ')}` : ''].filter(Boolean).join(' · ');
+      return { icon: 'bot', tone: 'muted', text: html`Triage ${text || 'found nothing to flag'}` };
+    }
+    case 'triage_applied':
+      return { actor: by, text: html`<span class="actor">${by}</span> applied the triage suggestion: ${(d.actions as string[] | undefined)?.join(', ') ?? ''}` };
+    case 'triage_dismissed':
+      return { actor: by, text: html`<span class="actor">${by}</span> dismissed the triage suggestion: ${(d.actions as string[] | undefined)?.join(', ') ?? ''}` };
     default:
       return { icon: 'info', tone: 'muted', text: html`${e.kind}` };
   }
+}
+
+// ---- Triage card ------------------------------------------------------------------------------------
+
+function triageActionText(a: TriageAction, s: SubmissionRow): SafeHtml {
+  const what = a.kind === 'priority' && a.priority
+    ? html`${priorityTag(a.priority)} priority`
+    : a.kind === 'duplicate'
+      ? html`Duplicate of <a href="https://github.com/${s.repo_owner}/${s.repo_name}/issues/${String(a.duplicateOf)}" target="_blank" rel="noopener noreferrer">#${String(a.duplicateOf)}</a>`
+      : html`${a.kind === 'spam' ? 'Spam' : a.kind === 'needsInfo' ? 'Needs more info' : 'No action needed'}`;
+  return html`<span class="grow">${what}${a.close ? html`<span class="muted"> · closes the issue</span>` : ''}</span><span class="xs muted num" title="Claude’s confidence">${String(a.confidence)}%</span>`;
+}
+
+/** What triage decided for this ticket, with Apply and Dismiss for suggestions. */
+function triageCard(t: TriageResultRow, s: SubmissionRow, o: { act: boolean; csrf: string; actionBase: string }): SafeHtml {
+  const status = t.status === 'done'
+    ? (t.suggestion_count ? pill('To review', 'warn') : pill('Triaged', 'ok'))
+    : t.status === 'pending' ? pill('Queued', 'neutral') : t.status === 'skipped' ? pill('Skipped', 'closed') : pill('Failed', 'danger');
+  let content: SafeHtml;
+  if (t.status === 'done') {
+    const applied = t.applied_actions ?? [];
+    const suggestions = t.suggestions ?? [];
+    content = html`
+      ${applied.map((a) => html`<div class="tri-row">${icon('circle-check', 14, 'ok')}${triageActionText(a, s)}</div>`)}
+      ${suggestions.map((a) => html`<div class="tri-row">${icon('circle-help', 14, 'warn')}${triageActionText(a, s)}${o.act
+        ? html`<span class="row gap-4">${postBtn(`${o.actionBase}/triage/apply`, 'Apply', o.csrf, { size: 'sm', fields: { kind: a.kind }, title: `Apply: ${describeAction(a)}` })}${postBtn(`${o.actionBase}/triage/dismiss`, 'Dismiss', o.csrf, { size: 'sm', variant: 'ghost', fields: { kind: a.kind } })}</span>`
+        : ''}</div>`)}
+      ${!applied.length && !suggestions.length ? html`<p class="small muted">Nothing to flag.</p>` : ''}
+      ${t.verdict?.reason ? html`<p class="small muted mt-8">“${t.verdict.reason}”</p>` : ''}
+      ${t.error ? html`<p class="small mt-8">${icon('triangle-alert', 14, 'warn')} ${t.error}</p>` : ''}
+      <p class="xs faint mt-8">${t.model ?? ''}${t.completed_at ? ` · ${timeAgo(t.completed_at)}` : ''}</p>`;
+  } else if (t.status === 'pending') {
+    content = html`<p class="small muted">Waiting to be triaged${t.error ? `. Last try: ${t.error}` : '.'}</p>`;
+  } else {
+    content = html`<p class="small muted">${t.status === 'skipped' ? t.skip_reason ?? 'Skipped' : t.error ?? 'Couldn’t be triaged'}.</p>`;
+  }
+  return html`<div class="card"><div class="card-h"><div class="title">${icon('bot', 16)}<h2>Triage</h2></div>${status}</div><div class="card-b tight">${content}</div></div>`;
 }
 
 const CLOSE_REASONS = [
@@ -237,7 +316,7 @@ export function registerTicketRoutes(app: FastifyInstance, web: Web): void {
     if (!ctx) return reply;
     const wid = ctx.workspace.id;
     const b = ctx.base;
-    const q = req.query as { status?: string; q?: string; page?: string; app?: string; type?: string };
+    const q = req.query as { status?: string; q?: string; page?: string; app?: string; type?: string; triage?: string };
     const [counts, apps, types] = await Promise.all([countByStatus(deps.db, wid), listApps(deps.db, wid), listTicketTypes(deps.db, wid)]);
     const n = {
       attention: counts.failed + counts.uncertain,
@@ -252,7 +331,10 @@ export function registerTicketRoutes(app: FastifyInstance, web: Web): void {
     const appId = apps.some((a) => a.id === q.app) ? q.app : undefined;
     const typeName = types.some((t) => t.name === q.type) ? q.type : undefined;
     const page = Math.max(1, Number(q.page) || 1);
+    const triageOn = (await getTriageSettings(deps.db, wid)).enabled || (await deps.db.query('SELECT 1 FROM triage_results WHERE workspace_id = $1 LIMIT 1', [wid])).rows.length > 0;
+    const triageFilter = triageOn && TRIAGE_OPTIONS.some((o) => o.value === q.triage) ? (q.triage as TriageFilter) : undefined;
     const { rows, total } = await listSubmissions(deps.db, wid, {
+      triage: triageFilter,
       status: filter.status,
       search: search || undefined,
       appId,
@@ -261,18 +343,19 @@ export function registerTicketRoutes(app: FastifyInstance, web: Web): void {
       offset: (page - 1) * PAGE_SIZE,
     });
     const names = await userNames(deps.db, rows.map((r) => r.resolved_by));
+    const triage = triageOn ? await triageSummaries(deps.db, wid, rows.map((r) => r.id)) : undefined;
     const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
     const link = (p: Record<string, string | number | undefined>) => {
       const params = new URLSearchParams();
-      const merged = { status: filter.key, q: search || undefined, app: appId, type: typeName, ...p };
+      const merged = { status: filter.key, q: search || undefined, app: appId, type: typeName, triage: triageFilter, ...p };
       for (const [k, v] of Object.entries(merged)) if (v !== undefined && v !== '') params.set(k, String(v));
       return `${b}/tickets?${params.toString()}`;
     };
-    const filtered = Boolean(search || appId || typeName);
+    const filtered = Boolean(search || appId || typeName || triageFilter);
     const emptyState = rows.length
       ? ''
       : filtered
-        ? empty('search-x', 'No tickets match these filters', 'Try another search, app or type.', linkBtn(link({ q: undefined, app: undefined, type: undefined, page: undefined }), 'Clear filters'))
+        ? empty('search-x', 'No tickets match these filters', 'Try another search, app, type or triage filter.', linkBtn(link({ q: undefined, app: undefined, type: undefined, triage: undefined, page: undefined }), 'Clear filters'))
         : filter.key === 'attention'
           ? empty('circle-check', 'All caught up', 'No tickets need attention.', linkBtn(link({ status: 'all', page: undefined }), 'View all tickets', { variant: 'ghost' }), 'ok')
           : n.all === 0
@@ -291,12 +374,13 @@ export function registerTicketRoutes(app: FastifyInstance, web: Web): void {
             <div class="row filter-selects" id="ticket-filters">
               ${selectWrap(html`<select name="app" aria-label="Filter by app" data-autosubmit><option value="">All apps</option>${apps.map((a) => html`<option value="${a.id}" ${a.id === appId ? raw('selected') : ''}>${a.name}</option>`)}</select>`, { sm: true })}
               ${types.length ? selectWrap(html`<select name="type" aria-label="Filter by type" data-autosubmit><option value="">All types</option>${types.map((t) => html`<option value="${t.name}" ${t.name === typeName ? raw('selected') : ''}>${t.name}</option>`)}</select>`, { sm: true }) : ''}
+              ${triageOn ? selectWrap(html`<select name="triage" aria-label="Filter by triage" data-autosubmit><option value="">All triage</option>${TRIAGE_OPTIONS.map((o) => html`<option value="${o.value}" ${o.value === triageFilter ? raw('selected') : ''}>${o.label}</option>`)}</select>`, { sm: true }) : ''}
             </div>
             <button type="submit" class="btn sm nojs">Apply</button>
           </form>
         </div>
         <div class="card-b flush" id="ticket-rows">
-          ${rows.length ? ticketList(b, rows, (s) => decryptPayload(deps.box, s)?.title ?? null, names) : emptyState}
+          ${rows.length ? ticketList(b, rows, (s) => decryptPayload(deps.box, s)?.title ?? null, names, { triage }) : emptyState}
           <div id="no-match" hidden>${empty('search-x', 'No tickets match', html`Nothing on this page matches “<span data-term></span>”. Press Enter to search all tickets by reporter or reference.`, html`<button type="button" class="btn" data-clear-search>Clear search</button>`)}</div>
         </div>
         ${pages > 1 ? html`<div class="pager"><span>Page ${String(page)} of ${String(pages)} · ${plural(total, 'ticket')}</span><div class="row">
@@ -314,6 +398,7 @@ export function registerTicketRoutes(app: FastifyInstance, web: Web): void {
     if (!s) return reply.callNotFound();
     const b = ctx.base;
     const events = await listEvents(deps.db, s.id);
+    const triageRow = await web.triage.getResult(ctx.workspace.id, s.id);
     const names = await userNames(deps.db, [s.resolved_by, ...events.map((e) => (typeof e.detail.by === 'string' ? e.detail.by : null))]);
     const payload = decryptPayload(deps.box, s);
     const act = can(ctx.membership, 'tickets.act');
@@ -396,7 +481,7 @@ export function registerTicketRoutes(app: FastifyInstance, web: Web): void {
           })}</ol></div>
         </div>
 
-        <aside class="a-details card"><div class="card-h"><h2>Details</h2></div>
+        <div class="a-details a-col"><aside class="card"><div class="card-h"><h2>Details</h2></div>
           <dl class="props">
             <dt>Status</dt><dd>${pill(st.label, st.tone)}</dd>
             <dt>App</dt><dd>${s.app_name}</dd>
@@ -414,6 +499,7 @@ export function registerTicketRoutes(app: FastifyInstance, web: Web): void {
             <dt>Member</dt><dd class="small">${s.member_notice ? s.member_notice : s.source === 'admin_test' ? html`<span class="muted">Not notified (test)</span>` : html`<span class="muted">Not notified yet</span>`}</dd>
           </dl>
         </aside>
+        ${triageRow ? triageCard(triageRow, s, { act, csrf: ctx.csrf, actionBase }) : ''}</div>
       </div>
 
       ${unresolved && act ? html`

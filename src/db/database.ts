@@ -7,8 +7,8 @@ import BetterSqlite3 from 'better-sqlite3';
  *
  * Conventions applied in both directions so domain code works with natural JS values:
  * - parameters: `$1`-style placeholders; Date → epoch ms, boolean → 0/1, arrays/objects → JSON
- * - results: `*_at` / `at` columns → Date, `labels` / `warnings` / `data` / `detail` → parsed
- *   JSON, `enabled` / `repo_private` → boolean
+ * - results: `*_at` / `at` columns → Date, `labels` / `warnings` / `data` / `detail` and the
+ *   triage JSON columns → parsed JSON, `enabled` / `repo_private` → boolean
  *
  * Concurrency: one connection per process. Writers in other processes are serialized by
  * SQLite itself (WAL mode, busy timeout). Inside this process, transactions hold a mutex so
@@ -24,7 +24,7 @@ export interface Queryable {
 }
 
 const DATE_COLUMN = /(^|_)at$/;
-const JSON_COLUMNS = new Set(['labels', 'warnings', 'data', 'detail']);
+const JSON_COLUMNS = new Set(['labels', 'warnings', 'data', 'detail', 'triage_config', 'verdict', 'applied_actions', 'suggestions']);
 const BOOLEAN_COLUMNS = new Set(['enabled', 'repo_private', 'contributor_enabled', 'can_act_tickets', 'can_view_contributors']);
 
 function toParam(value: unknown): unknown {

@@ -55,6 +55,10 @@ export interface Config {
   devLogin: boolean;
   runWorker: boolean;
   trustProxy: boolean;
+  /** Fallback Claude API key for triage when a workspace hasn't added its own. */
+  anthropicApiKey: string | null;
+  /** Run the triage loop inside this process (single-process setups and development). */
+  runTriage: boolean;
   /** Who runs this deployment, shown on the public Terms of Service and Privacy Policy pages. */
   legal: { operatorName: string | null; contactEmail: string | null };
 }
@@ -174,6 +178,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     devLogin,
     runWorker: env.RUN_WORKER !== 'false',
     trustProxy: env.TRUST_PROXY === 'true',
+    anthropicApiKey: env.ANTHROPIC_API_KEY?.trim() || null,
+    runTriage: (env.RUN_TRIAGE ?? env.RUN_WORKER) !== 'false',
     legal: {
       operatorName: env.LEGAL_OPERATOR_NAME?.trim() || null,
       contactEmail: /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(env.LEGAL_CONTACT_EMAIL?.trim() ?? '') ? env.LEGAL_CONTACT_EMAIL!.trim() : null,

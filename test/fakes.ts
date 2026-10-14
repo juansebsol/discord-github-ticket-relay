@@ -14,7 +14,7 @@ export interface FakeRepo {
   has_issues: boolean;
   archived: boolean;
   labels: string[];
-  issues: { number: number; title: string; body: string; labels: string[]; created_at: string; user: string }[];
+  issues: { number: number; title: string; body: string; labels: string[]; created_at: string; user: string; state?: 'open' | 'closed'; state_reason?: string | null; comments?: string[] }[];
 }
 
 /** How the next create-issue call behaves. */
@@ -92,6 +92,12 @@ export class FakeGitHub {
 
   private repoByName(owner: string, name: string) {
     return [...this.repos.values()].find((r) => r.owner === owner && r.name === name);
+  }
+
+  searchCalls = 0;
+
+  issueJson(r: FakeRepo, i: FakeRepo['issues'][number]) {
+    return { number: i.number, title: i.title, body: i.body, state: i.state ?? 'open', labels: i.labels.map((name) => ({ name })), html_url: `https://github.com/${r.owner}/${r.name}/issues/${i.number}` };
   }
 
   private repoJson(r: FakeRepo) {
@@ -177,17 +183,34 @@ export class FakeGitHub {
       const link: Record<string, string> = n > 1 ? { link: `<https://api.github.com${path}?author=${author}&per_page=1&page=2>; rel="next", <https://api.github.com${path}?author=${author}&per_page=1&page=${n}>; rel="last"` } : {};
       return json(200, n ? [{ sha: 'abc' }] : [], link);
     }
-    if ((m = /^\/repos\/([^/]+)\/([^/]+)\/issues\/(\d+)$/.exec(path))) {
+    if ((m = /^\/repos\/([^/]+)\/([^/]+)\/issues\/(\d+)(\/labels|\/comments)?$/.exec(path))) {
       const r = this.repoByName(decodeURIComponent(m[1]!), decodeURIComponent(m[2]!));
       const issue = r?.issues.find((i) => i.number === Number(m![3]));
-      return accessible(r) && issue ? json(200, { number: issue.number, html_url: `https://github.com/${r!.owner}/${r!.name}/issues/${issue.number}` }) : json(404, { message: 'Not Found' });
+      if (!accessible(r) || !issue) return json(404, { message: 'Not Found' });
+      if (m[4] === '/labels' && method === 'POST') {
+        for (const l of body.labels as string[]) {
+          if (!r!.labels.includes(l)) r!.labels.push(l);
+          if (!issue.labels.includes(l)) issue.labels.push(l);
+        }
+        return json(200, issue.labels.map((name) => ({ name })));
+      }
+      if (m[4] === '/comments' && method === 'POST') {
+        (issue.comments ??= []).push(body.body);
+        return json(201, { id: issue.comments.length });
+      }
+      if (method === 'PATCH') {
+        if (body.state) issue.state = body.state;
+        if ('state_reason' in body) issue.state_reason = body.state_reason;
+      }
+      return json(200, this.issueJson(r!, issue));
     }
     if ((m = /^\/repos\/([^/]+)\/([^/]+)\/issues$/.exec(path))) {
       const r = this.repoByName(decodeURIComponent(m[1]!), decodeURIComponent(m[2]!));
       if (!accessible(r)) return json(404, { message: 'Not Found' });
       const repo = r!;
       if (method === 'GET') {
-        const items = [...repo.issues].reverse().map((i) => ({ number: i.number, body: i.body, html_url: `https://github.com/${repo.owner}/${repo.name}/issues/${i.number}` }));
+        const state = url.searchParams.get('state') ?? 'open';
+        const items = [...repo.issues].reverse().filter((i) => state === 'all' || (i.state ?? 'open') === state).map((i) => this.issueJson(repo, i));
         return json(200, items);
       }
       this.createCalls++;
@@ -214,8 +237,17 @@ export class FakeGitHub {
     }
     if (path === '/search/issues') {
       const q = url.searchParams.get('q') ?? '';
-      const marker = /"([^"]+)"/.exec(q)?.[1] ?? '';
-      const items = this.allIssues().filter((i) => i.body.includes(marker)).map((i) => ({ number: i.number, body: i.body, html_url: `https://github.com/${i.repo}/issues/${i.number}` }));
+      const marker = /"([^"]+)"/.exec(q)?.[1];
+      if (marker) {
+        const items = this.allIssues().filter((i) => i.body.includes(marker)).map((i) => ({ number: i.number, body: i.body, html_url: `https://github.com/${i.repo}/issues/${i.number}` }));
+        return json(200, { total_count: items.length, items });
+      }
+      // Keyword search within one repository (triage duplicate candidates).
+      this.searchCalls++;
+      const [owner, name] = (/repo:(\S+)/.exec(q)?.[1] ?? '/').split('/');
+      const r = this.repoByName(owner!, name!);
+      const words = q.replace(/\S+:\S+/g, '').toLowerCase().split(/\s+/).filter(Boolean);
+      const items = r && accessible(r) ? r.issues.filter((i) => words.some((w) => i.title.toLowerCase().includes(w))).map((i) => this.issueJson(r, i)) : [];
       return json(200, { total_count: items.length, items });
     }
     return json(404, { message: `fake github: no route ${method} ${path}` });
@@ -332,11 +364,57 @@ export class FakeDiscord {
   }
 }
 
-export function fakeFetch(github: FakeGitHub, discord: FakeDiscord) {
+/** What the next Claude call returns: an answer, an HTTP error, a refusal or unreadable text. */
+export type ClaudeBehavior = Json | { status: number; type: string; message?: string } | 'refusal' | 'garbage';
+
+/** In-memory Claude API: GET /v1/models and POST /v1/messages (structured output). */
+export class FakeAnthropic {
+  validKeys = new Set(['sk-ant-test-key-0123456789abcdef', 'sk-ant-other-key-0123456789abcdef']);
+  verdict: Json = { priority: 'medium', priority_confidence: 80, duplicate_of: null, duplicate_confidence: 0, spam: false, spam_confidence: 5, needs_info: false, needs_info_confidence: 10, no_action: false, no_action_confidence: 5, reason: 'A genuine bug report.' };
+  queue: ClaudeBehavior[] = [];
+  requests: { key: string; body: Json }[] = [];
+  models = [
+    { id: 'claude-haiku-5-5', display_name: 'Claude Haiku 5.5', lifecycle: 'active' },
+    { id: 'claude-sonnet-5-5', display_name: 'Claude Sonnet 5.5', lifecycle: 'active' },
+    { id: 'claude-old-1', display_name: 'Claude Old', lifecycle: 'retired' },
+  ];
+
+  private error(status: number, type: string, message: string): Response {
+    return json(status, { type: 'error', error: { type, message } }, { 'request-id': 'req_test' });
+  }
+
+  async handle(url: URL, init: RequestInit): Promise<Response> {
+    const key = new Headers(init.headers as HeadersInit).get('x-api-key') ?? '';
+    if (!this.validKeys.has(key)) return this.error(401, 'authentication_error', 'invalid x-api-key');
+    if (url.pathname === '/v1/models' && (init.method ?? 'GET') === 'GET') {
+      const data = this.models.map((m) => ({ type: 'model', created_at: '2026-01-01T00:00:00Z', deprecated_at: null, capabilities: { structured_outputs: { supported: true } }, ...m }));
+      return json(200, { data, has_more: false, first_id: data[0]?.id ?? null, last_id: data.at(-1)?.id ?? null });
+    }
+    if (url.pathname === '/v1/messages' && init.method === 'POST') {
+      const body = JSON.parse(String(init.body));
+      this.requests.push({ key, body });
+      const behavior = this.queue.shift() ?? this.verdict;
+      if (typeof behavior === 'object' && 'status' in behavior && typeof behavior.status === 'number') {
+        return this.error(behavior.status, String(behavior.type), String(behavior.message ?? 'error'));
+      }
+      const text = behavior === 'garbage' ? 'not json at all' : behavior === 'refusal' ? '' : JSON.stringify(behavior);
+      return json(200, {
+        id: 'msg_test', type: 'message', role: 'assistant', model: body.model,
+        content: behavior === 'refusal' ? [] : [{ type: 'text', text }],
+        stop_reason: behavior === 'refusal' ? 'refusal' : 'end_turn', stop_sequence: null,
+        usage: { input_tokens: 1200, output_tokens: 90 },
+      }, { 'request-id': 'req_test' });
+    }
+    return this.error(404, 'not_found_error', `fake anthropic: no route ${init.method} ${url.pathname}`);
+  }
+}
+
+export function fakeFetch(github: FakeGitHub, discord: FakeDiscord, anthropic: FakeAnthropic = new FakeAnthropic()) {
   return async (input: string, init: RequestInit = {}): Promise<Response> => {
     const url = new URL(input);
     if (url.hostname === 'api.github.com' || url.hostname === 'github.com') return github.handle(url, init);
     if (url.hostname === 'discord.com') return discord.handle(url, init);
+    if (url.hostname === 'api.anthropic.com') return anthropic.handle(url, init);
     throw netError('ENOTFOUND');
   };
 }

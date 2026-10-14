@@ -19,7 +19,7 @@ afterAll(async () => {
 
 describe('console pages', () => {
   it('renders every page with Lucide icons and no emoji or glyph icons', async () => {
-    const pages = ['', '/tickets', '/tickets/panel', '/tickets/types', '/tickets/types/new', '/tickets/settings', '/contributors', '/contributors/roles',
+    const pages = ['', '/tickets', '/tickets/panel', '/tickets/types', '/tickets/types/new', '/tickets/settings', '/tickets/triage', '/contributors', '/contributors/roles',
       '/contributors/roles/new?kind=auto', '/contributors/panel', '/members', '/members?invite=1', '/settings', '/deployment', '/setup/github', '/setup/discord', '/apps', '/apps/new'];
     for (const p of pages) {
       const res = await env.server.inject({ method: 'GET', url: w() + p, ...get(ws.owner) });

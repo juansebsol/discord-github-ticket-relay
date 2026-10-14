@@ -42,6 +42,26 @@ export interface RepoInfo {
   htmlUrl: string;
 }
 
+export interface IssueDetail {
+  number: number;
+  url: string;
+  title: string;
+  body: string;
+  state: 'open' | 'closed';
+  labels: string[];
+}
+
+function toIssueDetail(data: any): IssueDetail {
+  return {
+    number: data.number,
+    url: data.html_url,
+    title: String(data.title ?? ''),
+    body: typeof data.body === 'string' ? data.body : '',
+    state: data.state === 'closed' ? 'closed' : 'open',
+    labels: ((data.labels ?? []) as any[]).map((l) => (typeof l === 'string' ? l : String(l?.name ?? ''))).filter(Boolean),
+  };
+}
+
 export interface CreatedIssue {
   number: number;
   url: string;
@@ -251,6 +271,61 @@ export class GitHubClient {
       await this.asInstallation(installationId),
     );
     return { number: data.number, url: data.html_url, isPullRequest: Boolean(data.pull_request) };
+  }
+
+  /** Title, body, state and labels of an issue (triage reads the ticket text from here). */
+  async getIssueDetail(installationId: number, owner: string, repo: string, issueNumber: number): Promise<IssueDetail> {
+    const { data } = await this.request(
+      'GET',
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/${issueNumber}`,
+      await this.asInstallation(installationId),
+    );
+    return toIssueDetail(data);
+  }
+
+  /** Recently updated issues (not pull requests), newest first. */
+  async listRecentIssues(installationId: number, owner: string, repo: string, state: 'open' | 'all', limit = 30): Promise<IssueDetail[]> {
+    const { data } = await this.request(
+      'GET',
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues?state=${state}&sort=updated&direction=desc&per_page=${Math.min(100, limit)}`,
+      await this.asInstallation(installationId),
+    );
+    return (data as any[]).filter((i) => !i.pull_request).map(toIssueDetail);
+  }
+
+  /** Issues in one repository matching the search terms (best match first). */
+  async searchIssues(installationId: number, owner: string, repo: string, terms: string, limit = 10): Promise<IssueDetail[]> {
+    const q = `repo:${owner}/${repo} is:issue ${terms}`;
+    const { data } = await this.request('GET', `/search/issues?q=${encodeURIComponent(q)}&per_page=${Math.min(50, limit)}`, await this.asInstallation(installationId));
+    return ((data.items ?? []) as any[]).filter((i) => !i.pull_request).map(toIssueDetail);
+  }
+
+  async addLabels(installationId: number, owner: string, repo: string, issueNumber: number, labels: string[]): Promise<void> {
+    await this.request(
+      'POST',
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/${issueNumber}/labels`,
+      await this.asInstallation(installationId),
+      { labels },
+    );
+  }
+
+  async createComment(installationId: number, owner: string, repo: string, issueNumber: number, body: string): Promise<void> {
+    await this.request(
+      'POST',
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/${issueNumber}/comments`,
+      await this.asInstallation(installationId),
+      { body },
+    );
+  }
+
+  /** Closes an issue as "not planned". */
+  async closeIssue(installationId: number, owner: string, repo: string, issueNumber: number): Promise<void> {
+    await this.request(
+      'PATCH',
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/${issueNumber}`,
+      await this.asInstallation(installationId),
+      { state: 'closed', state_reason: 'not_planned' },
+    );
   }
 
   /**

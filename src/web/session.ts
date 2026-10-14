@@ -65,7 +65,7 @@ export function setSessionCookie(reply: FastifyReply, token: string, secure: boo
   reply.setCookie(SESSION_COOKIE, token, { path: '/', httpOnly: true, sameSite: 'lax', secure, maxAge: SESSION_DAYS * 86400 });
 }
 
-export function setFlash(reply: FastifyReply, type: 'success' | 'error' | 'info', message: string): void {
+export function setFlash(reply: FastifyReply, type: 'success' | 'error' | 'info' | 'warn', message: string): void {
   reply.setCookie('tr_flash', Buffer.from(JSON.stringify({ type, message })).toString('base64url'), {
     path: '/',
     httpOnly: true,

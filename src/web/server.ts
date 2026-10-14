@@ -8,6 +8,7 @@ import { safeEqual } from '../lib/crypto.js';
 import { html } from '../lib/html.js';
 import { empty, linkBtn, pageHeader } from './ui.js';
 import type { Processor } from '../domain/processor.js';
+import type { TriageEngine } from '../triage/engine.js';
 import { getDiscordConnection, getGitHubConnection, getPanel, listApps } from '../domain/store.js';
 import { UserFacingError, type Deps, type Role } from '../domain/types.js';
 import { getMembership, listMemberships, type Membership } from '../domain/workspaces.js';
@@ -24,6 +25,7 @@ import { registerPanelRoutes } from './routes/panel.js';
 import { registerTicketRoutes } from './routes/tickets.js';
 import { registerMemberRoutes } from './routes/members.js';
 import { registerLegalRoutes } from './routes/legal.js';
+import { registerTriageRoutes } from './routes/triage.js';
 import { registerContributorRoutes } from './routes/contributors.js';
 import { registerTicketTypeRoutes } from './routes/ticket-types.js';
 
@@ -44,6 +46,7 @@ export interface WorkspaceRequestContext extends PageContext {
 export interface Web {
   deps: Deps;
   processor: Processor;
+  triage: TriageEngine;
   /** Requires a signed-in user; redirects to sign-in otherwise. */
   requireUser(req: FastifyRequest, reply: FastifyReply): AuthContext | null;
   /**
@@ -79,7 +82,7 @@ export async function computeProgress(deps: Deps, workspaceId: string): Promise<
 
 const STATIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'public');
 
-export async function buildServer(deps: Deps, processor: Processor, opts: { logger?: boolean | object } = {}): Promise<FastifyInstance> {
+export async function buildServer(deps: Deps, processor: Processor, opts: { logger?: boolean | object; triage: TriageEngine }): Promise<FastifyInstance> {
   const app = Fastify({
     logger: opts.logger ?? false,
     trustProxy: deps.config.trustProxy,
@@ -148,6 +151,7 @@ export async function buildServer(deps: Deps, processor: Processor, opts: { logg
   const web: Web = {
     deps,
     processor,
+    triage: opts.triage,
     secureCookies,
     publicUrl: (p) => `${deps.config.publicUrl}${p}`,
     requireUser(req, reply) {
@@ -218,6 +222,7 @@ export async function buildServer(deps: Deps, processor: Processor, opts: { logg
   registerAppRoutes(app, web);
   registerPanelRoutes(app, web);
   registerTicketRoutes(app, web);
+  registerTriageRoutes(app, web);
   registerMemberRoutes(app, web);
   registerContributorRoutes(app, web);
   registerTicketTypeRoutes(app, web);

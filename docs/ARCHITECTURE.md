@@ -5,7 +5,7 @@ Internals of Ticket Relay: runtime, ticket lifecycle, endpoints, schema and secu
 ## Runtime
 
 Long-running Node.js processes sharing one SQLite database: a web process (admin console,
-Discord endpoint, OAuth) and one or more queue workers.
+Discord endpoint, OAuth), one or more queue workers, and an optional triage worker.
 
 ```
                 ┌───────────────────────────── ticket-relay ─────────────────────────────┐
@@ -20,6 +20,14 @@ Discord endpoint, OAuth) and one or more queue workers.
                                                   SQLite (WAL)
 ```
 
+- **AI triage, isolated from filing.** `src/triage/` runs in its own process. It picks up
+  tickets that are already filed (`status = 'created'`, filed after triage was switched on),
+  reads the ticket text from the GitHub issue, asks Claude (official SDK, structured JSON
+  output) for priority, duplicate, spam, needs-info and no-action calls, and applies the
+  actions each workspace allows. Results live in `triage_results`; the filing queue is never
+  written. Bad keys, missing credits or an unavailable model pause triage for that workspace;
+  rate limits and outages retry with backoff. Ticket text is passed as JSON data and Claude can
+  only answer with fixed fields; labels, comments and closing come from the workspace settings.
 - **No Discord gateway.** The bot is driven entirely by Discord's HTTP interactions endpoint and
   REST API. It needs no privileged intents and no slash-command registration.
 - **GitHub App auth.** Short-lived installation tokens are minted from the app's private key

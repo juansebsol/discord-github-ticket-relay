@@ -22,6 +22,7 @@ and filed by a GitHub App. Reporters never need a GitHub account.
 - **Admin console:** guided setup, map apps to repos and labels, a tickets inbox with retry, link and close.
 - **Moderators:** view-only by default; admins choose per person who can act on tickets or see verifications.
 - **Ticket types:** members pick a type (e.g. Bug report, Feature request); each adds its GitHub label and a `[Bug]` title prefix.
+- **AI triage (optional):** Claude flags priority, duplicates and spam on filed tickets, as suggestions or automatically. It runs in its own worker, so filing never depends on it.
 - **Contributor roles:** a second panel where members sign in with GitHub and get a role based on their merged PRs or commits across all your apps, e.g. Junior Contributor at 1, Contributor at 10.
 - **Reliable:** duplicate and rate-limit protection; never files the same issue twice.
 - **Secure:** credentials stay on the server; stored tokens and ticket text are encrypted.
@@ -50,7 +51,7 @@ Serverless platforms such as Vercel are not supported.
 ```bash
 npm ci && npm run build
 cp .env.example .env               # PUBLIC_URL, ENCRYPTION_KEY, provider credentials
-pm2 start ecosystem.config.cjs     # web (1) + queue workers (2); migrations run on boot
+pm2 start ecosystem.config.cjs     # web (1) + queue workers (2) + triage (1); migrations run on boot
 pm2 save && pm2 startup
 ```
 

@@ -9,6 +9,7 @@ SQLite file. No external database or container runtime is required.
 |---|---|---|---|
 | `ticket-relay-web` | `dist/index.js` | 1 | Admin console, Discord interactions endpoint, OAuth callbacks. Binds `PORT`. Makes the first filing attempt right after acknowledging Discord. |
 | `ticket-relay-worker` | `dist/worker.js` | 2 (configurable) | Claims queued submissions, retries, reconciles uncertain results, housekeeping. No port. |
+| `ticket-relay-triage` | `dist/triage-worker.js` | 1 | Optional AI triage of tickets that are already filed. Idles until a workspace turns triage on. Never touches the filing queue, so stopping it or Claude being down can't affect filing. |
 
 All processes share `DATABASE_PATH`. Every process applies pending migrations on boot; the
 runner holds SQLite's write lock, so simultaneous starts are safe.

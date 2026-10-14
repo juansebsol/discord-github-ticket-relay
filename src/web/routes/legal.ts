@@ -40,6 +40,7 @@ export function registerLegalRoutes(app: FastifyInstance, web: Web): void {
         <li><strong>Tickets.</strong> Members of a Discord server pick an app and fill in a short form. The Service files the ticket as an issue in the GitHub repository the server’s administrators chose for that app, and sends the member a private confirmation.</li>
         <li><strong>Contributor roles.</strong> Members can sign in with GitHub so the Service can count their merged pull requests or commits in the server’s repositories and give them a matching Discord role.</li>
         <li><strong>Console.</strong> Server owners, admins and moderators manage setup and tickets in the web console after signing in with Discord.</li>
+        <li><strong>AI triage (optional).</strong> If a server’s administrators turn it on, an AI model reviews filed tickets and may label them, or close them as duplicates or spam, as the administrators configured. Its calls can be wrong; administrators can review and undo them on GitHub.</li>
       </ul>
 
       <h2>3. Who can use it</h2>
@@ -121,6 +122,11 @@ export function registerLegalRoutes(app: FastifyInstance, web: Web): void {
         <li>Actions you take, for example who closed or retried a ticket or revoked a role.</li>
         <li>Workspace settings: the connected GitHub account and repositories, the Discord server, channels and roles, and the panel text.</li>
       </ul>
+      <h3>When a server uses AI triage</h3>
+      <ul>
+        <li>The model’s assessment of each ticket: its priority, possible duplicates, spam, a short reason and the tokens used.</li>
+        <li>The server’s triage settings and its Claude API key, stored encrypted and never shown again after it’s saved.</li>
+      </ul>
       <h3>What we don’t collect</h3>
       <p>The bot doesn’t read messages in your server. It only receives the panel interactions you start. We don’t use analytics, advertising or tracking cookies. The only cookies are the ones needed to sign in and keep forms secure.</p>
 
@@ -129,6 +135,7 @@ export function registerLegalRoutes(app: FastifyInstance, web: Web): void {
         <li>To file your ticket as a GitHub issue, send you a private confirmation and retry if GitHub is unavailable, without filing the same ticket twice.</li>
         <li>To limit spam and duplicate submissions.</li>
         <li>To check contributions and give or remove contributor roles.</li>
+        <li>If the server turned on AI triage, to suggest a priority and spot duplicates or spam.</li>
         <li>To let server administrators and moderators manage tickets and settings.</li>
         <li>To keep the Service secure and fix problems.</li>
       </ul>
@@ -138,6 +145,7 @@ export function registerLegalRoutes(app: FastifyInstance, web: Web): void {
         <li><strong>GitHub.</strong> The issue contains your ticket’s title and description, the app and type, your Discord display name and username, your Discord user ID, the server’s name and ID, the channel ID, the submission time and a reference number. <strong>If the repository is public, the issue is public.</strong> The form tells you which before you submit.</li>
         <li><strong>Discord.</strong> To show panels, send your confirmation and add or remove roles.</li>
         <li><strong>The server’s administrators and moderators</strong> can see the tickets and contributor verifications for their server in the console.</li>
+        <li><strong>Anthropic</strong>, only if the server’s administrators turn on AI triage. The ticket’s app, type, title and description, plus the titles and short excerpts of open issues in the same repository, are sent to Anthropic’s Claude API to assess the ticket. Anthropic processes them under its commercial terms and <a href="https://www.anthropic.com/legal/privacy" rel="noopener noreferrer">privacy policy</a>.</li>
         <li><strong>Our hosting provider</strong> stores the data on our behalf.</li>
         <li><strong>Authorities</strong>, if the law requires it.</li>
       </ul>
@@ -149,6 +157,7 @@ export function registerLegalRoutes(app: FastifyInstance, web: Web): void {
         <li><strong>Ticket records</strong> (reporter, status, issue link and reference) are kept as the server’s ticket history until the workspace is deleted, or until you ask us to delete them.</li>
         <li><strong>Confirmation tokens</strong> from Discord expire after 15 minutes. <strong>Console sessions</strong> expire after 7 days.</li>
         <li><strong>Contributor verifications</strong> and the link to your GitHub account are kept until an administrator revokes them or the workspace is deleted.</li>
+        <li><strong>Triage results</strong> are kept with the ticket record. We don’t store the ticket text for triage; it’s read from the GitHub issue when the ticket is assessed.</li>
         <li><strong>Server logs</strong> record technical events such as request paths and errors, but not cookies, tokens, OAuth codes or what you submit. Our web server may keep standard access logs, including IP addresses, for a limited time for security.</li>
       </ul>
       <p>Deleting data here doesn’t delete GitHub issues or Discord messages. Those are controlled by the repository owners and by Discord.</p>
