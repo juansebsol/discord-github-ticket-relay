@@ -1,12 +1,14 @@
 /**
- * Files attached to tickets (screenshots and recordings).
+ * Files attached to tickets (screenshots).
  *
  * GitHub has no upload API for apps and Discord's file links expire, so files are kept on
  * this server under a long random ID and the GitHub issue shows them from that link.
  * Safety rules:
- * - Only images (PNG, JPEG, GIF, WebP) and videos (MP4, MOV, WebM) are kept, recognised by
- *   their content, never by the name. Nothing that a browser could run (HTML, SVG, PDF…).
- * - Location and camera data is removed from photos and videos before they are saved.
+ * - Only images (PNG, JPEG, GIF, WebP) up to 10 MB are kept, recognised by their content,
+ *   never by the name. No videos, and nothing a browser could run (HTML, SVG, PDF…).
+ * - Location and camera data is removed from photos before they are saved.
+ * - Member files are copied from Discord as soon as the ticket arrives, before GitHub is
+ *   contacted, because Discord's links expire.
  * - Files are stored by ID with our own extension, so names can't reach the file system.
  * - Each workspace has a storage limit, and a minimum of free disk is always kept.
  * - Attaching files never blocks filing: anything that can't be saved is noted instead.
@@ -24,7 +26,7 @@ import { addEvent } from './submissions.js';
 import type { IncomingFile } from './submissions.js';
 import type { Deps, SubmissionRow } from './types.js';
 
-export const MAX_FILE_BYTES = 25 * 1024 * 1024;
+export const MAX_FILE_BYTES = 10 * 1024 * 1024;
 const MB = 1024 * 1024;
 /** Always leave this much disk free for the database and logs. */
 const MIN_FREE_DISK = 1024 * MB;
@@ -39,7 +41,7 @@ export interface TicketFile {
   source: 'member' | 'team';
   added_by: string | null;
   filename: string;
-  kind: 'image' | 'video' | null;
+  kind: 'image' | null;
   content_type: string | null;
   ext: string | null;
   size: number;
@@ -54,19 +56,21 @@ export interface TicketFile {
 }
 
 export const FILE_ID = /^[A-Za-z0-9_-]{22}$/;
-export const ACCEPTED = 'PNG, JPG, GIF, WebP, MP4, MOV or WebM';
-export const ACCEPT_ATTR = 'image/png,image/jpeg,image/gif,image/webp,video/mp4,video/quicktime,video/webm';
+export const ACCEPTED = 'PNG, JPG, GIF or WebP';
+export const ACCEPT_ATTR = 'image/png,image/jpeg,image/gif,image/webp';
+export const TOO_LARGE = 'Larger than 10 MB.';
+export const NO_VIDEOS = 'Videos aren’t accepted. Attach screenshots instead.';
 
 // ---- Recognising files -------------------------------------------------------------------
 
 export interface FileType {
-  kind: 'image' | 'video';
+  kind: 'image';
   contentType: string;
   ext: string;
 }
 
 const PNG_SIG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-/** ISO media brands that are still images (HEIC, AVIF), not videos. */
+/** ISO media brands that are still images (HEIC, AVIF); any other brand is a video. */
 const IMAGE_BRANDS = new Set(['heic', 'heix', 'hevc', 'hevx', 'heim', 'heis', 'mif1', 'msf1', 'avif', 'avis']);
 
 /** Recognises a file by its first bytes. Anything else is refused. */
@@ -76,17 +80,16 @@ export function sniff(b: Buffer): FileType | null {
   if (b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return { kind: 'image', contentType: 'image/jpeg', ext: 'jpg' };
   if (b.length >= 6 && (ascii(0, 6) === 'GIF87a' || ascii(0, 6) === 'GIF89a')) return { kind: 'image', contentType: 'image/gif', ext: 'gif' };
   if (b.length >= 12 && ascii(0, 4) === 'RIFF' && ascii(8, 12) === 'WEBP') return { kind: 'image', contentType: 'image/webp', ext: 'webp' };
-  if (b.length >= 12 && ascii(4, 8) === 'ftyp') {
-    const brand = ascii(8, 12);
-    if (IMAGE_BRANDS.has(brand.trim())) return null;
-    return brand === 'qt  ' ? { kind: 'video', contentType: 'video/quicktime', ext: 'mov' } : { kind: 'video', contentType: 'video/mp4', ext: 'mp4' };
-  }
-  if (b.length >= 4 && b.readUInt32BE(0) === 0x1a45dfa3) return { kind: 'video', contentType: 'video/webm', ext: 'webm' };
   return null;
 }
 
 function isHeic(b: Buffer): boolean {
   return b.length >= 12 && b.toString('latin1', 4, 8) === 'ftyp' && IMAGE_BRANDS.has(b.toString('latin1', 8, 12).trim());
+}
+
+/** MP4/MOV (ISO media that isn't a still image) or WebM/MKV, to explain why it was refused. */
+function isVideo(b: Buffer): boolean {
+  return (b.length >= 12 && b.toString('latin1', 4, 8) === 'ftyp' && !isHeic(b)) || (b.length >= 4 && b.readUInt32BE(0) === 0x1a45dfa3);
 }
 
 // ---- Removing metadata -------------------------------------------------------------------
@@ -97,7 +100,6 @@ export function stripMetadata(b: Buffer, ext: string): Buffer {
     if (ext === 'jpg') return stripJpeg(b);
     if (ext === 'png') return stripPng(b);
     if (ext === 'webp') return stripWebp(b);
-    if (ext === 'mp4' || ext === 'mov') return neutralizeMp4(b);
   } catch {
     return b;
   }
@@ -212,35 +214,6 @@ function stripWebp(b: Buffer): Buffer {
   return Buffer.concat([head, body]);
 }
 
-/**
- * MP4/MOV: blanks the user data and metadata boxes (where phones store the location) by
- * turning them into "free" boxes of the same size, so every offset in the file stays valid.
- */
-function neutralizeMp4(input: Buffer): Buffer {
-  const b = Buffer.from(input);
-  const walk = (start: number, end: number, depth: number) => {
-    let i = start;
-    while (i + 8 <= end) {
-      let size = b.readUInt32BE(i);
-      const type = b.toString('latin1', i + 4, i + 8);
-      let header = 8;
-      if (size === 1) {
-        if (i + 16 > end) return;
-        size = Number(b.readBigUInt64BE(i + 8));
-        header = 16;
-      } else if (size === 0) size = end - i;
-      if (size < header || i + size > end) return;
-      if (type === 'udta' || type === 'meta') {
-        b.write('free', i + 4, 'latin1');
-        b.fill(0, i + header, i + size);
-      } else if ((type === 'moov' || type === 'trak') && depth < 4) walk(i + header, i + size, depth + 1);
-      i += size;
-    }
-  };
-  walk(0, b.length, 0);
-  return b;
-}
-
 // ---- Names, links and sizes --------------------------------------------------------------
 
 /** A display name that is safe everywhere (no paths, control characters or odd symbols). */
@@ -340,9 +313,9 @@ export async function fileCounts(q: Queryable, submissionId: string): Promise<{ 
 /** Records the files a member attached when the ticket is accepted (downloaded when it's filed). */
 export async function recordIncomingFiles(q: Queryable, box: SecretBox, sub: SubmissionRow, files: IncomingFile[]): Promise<void> {
   for (const f of files) {
-    const tooLarge = f.size > MAX_FILE_BYTES;
-    const wrongType = Boolean(f.contentType) && !/^(image|video)\//.test(f.contentType!);
-    const error = tooLarge ? 'Larger than 25 MB.' : wrongType ? `Not an image or video (${ACCEPTED}).` : null;
+    const video = /^video\//.test(f.contentType ?? '');
+    const wrongType = Boolean(f.contentType) && !/^image\//.test(f.contentType!);
+    const error = video ? NO_VIDEOS : wrongType ? `Not an image (${ACCEPTED}).` : f.size > MAX_FILE_BYTES ? TOO_LARGE : null;
     await q.query(
       `INSERT INTO ticket_files (id, workspace_id, submission_id, source, filename, size, status, source_url_enc, error)
        VALUES ($1, $2, $3, 'member', $4, $5, $6, $7, $8)`,
@@ -365,8 +338,8 @@ async function freeDisk(dir: string): Promise<number> {
 /** Checks, cleans and writes one file. */
 async function storeBuffer(deps: Pick<Deps, 'db' | 'config'>, f: Pick<TicketFile, 'id' | 'workspace_id'>, data: Buffer): Promise<StoreResult> {
   const type = sniff(data);
-  if (!type) return { ok: false, error: isHeic(data) ? 'HEIC photos aren’t supported. Send a screenshot or a JPG instead.' : `Not an image or video (${ACCEPTED}).` };
-  if (data.length > MAX_FILE_BYTES) return { ok: false, error: 'Larger than 25 MB.' };
+  if (!type) return { ok: false, error: isHeic(data) ? 'HEIC photos aren’t supported. Send a screenshot or a JPG instead.' : isVideo(data) ? NO_VIDEOS : `Not an image (${ACCEPTED}).` };
+  if (data.length > MAX_FILE_BYTES) return { ok: false, error: TOO_LARGE };
   const clean = stripMetadata(data, type.ext);
   const [settings, usage] = await Promise.all([getFileSettings(deps.db, f.workspace_id), storageUsage(deps.db, f.workspace_id)]);
   if (usage.bytes + clean.length > settings.storage_limit_mb * MB) return { ok: false, error: 'The storage limit for files is reached.' };
@@ -391,24 +364,35 @@ async function saveResult(q: Queryable, id: string, r: StoreResult): Promise<voi
   }
 }
 
-/** Downloads a ticket's member files from Discord. Never throws: failures are recorded per file. */
+/**
+ * Copies a ticket's member files from Discord to this server, one at a time (so memory stays
+ * small). Runs first when a ticket is filed, before anything involving GitHub. Never throws:
+ * failures are recorded per file.
+ */
 export async function storePendingFiles(deps: Deps, sub: SubmissionRow): Promise<void> {
-  const { rows } = await deps.db.query<TicketFile>(`SELECT * FROM ticket_files WHERE submission_id = $1 AND status = 'pending'`, [sub.id]);
+  const { rows } = await deps.db.query<TicketFile>(`SELECT * FROM ticket_files WHERE submission_id = $1 AND status = 'pending' ORDER BY created_at, rowid`, [sub.id]);
   if (!rows.length) return;
-  const results = await Promise.all(rows.map(async (f): Promise<StoreResult> => {
+  let stored = 0;
+  // Stay well inside the filing lease (90s) even if Discord is very slow.
+  const deadline = Date.now() + 60_000;
+  for (const f of rows) {
+    let result: StoreResult;
     try {
-      if (!deps.discord || !f.source_url_enc) return { ok: false, error: 'The file link is no longer available.' };
-      const data = await deps.discord.downloadAttachment(deps.box.decrypt(f.source_url_enc), MAX_FILE_BYTES);
-      return await storeBuffer(deps, f, data);
+      if (!deps.discord || !f.source_url_enc) result = { ok: false, error: 'The file link is no longer available.' };
+      else if (Date.now() > deadline) result = { ok: false, error: 'Discord was too slow to download it.' };
+      else result = await storeBuffer(deps, f, await deps.discord.downloadAttachment(deps.box.decrypt(f.source_url_enc), MAX_FILE_BYTES));
     } catch (err) {
-      if (err instanceof AttachmentError) return { ok: false, error: err.code === 'too_large' ? 'Larger than 25 MB.' : err.message };
-      if (err instanceof NetworkError) return { ok: false, error: 'Discord couldn’t be reached to download it.' };
-      deps.log.warn({ submission: sub.ref, err: (err as Error).message }, 'could not store an attached file');
-      return { ok: false, error: 'It couldn’t be saved.' };
+      if (err instanceof AttachmentError) result = { ok: false, error: err.code === 'too_large' ? TOO_LARGE : err.message };
+      else if (err instanceof NetworkError) result = { ok: false, error: 'Discord couldn’t be reached to download it.' };
+      else {
+        deps.log.warn({ submission: sub.ref, err: (err as Error).message }, 'could not store an attached file');
+        result = { ok: false, error: 'It couldn’t be saved.' };
+      }
     }
-  }));
-  for (let n = 0; n < rows.length; n++) await saveResult(deps.db, rows[n]!.id, results[n]!);
-  await addEvent(deps.db, sub.id, 'files_stored', { stored: results.filter((r) => r.ok).length, failed: results.filter((r) => !r.ok).length });
+    await saveResult(deps.db, f.id, result);
+    if (result.ok) stored++;
+  }
+  await addEvent(deps.db, sub.id, 'files_stored', { stored, failed: rows.length - stored });
 }
 
 /** Adds a file from the console (people who can act on tickets). */
@@ -452,7 +436,7 @@ export function filesBlock(files: TicketFile[], publicUrl: string): string | nul
     const name = mdText(f.filename);
     if (f.status === 'stored') {
       const url = fileUrl(publicUrl, f);
-      return f.kind === 'image' ? `![${name}](${url})` : `Video: [${name}](${url}) (${formatBytes(f.size)})`;
+      return f.kind === 'image' ? `![${name}](${url})` : `[${name}](${url}) (${formatBytes(f.size)})`;
     }
     if (f.status === 'deleted') return `_${name} was removed${f.delete_reason === 'manual' ? ' by a moderator' : ' during cleanup'}._`;
     return `_${name} couldn’t be attached: ${f.error ?? 'it couldn’t be saved.'}_`;

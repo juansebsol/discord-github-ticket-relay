@@ -37,7 +37,7 @@ export function registerLegalRoutes(app: FastifyInstance, web: Web): void {
 
       <h2>2. What the Service does</h2>
       <ul>
-        <li><strong>Tickets.</strong> Members of a Discord server pick an app and fill in a short form, which can include screenshots or recordings. The Service files the ticket as an issue in the GitHub repository the server’s administrators chose for that app, and sends the member a private confirmation.</li>
+        <li><strong>Tickets.</strong> Members of a Discord server pick an app and fill in a short form, which can include screenshots. The Service files the ticket as an issue in the GitHub repository the server’s administrators chose for that app, and sends the member a private confirmation.</li>
         <li><strong>Contributor roles.</strong> Members can sign in with GitHub so the Service can count their merged pull requests or commits in the server’s repositories and give them a matching Discord role.</li>
         <li><strong>Console.</strong> Server owners, admins and moderators manage setup and tickets in the web console after signing in with Discord.</li>
         <li><strong>AI triage (optional).</strong> If a server’s administrators turn it on, an AI model reviews filed tickets and may label them, comment on them, update the member’s private confirmation in Discord, or close them as duplicates, spam or questions for the community, as the administrators configured. Its calls can be wrong; administrators can review and undo them on GitHub.</li>
@@ -51,7 +51,7 @@ export function registerLegalRoutes(app: FastifyInstance, web: Web): void {
         <li>You are responsible for what you submit. Only submit information you have the right to share.</li>
         <li><strong>Never include passwords, access tokens, payment details or other secrets</strong>, or other people’s personal information.</li>
         <li>Tickets become GitHub issues. If the repository is <strong>public, anyone on the internet can read the issue</strong>, including your Discord display name and username, and see the files you attach. The form tells you whether the repository is public or private before you submit.</li>
-        <li>Only attach screenshots and recordings you have the right to share, and hide anything private in them first.</li>
+        <li>Only attach screenshots you have the right to share, and hide anything private in them first.</li>
         <li>You allow us to store, process and send your submission to GitHub and Discord as needed to run the Service. Once an issue exists on GitHub, the repository’s owners control it, and GitHub’s terms apply to it.</li>
       </ul>
 
@@ -105,7 +105,7 @@ export function registerLegalRoutes(app: FastifyInstance, web: Web): void {
       <ul>
         <li>Your Discord user ID, username and display name.</li>
         <li>The Discord server’s ID and name and the channel ID where you opened the ticket.</li>
-        <li>What you submit: the app and ticket type you pick, the title, the description, your answers to the form’s other questions (for example your operating system), and any screenshots or recordings you attach.</li>
+        <li>What you submit: the app and ticket type you pick, the title, the description, your answers to the form’s other questions (for example your operating system), and any screenshots you attach.</li>
         <li>The time of the submission, its status, the GitHub issue it became, and a keyed fingerprint of the text used to spot duplicate submissions.</li>
         <li>A short-lived token from Discord that lets the bot update your private confirmation message.</li>
       </ul>
@@ -155,7 +155,7 @@ export function registerLegalRoutes(app: FastifyInstance, web: Web): void {
       <h2>5. How long we keep it</h2>
       <ul>
         <li><strong>Ticket text</strong> is stored encrypted. Once the GitHub issue is created, we delete the description from our database; it lives on in the issue. The remaining text (the title) is deleted after the retention period the server sets (30 days by default). Text of tickets that couldn’t be filed is kept for at least 90 days so administrators can retry them.</li>
-        <li><strong>Attached files</strong> are stored on our server under a long random link, which the GitHub issue uses to show them. Anyone with the link can open a file, so in a public repository attached files are public too. Before a file is saved we remove location and camera data from photos and videos. Files are kept until the server’s administrators or moderators delete them, or until the server’s cleanup rules remove them (for example some days after the issue is closed). Deleting a file removes it from our server, and the issue then shows that it was removed.</li>
+        <li><strong>Attached files</strong> are stored on our server under a long random link, which the GitHub issue uses to show them. Anyone with the link can open a file, so in a public repository attached files are public too. Only images are accepted, and before one is saved we remove location and camera data from it. Files are kept until the server’s administrators or moderators delete them, or until the server’s cleanup rules remove them (for example some days after the issue is closed). Deleting a file removes it from our server, and the issue then shows that it was removed.</li>
         <li><strong>Ticket records</strong> (reporter, status, issue link and reference) are kept as the server’s ticket history until the workspace is deleted, or until you ask us to delete them.</li>
         <li><strong>Confirmation tokens</strong> from Discord expire after 15 minutes. <strong>Console sessions</strong> expire after 7 days.</li>
         <li><strong>Contributor verifications</strong> and the link to your GitHub account are kept until an administrator revokes them or the workspace is deleted.</li>

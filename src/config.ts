@@ -45,7 +45,7 @@ export interface Config {
   publicUrl: string;
   /** SQLite database file. */
   databasePath: string;
-  /** Folder for files attached to tickets (screenshots and recordings). */
+  /** Folder for files attached to tickets (screenshots). */
   filesDir: string;
   encryptionKey: Buffer;
   discord: DiscordAppConfig | null;

@@ -292,7 +292,7 @@ export function createdWithNoteMessage(s: { appName: string; ref: string; issueN
 export function createdMessage(s: { appName: string; ref: string; issueNumber: number; issueUrl: string; repoPrivate: boolean; files?: { stored: number; failed: number } }) {
   const files = s.files
     ? s.files.failed
-      ? `${s.files.stored ? `${s.files.stored} file${s.files.stored === 1 ? ' was' : 's were'} attached. ` : ''}${s.files.failed} file${s.files.failed === 1 ? '' : 's'} couldn’t be attached: only images and videos up to 25 MB are accepted.`
+      ? `${s.files.stored ? `${s.files.stored} file${s.files.stored === 1 ? ' was' : 's were'} attached. ` : ''}${s.files.failed} file${s.files.failed === 1 ? '' : 's'} couldn’t be attached. Only images (PNG, JPG, GIF or WebP) up to 10 MB are accepted.`
       : `${s.files.stored} file${s.files.stored === 1 ? ' was' : 's were'} attached to the ticket.`
     : null;
   return reply(

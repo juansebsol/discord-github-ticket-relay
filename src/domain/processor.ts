@@ -107,6 +107,9 @@ export class Processor {
 
   private async create(sub: SubmissionRow): Promise<void> {
     const { deps } = this;
+    // Copy the member's files from Discord before anything else: Discord's links expire, and
+    // this doesn't depend on GitHub being reachable. Already-copied files are skipped.
+    await storePendingFiles(deps, sub);
     const github = deps.github;
     if (!github) {
       await this.apply(sub, { type: 'retry', code: 'github_not_configured', message: 'GitHub is not configured on this deployment yet.', delaySeconds: 300 });
@@ -135,8 +138,6 @@ export class Processor {
         }
       }
 
-      // Member files are downloaded from Discord first (failures are noted, never fatal).
-      await storePendingFiles(deps, sub);
       const files = filesBlock(await listTicketFiles(deps.db, sub.id), deps.config.publicUrl);
 
       phase = 'create';

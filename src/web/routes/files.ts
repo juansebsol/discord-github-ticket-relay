@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import {
+  ACCEPT_ATTR,
   addTeamFile,
   cleanFilename,
   cleanUpNow,
@@ -128,15 +129,10 @@ export function registerFileRoutes(app: FastifyInstance, web: Web): void {
           errors.push('Files can be added once the ticket is filed on GitHub.');
           continue;
         }
-        let data: Buffer;
-        try {
-          data = await part.toBuffer();
-        } catch (err) {
-          if (err instanceof app.multipartErrors.RequestFileTooLargeError) {
-            errors.push(`${cleanFilename(part.filename)}: larger than 25 MB.`);
-            continue;
-          }
-          throw err;
+        const data = await part.toBuffer();
+        if (part.file.truncated) {
+          errors.push(`${cleanFilename(part.filename)}: larger than 10 MB.`);
+          continue;
         }
         const result = await addTeamFile(deps, sub, ctx.user.id, part.filename, data);
         if (result.ok) added++;
@@ -238,7 +234,7 @@ export function registerFileRoutes(app: FastifyInstance, web: Web): void {
       const files = filesBySub.get(r.sub.id) ?? [];
       return html`<span class="thumbs">${files.slice(0, 3).map((f) => f.kind === 'image'
         ? html`<img class="thumb" src="${fileUrl('', f)}" alt="" loading="lazy" width="28" height="28">`
-        : html`<span class="thumb">${icon('film', 14)}</span>`)}${files.length > 3 ? html`<span class="thumb more">+${String(files.length - 3)}</span>` : ''}</span>`;
+        : html`<span class="thumb">${icon('paperclip', 14)}</span>`)}${files.length > 3 ? html`<span class="thumb more">+${String(files.length - 3)}</span>` : ''}</span>`;
     };
 
     const scanBtn = postBtn(`${b}/tickets/files/scan`, 'Scan for cleanup', ctx.csrf, { icon: 'scan-search', loading: 'Scanning…', title: 'Checks every ticket’s GitHub issue and shows what the rules would delete. Nothing is deleted yet.' });
@@ -269,7 +265,7 @@ export function registerFileRoutes(app: FastifyInstance, web: Web): void {
               : 'Scan for cleanup checks which GitHub issues are closed, then lists the files your rules would delete. Nothing is deleted until you confirm.', settings.last_scan_at ? null : scanBtn, settings.last_scan_at ? 'ok' : 'muted')
           : all.length
             ? empty('paperclip', 'No tickets here', 'Nothing matches this filter.')
-            : empty('paperclip', 'No files yet', 'Screenshots and recordings that members attach in Discord, or that you add on a ticket page, show up here.');
+            : empty('paperclip', 'No files yet', 'Screenshots that members attach in Discord, or that you add on a ticket page, show up here.');
 
     const body = html`
       ${await ticketsHeader(web, ctx, 'files', { actions: scanBtn })}
@@ -282,7 +278,7 @@ export function registerFileRoutes(app: FastifyInstance, web: Web): void {
             <div class="sub">of ${formatBytes(limitBytes)} limit</div></div>
           <div class="stat"><div class="l">Suggested for cleanup</div><div class="v">${String(suggested.length)}</div><div class="sub">${suggested.length ? `${formatBytes(suggestedBytes)} · ` : ''}${settings.last_scan_at ? `scanned ${timeAgo(settings.last_scan_at)}` : 'not scanned yet'}</div></div>
         </div>
-        <div class="card-note">Files are kept on this server and shown in GitHub issues from a long random link. Location and camera data is removed from photos and videos before they’re saved.</div>
+        <div class="card-note">Files are kept on this server and shown in GitHub issues from a long random link. Location and camera data is removed from photos before they’re saved.</div>
       </div>
 
       <div class="card">
@@ -403,7 +399,7 @@ export function filesCard(o: {
     const who = f.source === 'team' ? (f.added_by ? `Added by ${o.names.get(f.added_by) ?? 'a moderator'}` : 'Added by the team') : 'From the member';
     if (f.status === 'stored') {
       return html`<li class="file-tile">
-        <a class="file-thumb" href="${url}" target="_blank" rel="noopener noreferrer" title="Open ${f.filename}">${f.kind === 'image' ? html`<img src="${url}" alt="${f.filename}" loading="lazy">` : html`<span class="file-icon">${icon('film', 20)}<span class="xs">Video</span></span>`}</a>
+        <a class="file-thumb" href="${url}" target="_blank" rel="noopener noreferrer" title="Open ${f.filename}">${f.kind === 'image' ? html`<img src="${url}" alt="${f.filename}" loading="lazy">` : html`<span class="file-icon">${icon('paperclip', 20)}</span>`}</a>
         <div class="file-meta"><div class="grow"><div class="file-name" title="${f.filename}">${f.filename}</div><div class="sub">${formatBytes(f.size)} · ${who}</div></div>
           ${o.canAct ? html`<form method="post" action="${o.actionBase}/files/${f.id}/delete" class="inline-form" data-confirm-title="Delete “${f.filename}”?" data-confirm-body="It’s deleted from this server and removed from the GitHub issue. This can’t be undone." data-confirm-label="Delete file" data-confirm-danger>${csrfField(o.csrf)}<button type="submit" class="icon-btn sm" aria-label="Delete ${f.filename}" title="Delete">${icon('trash-2')}</button></form>` : ''}</div></li>`;
     }
@@ -420,8 +416,8 @@ export function filesCard(o: {
   const upload = o.canAct && o.filed
     ? html`<form method="post" action="${o.actionBase}/files" enctype="multipart/form-data" class="upload" data-upload>
         ${csrfField(o.csrf)}
-        <input type="file" id="file-input" name="files" multiple accept="image/png,image/jpeg,image/gif,image/webp,video/mp4,video/quicktime,video/webm" class="sr-only-input">
-        <label for="file-input" class="dropzone" data-dropzone>${icon('upload', 20, 'muted')}<span><span class="dz-title" data-dz-text>Drop screenshots or videos here, or choose files</span><span class="sub">Up to 10 at a time, 25 MB each. PNG, JPG, GIF, WebP, MP4, MOV or WebM.</span></span></label>
+        <input type="file" id="file-input" name="files" multiple accept="${ACCEPT_ATTR}" class="sr-only-input">
+        <label for="file-input" class="dropzone" data-dropzone>${icon('upload', 20, 'muted')}<span><span class="dz-title" data-dz-text>Drop screenshots here, or choose files</span><span class="sub">Up to 10 at a time, 10 MB each. PNG, JPG, GIF or WebP.</span></span></label>
         <div class="upload-f">${submitBtn('Add files', { size: 'sm', variant: 'primary', icon: 'upload', loading: 'Uploading…' })}</div>
       </form>`
     : '';

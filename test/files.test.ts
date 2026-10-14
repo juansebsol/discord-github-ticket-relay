@@ -180,7 +180,7 @@ describe('forms per ticket type', () => {
     expect(intro.content).toMatch(/publicly on GitHub/);
     expect([title.component.custom_id, desc.component.custom_id]).toEqual(['title', 'description']);
     expect(os).toMatchObject({ type: 18, label: 'Operating system and version', component: { type: 4, custom_id: 'q:os', style: 1, required: true } });
-    expect(files).toMatchObject({ type: 18, label: 'Screenshots or recordings', component: { type: 19, custom_id: 'f:shots', min_values: 0, max_values: 5, required: false } });
+    expect(files).toMatchObject({ type: 18, label: 'Screenshots', component: { type: 19, custom_id: 'f:shots', min_values: 0, max_values: 5, required: false } });
     for (const c of modal.components.slice(1) as any[]) {
       expect(c.label.length).toBeLessThanOrEqual(45);
       if (c.description) expect(c.description.length).toBeLessThanOrEqual(100);
@@ -266,7 +266,7 @@ describe('files members attach in Discord', () => {
     // The answers reach Claude too, and the files are summarized rather than linked.
     const text = extractDescription(body);
     expect(text).toContain('Windows 11 23H2');
-    expect(text).toContain('The member attached 2 screenshots or recordings.');
+    expect(text).toContain('The member attached 2 screenshots.');
     expect(text).not.toContain('/f/');
 
     const edit = env.discord.interactionEdits.at(-1)!;
@@ -274,31 +274,51 @@ describe('files members attach in Discord', () => {
     expect(sub.status).toBe('created');
   });
 
-  it('files the ticket anyway when a file is refused, too large or gone, and says why', async () => {
+  it('files the ticket anyway when a file is refused, too large, a video or gone, and says why', async () => {
     const { files, issue } = await submitBug({
       files: [
         { name: 'evil.png', body: Buffer.from('<html><script>alert(1)</script></html>'), type: 'image/png' },
-        { name: 'huge.mp4', body: Buffer.alloc(10), type: 'video/mp4', size: 40 * 1024 * 1024 },
+        { name: 'huge.png', body: Buffer.alloc(10), type: 'image/png', size: 11 * 1024 * 1024 },
         { name: 'gone.png', body: png(), status: 404 },
         { name: 'clip.mp4', body: mp4(), type: 'video/mp4' },
+        { name: 'sneaky.png', body: mp4(), type: 'image/png' },
       ],
     });
-    expect(files.map((f) => [f.filename, f.status])).toEqual([['evil.png', 'failed'], ['huge.mp4', 'failed'], ['gone.png', 'failed'], ['clip.mp4', 'stored']]);
-    expect(files[0]!.error).toMatch(/Not an image or video/);
-    expect(files[1]!.error).toBe('Larger than 25 MB.');
-    expect(files[2]!.error).toBe('Discord no longer has the file.');
-    // The oversized file was never downloaded.
-    expect(env.discord.cdnRequests.some((p) => p.endsWith('huge.mp4'))).toBe(false);
+    expect(files.map((f) => [f.filename, f.status])).toEqual([['evil.png', 'failed'], ['huge.png', 'failed'], ['gone.png', 'failed'], ['clip.mp4', 'failed'], ['sneaky.png', 'failed']]);
+    expect(files.map((f) => f.error)).toEqual([
+      'Not an image (PNG, JPG, GIF or WebP).',
+      'Larger than 10 MB.',
+      'Discord no longer has the file.',
+      'Videos aren’t accepted. Attach screenshots instead.',
+      'Videos aren’t accepted. Attach screenshots instead.',
+    ]);
+    // Files refused up front are never downloaded.
+    expect(env.discord.cdnRequests.some((p) => p.endsWith('huge.png') || p.endsWith('clip.mp4'))).toBe(false);
+    expect(issue().body).toContain('_evil.png couldn’t be attached: Not an image');
+    expect(JSON.stringify(env.discord.interactionEdits.at(-1)!.payload)).toContain('5 files couldn’t be attached');
+  });
 
-    const video = readFileSync(filePathFor(env.deps, files[3]!));
-    expect(video.length).toBe(mp4().length);
-    expect(video.includes(Buffer.from('+52.3702'))).toBe(false);
-    expect(video.includes(Buffer.from('udta'))).toBe(false);
-
-    const body = issue().body;
-    expect(body).toContain('_evil.png couldn’t be attached: Not an image or video');
-    expect(body).toContain(`Video: [clip.mp4](https://relay.example.test/f/${files[3]!.id}/clip.mp4)`);
-    expect(JSON.stringify(env.discord.interactionEdits.at(-1)!.payload)).toContain('3 files couldn’t be attached');
+  it('copies the files from Discord right away, even while GitHub is down', async () => {
+    env.github.tokenFailures.push({ status: 503, message: 'GitHub is down' });
+    const app = ws.apps[0]!;
+    const id = '1500000000000000001';
+    await sendInteraction(env, {
+      id: nextInteractionId(), type: 5, token: 'itoken-down', guild_id: ws.guildId, channel_id: ws.channelId, member: member(),
+      data: {
+        custom_id: `tr:form:${app.public_id}:${app.repo_id}:${bug.public_id}`,
+        components: [
+          { type: 18, component: { type: 4, custom_id: 'title', value: 'Crash while GitHub is down' } },
+          { type: 18, component: { type: 4, custom_id: 'description', value: 'The app closes when I press save.' } },
+          { type: 18, component: { type: 19, custom_id: 'f:shots', values: [id] } },
+        ],
+        resolved: { attachments: { [id]: { id, filename: 'shot.png', size: png().length, content_type: 'image/png', url: env.discord.addCdnFile('shot.png', png()) } } },
+      },
+    });
+    const sub = await eventually(async () => (await env.db.query(`SELECT * FROM submissions WHERE status = 'pending' AND attempts = 0 AND error_code IS NOT NULL`)).rows[0]);
+    const files = (await env.db.query<TicketFile>('SELECT * FROM ticket_files WHERE submission_id = $1', [sub.id])).rows;
+    expect(files.map((f) => f.status)).toEqual(['stored']);
+    expect(existsSync(filePathFor(env.deps, files[0]!))).toBe(true);
+    expect(env.github.allIssues()).toHaveLength(0);
   });
 
   it('stops saving files at the storage limit, and keeps filing', async () => {
@@ -333,6 +353,7 @@ describe('files on the ticket page', () => {
     const { sub, issue } = await submitBug({ files: [] });
     const url = `${w()}/tickets/${sub.id}/files`;
     const shot = { name: 'files', filename: 'repro step 1.png', type: 'image/png', data: png() };
+    const big = { name: 'files', filename: 'big.png', type: 'image/png', data: Buffer.concat([png(), Buffer.alloc(11 * 1024 * 1024)]) };
 
     // The token must come first and match.
     const noToken = await env.server.inject({ method: 'POST', url, ...multipart(ws.owner, [shot]) });
@@ -345,8 +366,12 @@ describe('files on the ticket page', () => {
     expect((await env.server.inject({ method: 'POST', url, ...multipart(viewer, [{ name: '_csrf', value: viewer.csrf }, shot]) })).statusCode).toBe(403);
 
     const actor = await joinAs('moderator', 'mod-act', { canActTickets: true, canViewContributors: false });
-    const added = await env.server.inject({ method: 'POST', url, ...multipart(actor, [{ name: '_csrf', value: actor.csrf }, shot, { name: 'files', filename: 'notes.txt', type: 'text/plain', data: Buffer.from('hello') }]) });
+    const added = await env.server.inject({ method: 'POST', url, ...multipart(actor, [{ name: '_csrf', value: actor.csrf }, shot, { name: 'files', filename: 'notes.txt', type: 'text/plain', data: Buffer.from('hello') }, big, { name: 'files', filename: 'clip.mp4', type: 'video/mp4', data: mp4() }]) });
     expect(added.statusCode).toBe(302);
+    const cookie = /tr_flash=([^;]+)/.exec(String(added.headers['set-cookie'] ?? ''))![1]!;
+    const flash = Buffer.from(decodeURIComponent(cookie), 'base64url').toString('utf8');
+    expect(flash).toContain('big.png: larger than 10 MB.');
+    expect(flash).toContain('clip.mp4: Videos aren’t accepted');
     const files = (await env.db.query<TicketFile>('SELECT * FROM ticket_files WHERE submission_id = $1', [sub.id])).rows;
     expect(files.map((f) => [f.filename, f.source, f.status])).toEqual([['repro step 1.png', 'team', 'stored']]);
     expect(issue().body).toContain(`![repro step 1.png](https://relay.example.test/f/${files[0]!.id}/repro%20step%201.png)`);
@@ -454,7 +479,7 @@ describe('file helpers', () => {
   it('recognizes files by content and cleans names', () => {
     expect(sniff(png())?.contentType).toBe('image/png');
     expect(sniff(jpeg())?.ext).toBe('jpg');
-    expect(sniff(mp4())?.contentType).toBe('video/mp4');
+    expect(sniff(mp4())).toBeNull();
     expect(sniff(Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"></svg>'))).toBeNull();
     expect(sniff(Buffer.from('%PDF-1.7'))).toBeNull();
     expect(cleanFilename('../../etc/passwd')).toBe('passwd');

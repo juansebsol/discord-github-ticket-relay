@@ -48,8 +48,8 @@ export function extractDescription(body: string): string {
   return text
     // Claude can't see the files, so say how many there are instead of passing their links.
     .replace(/<!-- ticket-relay:files -->[\s\S]*?<!-- \/ticket-relay:files -->/g, (block) => {
-      const n = (block.match(/^(!\[|Video: \[)/gm) ?? []).length;
-      return n ? `(The member attached ${n} screenshot${n === 1 ? '' : 's'} or recording${n === 1 ? '' : 's'}.)` : '';
+      const n = (block.match(/^!\[/gm) ?? []).length;
+      return n ? `(The member attached ${n} screenshot${n === 1 ? '' : 's'}.)` : '';
     })
     .replace(/<!--[\s\S]*?-->/g, '')
     .trim();

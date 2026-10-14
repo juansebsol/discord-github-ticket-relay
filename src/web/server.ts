@@ -106,7 +106,8 @@ export async function buildServer(deps: Deps, processor: Processor, opts: { logg
   await app.register(cookie);
   await app.register(formbody);
   // File uploads (only the ticket "Add files" form); each file is read one at a time.
-  await app.register(multipart, { limits: { fileSize: MAX_FILE_BYTES, files: 10, fields: 4, parts: 16, fieldSize: 1024 } });
+  // A file over the limit is cut off and reported, without failing the other files in the form.
+  await app.register(multipart, { throwFileSizeLimit: false, limits: { fileSize: MAX_FILE_BYTES, files: 10, fields: 4, parts: 16, fieldSize: 1024 } });
   await app.register(fastifyStatic, { root: STATIC_DIR, prefix: '/static/', maxAge: '1h' });
 
   const secureCookies = deps.config.publicUrl.startsWith('https://');

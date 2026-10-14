@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { getInstallationRepos } from '../../domain/repos.js';
 import { getGitHubConnection, listApps } from '../../domain/store.js';
-import { CUSTOM_KINDS, FORM_MAX_SECTIONS, formFor, KIND_NAMES, LIMITS, MAX_FILES_LIMIT, validateForm, type FormSection, type SectionKind } from '../../domain/forms.js';
+import { CUSTOM_KINDS, FILES_HINT, FORM_MAX_SECTIONS, formFor, KIND_NAMES, LIMITS, MAX_FILES_LIMIT, validateForm, type FormSection, type SectionKind } from '../../domain/forms.js';
 import {
   createTicketType,
   deleteTicketType,
@@ -87,9 +87,9 @@ function sectionEditor(s: FormSection): SafeHtml {
   const builtIn = s.kind === 'intro' || s.kind === 'title' || s.kind === 'description';
   const required = s.kind === 'title' || s.kind === 'description' || s.required;
   const questionFields = html`<div class="fields-2">
-      ${counterField({ id: id('label'), name: `${k}.label`, label: 'Question', value: s.label, max: LIMITS.label, placeholder: s.kind === 'files' ? 'Screenshots or recordings' : 'e.g. Which version are you using?' })}
+      ${counterField({ id: id('label'), name: `${k}.label`, label: 'Question', value: s.label, max: LIMITS.label, placeholder: s.kind === 'files' ? 'Screenshots' : 'e.g. Which version are you using?' })}
       ${s.kind === 'files'
-        ? html`<div class="field"><label for="${id('max')}">Files members can attach</label><input type="number" id="${id('max')}" name="${k}.max" value="${String(s.maxFiles)}" min="1" max="${String(MAX_FILES_LIMIT)}" required class="wide"><div class="hint">1 to ${String(MAX_FILES_LIMIT)}. Images and videos up to 25 MB each.</div></div>`
+        ? html`<div class="field"><label for="${id('max')}">Files members can attach</label><input type="number" id="${id('max')}" name="${k}.max" value="${String(s.maxFiles)}" min="1" max="${String(MAX_FILES_LIMIT)}" required class="wide"><div class="hint">1 to ${String(MAX_FILES_LIMIT)}. Images only (PNG, JPG, GIF, WebP), up to 10 MB each.</div></div>`
         : counterField({ id: id('placeholder'), name: `${k}.placeholder`, label: 'Placeholder', value: s.placeholder, max: LIMITS.placeholder, optional: true, hint: 'Example text inside the empty box.' })}
     </div>
     ${counterField({ id: id('hint'), name: `${k}.hint`, label: 'Hint', value: s.hint, max: LIMITS.hint, optional: true, hint: 'Shown under the question.' })}`;
@@ -114,8 +114,8 @@ function sectionEditor(s: FormSection): SafeHtml {
 }
 
 function blank(kind: SectionKind): FormSection {
-  const label = kind === 'files' ? 'Screenshots or recordings' : '';
-  return { key: kind === 'intro' ? 'intro' : '__KEY__', kind, label, hint: kind === 'files' ? 'Images or videos, up to 25 MB each. Hide anything private first.' : '', placeholder: '', text: kind === 'intro' ? '' : '', required: false, maxFiles: 5 };
+  const label = kind === 'files' ? 'Screenshots' : '';
+  return { key: kind === 'intro' ? 'intro' : '__KEY__', kind, label, hint: kind === 'files' ? FILES_HINT : '', placeholder: '', text: kind === 'intro' ? '' : '', required: false, maxFiles: 5 };
 }
 
 /** Reads the builder's fields back into sections, in the order they were on the page. */

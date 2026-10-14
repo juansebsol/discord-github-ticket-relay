@@ -51,7 +51,7 @@ const SectionSchema = z.object({
 });
 
 export const DEFAULT_GUIDANCE = 'When it applies, include the steps to reproduce it, what you expected to happen and what actually happened.';
-export const FILES_HINT = 'Images or videos, up to 25 MB each. Hide anything private first.';
+export const FILES_HINT = 'Images up to 10 MB each. Hide anything private first.';
 
 const KEY = /^[a-z0-9]{2,12}$/;
 
@@ -80,7 +80,7 @@ export function defaultForm(type: TypeLike | null): FormSection[] {
   return [
     ...base,
     section('short', 'os', { label: 'Operating system and version', hint: 'Add the version if you know it.', placeholder: 'e.g. Windows 11, macOS 15.2, iOS 18', required: true }),
-    section('files', 'shots', { label: 'Screenshots or recordings', hint: FILES_HINT, maxFiles: 5 }),
+    section('files', 'shots', { label: 'Screenshots', hint: FILES_HINT, maxFiles: 5 }),
   ];
 }
 
