@@ -2,7 +2,7 @@ import { createApp } from './app.js';
 import { ConfigError, loadConfig, loadDotEnv } from './config.js';
 import { migrate } from './db/migrate.js';
 import { openDatabase } from './db/database.js';
-import { startHeartbeat } from './domain/health.js';
+import { githubStats, startHeartbeat } from './domain/health.js';
 import { loggerOptions } from './logging.js';
 
 loadDotEnv();
@@ -26,7 +26,7 @@ if (config.missing.discord.length) server.log.warn({ missing: config.missing.dis
 if (config.missing.github.length) server.log.warn({ missing: config.missing.github }, 'GitHub App credentials incomplete; GitHub connection is disabled');
 
 await server.listen({ host: config.host, port: config.port });
-const stopHeartbeat = startHeartbeat(db, { id: deps.instanceId, role: 'web', log: server.log });
+const stopHeartbeat = startHeartbeat(db, { id: deps.instanceId, role: 'web', extra: () => githubStats(deps), log: server.log });
 if (config.runWorker) {
   worker.start();
   server.log.info('background worker started');

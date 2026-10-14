@@ -639,4 +639,37 @@
     });
     show();
   });
+  // ---- Live sections (Server health) ----------------------------------------------------------
+
+  $$('[data-live]').forEach(function (box) {
+    var ms = Number(box.getAttribute('data-live')) || 15000;
+    var src = box.getAttribute('data-live-src');
+    var status = document.querySelector('[data-live-status]');
+    var text = status && status.querySelector('.t');
+    var last = Date.now();
+    var failed = false;
+    var busy = false;
+    function label() {
+      if (!text) return;
+      var s = Math.round((Date.now() - last) / 1000);
+      text.textContent = failed ? 'Reconnecting…' : s < 5 ? 'Live · updated just now' : 'Live · updated ' + s + ' s ago';
+      status.classList.toggle('off', failed);
+    }
+    function refresh() {
+      if (document.hidden || busy || !src) return;
+      busy = true;
+      fetch(src, { credentials: 'same-origin', headers: { accept: 'text/html' } })
+        .then(function (res) {
+          // A signed-out session redirects to the sign-in page: never paste that in.
+          if (!res.ok || res.headers.get('x-health-partial') !== '1') throw new Error('not live');
+          return res.text();
+        })
+        .then(function (markup) { box.innerHTML = markup; last = Date.now(); failed = false; })
+        .catch(function () { failed = true; })
+        .then(function () { busy = false; label(); });
+    }
+    setInterval(refresh, ms);
+    setInterval(label, 1000);
+    document.addEventListener('visibilitychange', function () { if (!document.hidden && Date.now() - last > ms) refresh(); });
+  });
 })();

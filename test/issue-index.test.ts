@@ -259,11 +259,23 @@ describe('server health', () => {
     expect(h.restarts.triage).toBe(1);
     expect(h.host!.total).toBeGreaterThan(0);
 
-    const page = await env.server.inject({ method: 'GET', url: `${w()}/deployment`, ...get(ws.owner) });
+    const page = await env.server.inject({ method: 'GET', url: `${w()}/health`, ...get(ws.owner) });
+    expect(page.statusCode).toBe(200);
     expect(page.body).toContain('Server health');
     expect(page.body).toContain('Triage and issue sync');
     expect(page.body).toContain('of 256 MB');
+    expect(page.body).toContain('data-live="15000"');
+    expect(page.body).toContain('Background work');
+    // The live part refreshes on its own, without the page around it.
+    const partial = await env.server.inject({ method: 'GET', url: `${w()}/health?partial=1`, ...get(ws.owner) });
+    expect(partial.headers['x-health-partial']).toBe('1');
+    expect(partial.body).not.toContain('<html');
+    expect(partial.body).toContain('Processes');
+    // A process that stopped reporting shows as stopped.
+    await env.db.query(`UPDATE process_status SET seen_at = now_ms() - 600000 WHERE id = 'triage-1'`);
+    const stopped = await env.server.inject({ method: 'GET', url: `${w()}/health?partial=1`, ...get(ws.owner) });
+    expect(stopped.body).toContain('Triage and issue sync isn’t running');
     const mod = await joinAs('moderator', 'mod-health');
-    expect((await env.server.inject({ method: 'GET', url: `${w()}/deployment`, ...get(mod) })).statusCode).toBe(403);
+    expect((await env.server.inject({ method: 'GET', url: `${w()}/health`, ...get(mod) })).statusCode).toBe(403);
   });
 });

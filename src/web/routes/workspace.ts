@@ -2,7 +2,6 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { checkContributorPanel, contributorApps, getContributorSettings, listManualRoles, listTiers, verificationStats } from '../../domain/contributors.js';
 import { checkDiscordCredentials, checkGitHubCredentials, type CredentialCheck } from '../../domain/credentials.js';
-import { healthView, type HealthView, type ProcessRole } from '../../domain/health.js';
 import { checkPanel } from '../../domain/panel.js';
 import { can } from '../../domain/permissions.js';
 import { getDiscordConnection, getGitHubConnection, listApps } from '../../domain/store.js';
@@ -28,10 +27,10 @@ import {
   setting,
   submitBtn,
   tag,
-  when,
   type IconName,
 } from '../ui.js';
 import { ticketList } from './tickets.js';
+import { claudeCard, keyPill, keyStatus, keySummary } from './claude.js';
 
 function stat(href: string, label: string, value: number, warn = false): SafeHtml {
   return html`<a class="stat" href="${href}"><div class="l">${label}</div><div class="v${warn && value > 0 ? ' warn' : ''}">${String(value)}${warn && value > 0 ? icon('triangle-alert', 14) : ''}</div></a>`;
@@ -188,7 +187,7 @@ export function registerWorkspaceRoutes(app: FastifyInstance, web: Web): void {
     if (!ctx) return reply;
     const ws = ctx.workspace;
     const body = html`
-      ${pageHeader({ title: 'Settings', description: 'Workspace-wide settings. Each utility has its own settings tab.' })}
+      ${pageHeader({ title: 'Settings', description: 'Workspace-wide settings and keys shared by features. Each utility has its own settings tab.' })}
       <form method="post" action="${ctx.base}/settings" class="card" data-dirty>
         ${csrfField(ctx.csrf)}
         <div class="card-h"><h2>Workspace</h2></div>
@@ -199,7 +198,8 @@ export function registerWorkspaceRoutes(app: FastifyInstance, web: Web): void {
           <button type="button" class="btn" data-discard data-dirty-enable>Cancel</button>
           ${submitBtn('Save changes', { variant: 'primary', loading: 'Saving…', attrs: raw('data-dirty-enable') })}
         </div></div>
-      </form>`;
+      </form>
+      ${await claudeCard(web, ctx)}`;
     return web.render(reply, ctx, 'Settings', 'settings', body);
   });
 
@@ -225,49 +225,19 @@ export function registerWorkspaceRoutes(app: FastifyInstance, web: Web): void {
 
   app.get('/w/:wid/provider-setup', async (req, reply) => reply.redirect(`/w/${(req.params as { wid: string }).wid}/deployment`));
 
-  const ROLE_NAMES: Record<ProcessRole, string> = { web: 'Web (console and Discord)', worker: 'Filing worker', triage: 'Triage and issue sync' };
-  const mb = (bytes: number) => `${Math.round(bytes / 1048576)} MB`;
-  const gb = (bytes: number) => `${(bytes / 1073741824).toFixed(1)} GB`;
-
-  /** Memory of the server and of each process, against the limit at which PM2 restarts it. */
-  function healthCard(h: HealthView, base: string) {
-    const hot = h.running.filter((p) => p.limit_mb && p.rss_bytes >= p.limit_mb * 1048576 * 0.8);
-    const lowHost = h.host && (h.host.available < 300 * 1048576 || h.host.available / h.host.total < 0.15);
-    const status = !h.running.length ? pill('No reports yet', 'neutral') : hot.length || lowHost ? pill('Check memory', 'warn') : pill('Healthy', 'ok');
-    const restarts = (role: ProcessRole) => h.restarts[role];
-    return html`<div class="card" id="health">
-      <div class="card-h"><div><div class="title"><h2>Server health</h2>${status}</div><div class="desc">Memory each process uses right now. PM2 restarts a process that goes over its limit (max_memory_restart in ecosystem.config.cjs).</div></div>
-        ${iconBtn('refresh-cw', 'Refresh', { size: 'sm', href: `${base}/deployment#health` })}</div>
-      ${hot.length ? notice('warn', `${hot.map((p) => ROLE_NAMES[p.role]).join(', ')} ${hot.length === 1 ? 'is' : 'are'} above 80% of the memory limit`, 'If it reaches the limit, PM2 restarts it. Raise max_memory_restart and MEMORY_LIMIT_MB together in ecosystem.config.cjs, or run fewer filing workers.') : ''}
-      ${h.host ? html`<div class="setting"><div><div class="lbl">Server memory</div><div class="desc">${gb(h.host.available)} available of ${gb(h.host.total)}. “Available” includes cache the system frees when needed.</div></div>
-          <div class="control"><div class="meter-cell"><progress class="bar${lowHost ? ' warn' : ''}" value="${String(h.host.total - h.host.available)}" max="${String(h.host.total)}" aria-label="Server memory used"></progress><span class="small muted">${gb(h.host.total - h.host.available)} used</span></div></div></div>` : ''}
-      ${h.running.length
-        ? html`<div class="table-wrap"><table>
-            <thead><tr><th>Process</th><th>Memory</th><th class="num">Running since</th><th class="num">Restarts (24 h)</th></tr></thead>
-            <tbody>${h.running.map((p) => {
-              const limit = p.limit_mb ? p.limit_mb * 1048576 : null;
-              const near = limit && p.rss_bytes >= limit * 0.8;
-              return html`<tr>
-                <td><div class="cell-title">${ROLE_NAMES[p.role] ?? p.role}</div><div class="sub mono">PID ${String(p.pid)}</div></td>
-                <td><div class="meter-cell">${limit ? html`<progress class="bar${near ? ' warn' : ''}" value="${String(Math.min(p.rss_bytes, limit))}" max="${String(limit)}" aria-label="Memory used"></progress>` : ''}
-                  <span class="small">${mb(p.rss_bytes)}${limit ? html`<span class="muted"> of ${String(p.limit_mb)} MB</span>` : html`<span class="muted"> · no limit set</span>`}</span></div></td>
-                <td class="num">${when(p.started_at)}</td>
-                <td class="num">${restarts(p.role) ? html`<span class="${restarts(p.role) > 3 ? 'warn-text' : ''}">${String(restarts(p.role))}</span>` : '0'}</td></tr>`;
-            })}</tbody></table></div>
-          <div class="card-note">Updated every 30 seconds. Restarts include deploys (pm2 reload). Reload this page to refresh.</div>`
-        : html`<div class="card-b"><p class="small muted">No process has reported yet. Reports start within a minute of the processes running this version.</p></div>`}
-    </div>`;
-  }
-
   app.get('/w/:wid/deployment', async (req, reply) => {
     const ctx = await web.requireWorkspace(req, reply);
     if (!ctx) return reply;
     const c = deps.config;
-    const [discordCheck, githubCheck, health] = await Promise.all([checkDiscordCredentials(deps), checkGitHubCredentials(deps), healthView(deps.db)]);
+    const [discordCheck, githubCheck, claude] = await Promise.all([
+      checkDiscordCredentials(deps),
+      checkGitHubCredentials(deps),
+      keyStatus(web, ctx.workspace.id, { fresh: (req.query as { recheck?: string }).recheck === 'claude' }),
+    ]);
     const state = (missing: string[], check: CredentialCheck) =>
       missing.length ? pill('Incomplete', 'warn') : check.ok ? pill('Working', 'ok') : pill('Credentials rejected', 'danger');
     const detail = (missing: string[], check: CredentialCheck) => (missing.length ? `Missing: ${missing.join(', ')}` : check.detail);
-    const allOk = !c.missing.discord.length && !c.missing.github.length && discordCheck.ok && githubCheck.ok;
+    const allOk = !c.missing.discord.length && !c.missing.github.length && discordCheck.ok && githubCheck.ok && claude.state !== 'rejected';
     const provider = (o: { icon: IconName; name: string; missing: string[]; check: CredentialCheck; label: string }) => html`<div class="line provider">
       <span class="tile">${icon(o.icon)}</span>
       <div class="grow"><div class="name">${o.name}</div><div class="sub">${detail(o.missing, o.check)}</div></div>
@@ -283,12 +253,11 @@ export function registerWorkspaceRoutes(app: FastifyInstance, web: Web): void {
         <div class="card-h"><h2>Providers</h2></div>
         ${provider({ icon: 'bot', name: 'Discord application', missing: c.missing.discord, check: discordCheck, label: 'Discord' })}
         ${provider({ icon: 'github', name: 'GitHub App', missing: c.missing.github, check: githubCheck, label: 'GitHub' })}
-        <div class="line provider"><span class="tile">${icon('bot')}</span>
-          <div class="grow"><div class="name">Claude API <span class="muted">(optional)</span></div><div class="sub">${c.anthropicApiKey ? 'ANTHROPIC_API_KEY is set. Workspaces without their own key use it for triage.' : 'For AI triage. Workspaces add their own key in Tickets › Triage, or set ANTHROPIC_API_KEY as a fallback.'}</div></div>
-          ${c.anthropicApiKey ? pill('Fallback key set', 'ok') : pill('Not set', 'neutral')}</div>
+        <div class="line provider"><span class="tile">${icon('sparkles')}</span>
+          <div class="grow"><div class="name">Claude API</div><div class="sub">${keySummary(claude, ctx.base)}${claude.source === 'workspace' && c.anthropicApiKey ? ' ANTHROPIC_API_KEY on the server is a fallback for workspaces without a key.' : ''}</div></div>
+          ${keyPill(claude)}${claude.state === 'missing' ? linkBtn(`${ctx.base}/settings#claude`, 'Add key', { size: 'sm', trail: 'arrow-right' }) : iconBtn('refresh-cw', 'Re-test the Claude key', { size: 'sm', href: `${ctx.base}/deployment?recheck=claude` })}</div>
       </div>
 
-      ${healthCard(health, ctx.base)}
 
       <div class="card">
         <div class="card-h"><div><h2>Discord Developer Portal</h2><div class="desc">Applications › your app.</div></div>${linkBtn('https://discord.com/developers/applications', 'Open portal', { variant: 'ghost', size: 'sm', trail: 'arrow-up-right', external: true })}</div>

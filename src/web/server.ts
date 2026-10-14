@@ -31,6 +31,8 @@ import { registerContributorRoutes } from './routes/contributors.js';
 import { registerTicketTypeRoutes } from './routes/ticket-types.js';
 import { registerFileRoutes, UPLOAD_ROUTE } from './routes/files.js';
 import { registerIssueRoutes } from './routes/issues.js';
+import { registerClaudeRoutes } from './routes/claude.js';
+import { registerHealthRoutes } from './routes/health.js';
 import { MAX_FILE_BYTES } from '../domain/files.js';
 
 declare module 'fastify' {
@@ -237,6 +239,8 @@ export async function buildServer(deps: Deps, processor: Processor, opts: { logg
   registerTicketTypeRoutes(app, web);
   registerFileRoutes(app, web);
   registerIssueRoutes(app, web);
+  registerClaudeRoutes(app, web);
+  registerHealthRoutes(app, web);
 
   return app;
 }

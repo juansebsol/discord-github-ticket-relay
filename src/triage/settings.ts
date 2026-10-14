@@ -9,6 +9,9 @@ import { z } from 'zod';
 import type { Queryable } from '../db/database.js';
 import type { SecretBox } from '../lib/crypto.js';
 import type { Deps } from '../domain/types.js';
+import { getClaudeKey, removeClaudeKey, resolveClaudeKey, setClaudeKey } from '../domain/claude-key.js';
+
+export { keyHint, looksLikeApiKey } from '../domain/claude-key.js';
 
 export const DEFAULT_MODEL = 'claude-haiku-5-5';
 export const MODES = ['off', 'suggest', 'auto'] as const;
@@ -191,30 +194,22 @@ interface Row {
   paused_reason: PauseReason | null;
   paused_detail: string | null;
   paused_at: Date | null;
-  api_key_enc: string | null;
-  api_key_hint: string | null;
-  added_by_name: string | null;
-  api_key_added_at: Date | null;
 }
 
 async function row(q: Queryable, workspaceId: string): Promise<Row | null> {
-  const { rows } = await q.query<Row>(
-    `SELECT t.*, COALESCE(u.display_name, u.username) AS added_by_name FROM triage_settings t
-     LEFT JOIN users u ON u.id = t.api_key_added_by WHERE t.workspace_id = $1`,
-    [workspaceId],
-  );
+  const { rows } = await q.query<Row>('SELECT * FROM triage_settings WHERE workspace_id = $1', [workspaceId]);
   return rows[0] ?? null;
 }
 
 export async function getTriageSettings(q: Queryable, workspaceId: string): Promise<TriageSettings> {
-  const r = await row(q, workspaceId);
+  const [r, key] = await Promise.all([row(q, workspaceId), getClaudeKey(q, workspaceId)]);
   return {
     workspaceId,
     enabled: Boolean(r?.enabled),
     enabledAt: r?.enabled_at ?? null,
     config: parseTriageConfig(r?.triage_config),
     paused: r?.paused_reason ? { reason: r.paused_reason, detail: r.paused_detail, at: r.paused_at ?? new Date() } : null,
-    key: r?.api_key_enc ? { hint: r.api_key_hint ?? 'sk-ant-…', addedBy: r.added_by_name, addedAt: r.api_key_added_at } : null,
+    key: key ? { hint: key.hint, addedBy: key.addedBy, addedAt: key.addedAt } : null,
   };
 }
 
@@ -241,32 +236,13 @@ export async function setTriageEnabled(q: Queryable, workspaceId: string, enable
   );
 }
 
-/** A short, non-secret reminder of which key is stored. */
-export function keyHint(key: string): string {
-  return key.startsWith('sk-ant-') ? `sk-ant-…${key.slice(-4)}` : `${key.slice(0, 4)}…${key.slice(-4)}`;
-}
-
-export function looksLikeApiKey(key: string): boolean {
-  return /^sk-ant-[A-Za-z0-9_-]{20,}$/.test(key);
-}
-
-/** Stores a new key (encrypted) and resumes triage if it was paused. */
+/** The workspace's Claude key now lives in Settings (domain/claude-key.ts); these keep older callers working. */
 export async function setApiKey(q: Queryable, box: SecretBox, workspaceId: string, key: string, userId: string): Promise<void> {
-  await ensureRow(q, workspaceId);
-  await q.query(
-    `UPDATE triage_settings SET api_key_enc = $2, api_key_hint = $3, api_key_added_by = $4, api_key_added_at = now_ms(),
-       paused_reason = NULL, paused_detail = NULL, paused_at = NULL, updated_at = now_ms()
-     WHERE workspace_id = $1`,
-    [workspaceId, box.encrypt(key), keyHint(key), userId],
-  );
+  await setClaudeKey(q, box, workspaceId, key, userId, null);
 }
 
 export async function removeApiKey(q: Queryable, workspaceId: string): Promise<void> {
-  await q.query(
-    `UPDATE triage_settings SET api_key_enc = NULL, api_key_hint = NULL, api_key_added_by = NULL, api_key_added_at = NULL, updated_at = now_ms()
-     WHERE workspace_id = $1`,
-    [workspaceId],
-  );
+  await removeClaudeKey(q, workspaceId);
 }
 
 export async function pauseTriage(q: Queryable, workspaceId: string, reason: PauseReason, detail: string | null): Promise<void> {
@@ -283,16 +259,7 @@ export async function resumeTriage(q: Queryable, workspaceId: string): Promise<v
 
 /** The workspace's own key, or the deployment's fallback key from ANTHROPIC_API_KEY. */
 export async function resolveApiKey(deps: Pick<Deps, 'db' | 'box' | 'config'>, workspaceId: string): Promise<{ key: string; source: 'workspace' | 'server' } | null> {
-  const { rows } = await deps.db.query<{ api_key_enc: string | null }>('SELECT api_key_enc FROM triage_settings WHERE workspace_id = $1', [workspaceId]);
-  const enc = rows[0]?.api_key_enc;
-  if (enc) {
-    try {
-      return { key: deps.box.decrypt(enc), source: 'workspace' };
-    } catch {
-      return null;
-    }
-  }
-  return deps.config.anthropicApiKey ? { key: deps.config.anthropicApiKey, source: 'server' } : null;
+  return resolveClaudeKey(deps, workspaceId);
 }
 
 /** Tickets triaged this calendar month (UTC) and the tokens used, for the limit and the usage line. */

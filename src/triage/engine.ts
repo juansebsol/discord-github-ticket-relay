@@ -8,6 +8,7 @@
  */
 import type { Queryable } from '../db/database.js';
 import { createdWithNoteMessage } from '../discord/messages.js';
+import { recordKeyCheck, stateFromPause } from '../domain/claude-key.js';
 import { cleanUpSpam, fileCounts } from '../domain/files.js';
 import { decryptPayload, getSubmission, addEvent } from '../domain/submissions.js';
 import { getDiscordConnection, getGitHubConnection } from '../domain/store.js';
@@ -403,6 +404,8 @@ export class TriageEngine {
       const e = err instanceof TriageAiError ? err : new TriageAiError('retry', (err as Error).message);
       if (e.action === 'pause') {
         await pauseTriage(deps.db, row.workspace_id, e.pauseReason ?? 'rejected', e.message);
+        // Settings › Claude API shows the key's problem too.
+        if (key.source === 'workspace' && (e.pauseReason === 'key_invalid' || e.pauseReason === 'credits')) await recordKeyCheck(deps.db, row.workspace_id, stateFromPause(e.pauseReason), e.message);
         deps.log.warn({ workspace: row.workspace_id, reason: e.pauseReason }, 'triage paused');
         return this.requeue(row);
       }
@@ -410,6 +413,7 @@ export class TriageEngine {
       return this.retry(row, e.message);
     }
 
+    if (key.source === 'workspace') await recordKeyCheck(deps.db, row.workspace_id, 'working', null).catch(() => {});
     const verdict = normalizeVerdict(result.verdict, new Set(shown.map((i) => i.number)));
     if (verdict.duplicates.length && c.duplicate.mode !== 'off') await this.pickOriginal(verdict, repoRef);
     const dc = await getDiscordConnection(deps.db, row.workspace_id);

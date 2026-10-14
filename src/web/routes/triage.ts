@@ -19,23 +19,21 @@ import {
   PRIORITIES,
   anyActionOn,
   getTriageSettings,
-  looksLikeApiKey,
   monthlyUsage,
   parseTriageConfig,
   pauseMessage,
-  removeApiKey,
   resolveApiKey,
   resumeTriage,
   saveTriageConfig,
-  setApiKey,
   setTriageEnabled,
   type Flag,
   type Mode,
   type TriageConfig,
 } from '../../triage/settings.js';
+import { keyPill, keyStatus, keySummary } from './claude.js';
 import { setFlash } from '../session.js';
 import type { Web, WorkspaceRequestContext } from '../server.js';
-import { btn, csrfField, dialog, icon, notice, pill, plural, postBtn, segRadios, selectWrap, setting, submitBtn, switchInput, tag, timeAgo, typeIcon } from '../ui.js';
+import { csrfField, icon, linkBtn, notice, pill, plural, postBtn, segRadios, selectWrap, setting, submitBtn, switchInput, tag, typeIcon } from '../ui.js';
 import { textField } from './panel.js';
 import { ticketsHeader } from './tickets.js';
 
@@ -97,6 +95,7 @@ export function registerTriageRoutes(app: FastifyInstance, web: Web): void {
       getDiscordConnection(deps.db, wid),
     ]);
     const guild = deps.discord && conn?.status === 'active' ? await inspectGuild(deps.discord, conn.guild_id) : null;
+    const keyState = await keyStatus(web, wid);
     const c = settings.config;
     const { models: available, error: modelError } = await models(key?.key ?? null);
     const price = PRICES[c.model];
@@ -134,32 +133,9 @@ export function registerTriageRoutes(app: FastifyInstance, web: Web): void {
         })}
       </div></div>`;
 
-    const keyCard = html`<div class="card">
-      <div class="card-h"><div><h2>Claude API key</h2><div class="desc">Stored encrypted. After saving, nobody can view it, including you; you can only replace or remove it. Set a monthly spend limit for the key in the Anthropic Console.</div></div></div>
-      ${settings.key
-        ? html`${setting('API key', html`Added${settings.key.addedBy ? ` by ${settings.key.addedBy}` : ''}${settings.key.addedAt ? ` ${timeAgo(settings.key.addedAt)}` : ''}`, html`<code>${settings.key.hint}</code>`)}
-            <div class="card-f"><span></span><div class="end">
-              ${postBtn(`${b}/tickets/triage/key/remove`, 'Remove', ctx.csrf, { variant: 'ghost danger', icon: 'trash-2', confirm: { title: 'Remove the API key?', body: deps.config.anthropicApiKey ? 'Triage falls back to the server’s key.' : 'Triage pauses until someone adds a key.', label: 'Remove key', danger: true } })}
-              ${postBtn(`${b}/tickets/triage/key/test`, 'Test key', ctx.csrf, { icon: 'refresh-cw', loading: 'Testing…' })}
-              ${btn('Replace', { variant: 'primary', icon: 'key-round', attrs: raw('data-dialog="key-dialog"') })}
-            </div></div>`
-        : html`${key?.source === 'server' ? html`<div class="card-b tight">${notice('info', 'Using the server’s key', 'ANTHROPIC_API_KEY is set on the server, so triage works without a key here. Add one to bill your own Anthropic account.')}</div>` : ''}
-            <form method="post" action="${b}/tickets/triage/key">${csrfField(ctx.csrf)}
-              ${setting('API key', 'Create one at console.anthropic.com › API keys. It starts with sk-ant-.', html`<input type="password" name="api_key" autocomplete="off" spellcheck="false" placeholder="sk-ant-…" required aria-label="Claude API key">`)}
-              <div class="card-f"><span></span><div class="end">${submitBtn('Save key', { variant: 'primary', loading: 'Checking…' })}</div></div>
-            </form>`}
-    </div>
-    ${settings.key ? dialog('key-dialog', {
-      title: 'Replace the API key',
-      action: `${b}/tickets/triage/key`,
-      csrf: ctx.csrf,
-      body: html`<p>The new key is checked with Claude before it replaces <code>${settings.key.hint}</code>.</p>
-        <div class="field"><label for="new-key">New API key</label><input id="new-key" type="password" name="api_key" class="full" autocomplete="off" spellcheck="false" placeholder="sk-ant-…" required autofocus></div>`,
-      submit: submitBtn('Replace key', { variant: 'primary', loading: 'Checking…' }),
-    }) : ''}`;
-
     const body = html`
       ${await ticketsHeader(web, ctx, 'triage')}
+      ${!key ? notice('warn', 'Triage needs a Claude API key', 'Add the workspace’s key in Settings. It’s shared by every feature that uses Claude.', { action: linkBtn(`${b}/settings#claude`, 'Open Settings', { size: 'sm', trail: 'arrow-right' }) }) : ''}
       ${settings.enabled && settings.paused
         ? notice('warn', 'Triage is paused', `${pauseMessage(settings.paused.reason, settings.paused.detail, c.model)} Tickets are still being filed normally.`, { action: postBtn(`${b}/tickets/triage/resume`, 'Resume', ctx.csrf, { size: 'sm', icon: 'rotate-ccw' }) })
         : ''}
@@ -168,11 +144,11 @@ export function registerTriageRoutes(app: FastifyInstance, web: Web): void {
         : ''}
       <div class="card">
         <div class="card-h"><div><div class="title"><h2>AI triage</h2>${status}</div><div class="desc">Claude reads each ticket after it’s filed and flags priority, duplicates and spam. It runs in its own worker: if it’s off, paused or out of credits, tickets are still filed exactly as before.</div></div></div>
-        ${setting('Triage', key ? 'Only tickets filed after you turn it on are triaged.' : 'Add a Claude API key first.', html`<form method="post" action="${b}/tickets/triage/enabled" data-async class="inline-form">${csrfField(ctx.csrf)}<input type="hidden" name="set" value="1">
+        ${setting('Claude API key', keySummary(keyState, b), keyPill(keyState))}
+        ${setting('Triage', key ? 'Only tickets filed after you turn it on are triaged.' : html`Needs a Claude API key. <a href="${b}/settings#claude">Add one in Settings</a>.`, html`<form method="post" action="${b}/tickets/triage/enabled" data-async class="inline-form">${csrfField(ctx.csrf)}<input type="hidden" name="set" value="1">
           ${switchInput({ name: 'enabled', checked: settings.enabled, label: 'Triage on', disabled: !key && !settings.enabled })}<button type="submit" class="btn sm nojs">Save</button></form>`, { switchRow: true })}
         ${setting('This month', null, html`<span class="value">${plural(usage.triaged, 'ticket')} of ${String(c.monthlyLimit)}${cost !== null ? ` · about $${cost < 0.01 && cost > 0 ? '0.01' : cost.toFixed(2)}` : ''}${usage.inputTokens ? ` · ${(usage.inputTokens + usage.outputTokens).toLocaleString('en-US')} tokens` : ''}</span>`)}
       </div>
-      ${keyCard}
       <form method="post" action="${b}/tickets/triage" class="stack" data-dirty>
         ${csrfField(ctx.csrf)}
         <div class="card">
@@ -307,54 +283,6 @@ export function registerTriageRoutes(app: FastifyInstance, web: Web): void {
     await setTriageEnabled(deps.db, ctx.workspace.id, enabled);
     const config = (await getTriageSettings(deps.db, ctx.workspace.id)).config;
     return respond(true, enabled ? (anyActionOn(config) ? 'Triage is on for new tickets' : 'Triage is on, but every action is off. Turn one on below.') : 'Triage is off. Tickets are filed as usual.');
-  });
-
-  app.post('/w/:wid/tickets/triage/key', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply);
-    if (!ctx) return reply;
-    const key = String((req.body as { api_key?: string }).api_key ?? '').trim();
-    try {
-      if (!looksLikeApiKey(key)) throw new UserFacingError('That doesn’t look like a Claude API key. Keys start with sk-ant-.');
-      let warning = '';
-      try {
-        await web.triage.ai.listModels(key);
-      } catch (err) {
-        const e = classifyAiError(err);
-        if (e.pauseReason === 'key_invalid') throw new UserFacingError('Claude rejected this key. Check that you copied all of it.');
-        warning = e.pauseReason === 'credits' ? ' The Anthropic account is out of credits, so triage will pause until you add some.' : ' Claude couldn’t be reached to check it right now.';
-      }
-      await setApiKey(deps.db, deps.box, ctx.workspace.id, key, ctx.user.id);
-      setFlash(reply, warning ? 'warn' : 'success', `API key saved.${warning}`);
-    } catch (err) {
-      if (!(err instanceof UserFacingError)) throw err;
-      setFlash(reply, 'error', err.message);
-    }
-    return reply.redirect(back(ctx));
-  });
-
-  app.post('/w/:wid/tickets/triage/key/remove', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply);
-    if (!ctx) return reply;
-    await removeApiKey(deps.db, ctx.workspace.id);
-    setFlash(reply, 'success', 'API key removed');
-    return reply.redirect(back(ctx));
-  });
-
-  app.post('/w/:wid/tickets/triage/key/test', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply);
-    if (!ctx) return reply;
-    const key = await resolveApiKey(deps, ctx.workspace.id);
-    if (!key) {
-      setFlash(reply, 'error', 'There’s no API key to test.');
-      return reply.redirect(back(ctx));
-    }
-    try {
-      const list = await web.triage.ai.listModels(key.key);
-      setFlash(reply, 'success', `The key works. ${plural(list.length, 'model')} available.`);
-    } catch (err) {
-      setFlash(reply, 'error', `The key didn’t work: ${classifyAiError(err).message}`);
-    }
-    return reply.redirect(back(ctx));
   });
 
   app.post('/w/:wid/tickets/triage/resume', async (req, reply) => {

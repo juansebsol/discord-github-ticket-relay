@@ -350,30 +350,48 @@ describe('rules by ticket type', () => {
 });
 
 describe('triage settings and the API key', () => {
-  it('never shows the key, checks it with Claude, and lets any admin replace or remove it', async () => {
-    const url = `${w()}/tickets/triage/key`;
+  it('keeps one Claude key in Settings: never shown, checked with Claude, replaceable by any admin', async () => {
+    const url = `${w()}/settings/claude/key`;
     await env.server.inject({ method: 'POST', url, ...form(ws.owner, { api_key: 'not-a-key' }) });
     await env.server.inject({ method: 'POST', url, ...form(ws.owner, { api_key: 'sk-ant-wrong-key-0123456789abcdef' }) });
     expect((await getTriageSettings(env.db, wid())).key).toBeNull();
 
+    // Triage points to Settings while there's no key.
+    let triagePage = await env.server.inject({ method: 'GET', url: `${w()}/tickets/triage`, ...get(ws.owner) });
+    expect(triagePage.body).toContain('Triage needs a Claude API key');
+    expect(triagePage.body).toContain(`${w()}/settings#claude`);
+    let deployment = await env.server.inject({ method: 'GET', url: `${w()}/deployment`, ...get(ws.owner) });
+    expect(deployment.body).toContain('No Claude API key yet');
+
     await env.server.inject({ method: 'POST', url, ...form(ws.owner, { api_key: KEY }) });
-    const page = await env.server.inject({ method: 'GET', url: `${w()}/tickets/triage`, ...get(ws.owner) });
-    expect(page.statusCode).toBe(200);
-    expect(page.body).not.toContain(KEY);
-    expect(page.body).toContain('sk-ant-…cdef');
-    expect(page.body).toContain('Claude Haiku 5.5');
-    expect(page.body).not.toContain('Claude Old'); // retired models aren't offered
-    const stored = (await env.db.query('SELECT api_key_enc FROM triage_settings WHERE workspace_id = $1', [wid()])).rows[0].api_key_enc;
+    const settings = await env.server.inject({ method: 'GET', url: `${w()}/settings`, ...get(ws.owner) });
+    expect(settings.statusCode).toBe(200);
+    expect(settings.body).not.toContain(KEY);
+    expect(settings.body).toContain('sk-ant-…cdef');
+    expect(settings.body).toContain('>Working</span>');
+    expect(settings.body).toContain('AI triage · Off');
+    triagePage = await env.server.inject({ method: 'GET', url: `${w()}/tickets/triage`, ...get(ws.owner) });
+    expect(triagePage.body).not.toContain('Triage needs a Claude API key');
+    expect(triagePage.body).toContain('sk-ant-…cdef');
+    expect(triagePage.body).toContain('Claude Haiku 5.5');
+    expect(triagePage.body).not.toContain('Claude Old'); // retired models aren't offered
+    deployment = await env.server.inject({ method: 'GET', url: `${w()}/deployment`, ...get(ws.owner) });
+    expect(deployment.body).toContain('sk-ant-…cdef');
+    expect(deployment.body).toContain('>Working</span>');
+    const stored = (await env.db.query('SELECT key_enc FROM workspace_ai WHERE workspace_id = $1', [wid()])).rows[0].key_enc;
     expect(stored).not.toContain(KEY);
+
+    const test = await env.server.inject({ method: 'POST', url: `${w()}/settings/claude/test`, ...form(ws.owner) });
+    expect(test.statusCode).toBe(302);
 
     const admin = await joinAs('admin', 'jamie');
     await env.server.inject({ method: 'POST', url, ...form(admin, { api_key: OTHER_KEY }) });
     expect((await getTriageSettings(env.db, wid())).key).toMatchObject({ addedBy: 'jamie' });
-    await env.server.inject({ method: 'POST', url: `${url}/remove`, ...form(admin) });
+    await env.server.inject({ method: 'POST', url: `${w()}/settings/claude/remove`, ...form(admin) });
     expect((await getTriageSettings(env.db, wid())).key).toBeNull();
 
     const mod = await joinAs('moderator', 'mia');
-    expect((await env.server.inject({ method: 'GET', url: `${w()}/tickets/triage`, ...get(mod) })).statusCode).toBe(403);
+    expect((await env.server.inject({ method: 'GET', url: `${w()}/settings`, ...get(mod) })).statusCode).toBe(403);
     expect((await env.server.inject({ method: 'POST', url, ...form(mod, { api_key: KEY }) })).statusCode).toBe(403);
   });
 

@@ -3,7 +3,7 @@ import { createApp } from './app.js';
 import { ConfigError, loadConfig, loadDotEnv } from './config.js';
 import { migrate } from './db/migrate.js';
 import { openDatabase } from './db/database.js';
-import { startHeartbeat } from './domain/health.js';
+import { githubStats, startHeartbeat } from './domain/health.js';
 import { loggerOptions } from './logging.js';
 
 /**
@@ -26,7 +26,7 @@ const db = openDatabase(config.databasePath);
 await migrate(db, (m) => log.info(m));
 const { triage, deps } = await createApp({ config, db, log });
 triage.start();
-const stopHeartbeat = startHeartbeat(db, { id: deps.instanceId, role: 'triage', log });
+const stopHeartbeat = startHeartbeat(db, { id: deps.instanceId, role: 'triage', extra: () => githubStats(deps), log });
 log.info('triage worker started');
 
 async function shutdown() {

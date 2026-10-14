@@ -92,9 +92,10 @@ they rotate out.
 
 ## Server health
 
-Each process reports its memory every 30 seconds, shown under **Deployment › Server health**
-with restarts in the last 24 hours. The limit shown comes from `MEMORY_LIMIT_MB` in
-`ecosystem.config.cjs`; keep it equal to that app's `max_memory_restart` when you change one.
+Each process reports its memory, CPU and event-loop delay every 30 seconds. The **Server health**
+page in the console shows them live (with 24-hour charts, restarts, disk, the GitHub API rate
+limit and alerts). The limit shown comes from `MEMORY_LIMIT_MB` in `ecosystem.config.cjs`; keep
+it equal to that app's `max_memory_restart` when you change one.
 
 ## Scaling
 

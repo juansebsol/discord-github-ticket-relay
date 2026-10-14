@@ -15,6 +15,8 @@ const NAMES = [
   // Forms and files
   'align-left', 'clipboard-list', 'file-x', 'heading', 'paperclip', 'scan-search', 'text',
   'text-cursor-input', 'upload',
+  // Server health and Claude
+  'activity', 'cpu', 'database', 'gauge', 'hard-drive', 'memory-stick', 'sparkles', 'timer',
 ];
 
 const require = createRequire(import.meta.url);

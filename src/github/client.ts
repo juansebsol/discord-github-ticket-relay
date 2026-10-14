@@ -103,8 +103,17 @@ function toRepo(r: any): RepoInfo {
  * Thin GitHub REST client for a GitHub App. Uses short-lived installation access
  * tokens; nothing long-lived is stored besides the app private key in deployment config.
  */
+export interface RateLimit {
+  limit: number;
+  remaining: number;
+  resetAt: Date;
+  at: Date;
+}
+
 export class GitHubClient {
   private readonly tokenCache = new Map<number, { token: string; expiresAt: number }>();
+  /** The latest core API rate limit GitHub reported for installation requests (Server health). */
+  rateLimit: RateLimit | null = null;
 
   constructor(
     private readonly config: GitHubAppConfig,
@@ -163,6 +172,12 @@ export class GitHubClient {
       },
       timeoutMs,
     );
+    if (auth.startsWith('token ') && (res.headers.get('x-ratelimit-resource') ?? 'core') === 'core') {
+      const limit = Number(res.headers.get('x-ratelimit-limit'));
+      const remaining = Number(res.headers.get('x-ratelimit-remaining'));
+      const reset = Number(res.headers.get('x-ratelimit-reset'));
+      if (Number.isFinite(limit) && limit > 0 && Number.isFinite(remaining)) this.rateLimit = { limit, remaining, resetAt: new Date(reset * 1000), at: new Date() };
+    }
     const text = await res.text();
     let data: any = null;
     if (text) {
