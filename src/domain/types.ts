@@ -141,6 +141,11 @@ export interface SubmissionRow {
   member_notice: string | null;
   ticket_type_name: string | null;
   title_prefix: string | null;
+  /** The GitHub issue's state as last seen by a files scan. */
+  issue_state: 'open' | 'closed' | 'missing' | null;
+  issue_state_reason: string | null;
+  issue_closed_at: Date | null;
+  issue_checked_at: Date | null;
   resolved_by: string | null;
   resolution_note: string | null;
   created_at: Date;
@@ -151,6 +156,8 @@ export interface SubmissionRow {
 export interface TicketPayload {
   title: string;
   description?: string;
+  /** Answers to the ticket type's own questions, labelled with the question. */
+  answers?: { question: string; value: string }[];
 }
 
 /** An error whose message is safe to show to admins. */

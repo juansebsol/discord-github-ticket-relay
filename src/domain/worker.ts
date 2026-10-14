@@ -1,3 +1,4 @@
+import { runFileCleanup } from './files.js';
 import { claimNext } from './submissions.js';
 import type { Processor } from './processor.js';
 import type { Deps } from './types.js';
@@ -50,6 +51,8 @@ export class Worker {
         if (Date.now() - this.lastMaintenance > (this.opts.maintenanceMs ?? 10 * 60_000)) {
           this.lastMaintenance = Date.now();
           await runMaintenance(this.deps);
+          // Daily per workspace, only where an admin turned automatic cleanup on.
+          await runFileCleanup(this.deps);
         }
       } catch (err) {
         this.deps.log.error({ err: (err as Error).message }, 'worker loop error');

@@ -49,6 +49,9 @@ export interface IssueDetail {
   body: string;
   state: 'open' | 'closed';
   labels: string[];
+  /** When and why it was closed ("completed", "not_planned", "duplicate"). */
+  closedAt: Date | null;
+  stateReason: string | null;
 }
 
 function toIssueDetail(data: any): IssueDetail {
@@ -59,6 +62,8 @@ function toIssueDetail(data: any): IssueDetail {
     body: typeof data.body === 'string' ? data.body : '',
     state: data.state === 'closed' ? 'closed' : 'open',
     labels: ((data.labels ?? []) as any[]).map((l) => (typeof l === 'string' ? l : String(l?.name ?? ''))).filter(Boolean),
+    closedAt: typeof data.closed_at === 'string' ? new Date(data.closed_at) : null,
+    stateReason: typeof data.state_reason === 'string' ? data.state_reason : null,
   };
 }
 
@@ -313,6 +318,16 @@ export class GitHubClient {
     await this.request(
       'POST',
       `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/${issueNumber}/comments`,
+      await this.asInstallation(installationId),
+      { body },
+    );
+  }
+
+  /** Replaces the issue's body (used to keep its Attachments section current). */
+  async updateIssueBody(installationId: number, owner: string, repo: string, issueNumber: number, body: string): Promise<void> {
+    await this.request(
+      'PATCH',
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/${issueNumber}`,
       await this.asInstallation(installationId),
       { body },
     );

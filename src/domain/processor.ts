@@ -2,6 +2,7 @@ import * as messages from '../discord/messages.js';
 import { GitHubApiError, type CreatedIssue } from '../github/client.js';
 import { buildIssueBody, buildIssueTitle, submissionMarker } from '../github/issue-content.js';
 import { NetworkError } from '../lib/http.js';
+import { fileCounts, filesBlock, listTicketFiles, storePendingFiles } from './files.js';
 import { setGitHubStatus } from './store.js';
 import { addEvent, claimById, decryptPayload, getSubmission, updateLeased } from './submissions.js';
 import { UserFacingError, type Deps, type SubmissionRow } from './types.js';
@@ -134,6 +135,10 @@ export class Processor {
         }
       }
 
+      // Member files are downloaded from Discord first (failures are noted, never fatal).
+      await storePendingFiles(deps, sub);
+      const files = filesBlock(await listTicketFiles(deps.db, sub.id), deps.config.publicUrl);
+
       phase = 'create';
       const started = await updateLeased(deps.db, sub, deps.instanceId, { github_request_started_at: new Date(), attempts: sub.attempts + 1 }, false);
       if (!started) return; // lease lost; another worker owns it now
@@ -156,6 +161,8 @@ export class Processor {
           channelId: sub.discord_channel_id,
           isTest: sub.source === 'admin_test',
           ticketType: sub.ticket_type_name,
+          answers: payload.answers,
+          filesBlock: files,
         }),
         labels,
       });
@@ -297,7 +304,10 @@ export class Processor {
     if (sub.interaction_token_expires_at.getTime() < Date.now() || sub.member_notice === kind) return;
     let payload: ReturnType<typeof messages.createdMessage>;
     if (kind === 'created') {
-      payload = messages.createdMessage({ appName: sub.app_name, ref: sub.ref, issueNumber: sub.issue_number!, issueUrl: sub.issue_url!, repoPrivate: sub.repo_private });
+      payload = messages.createdMessage({
+        appName: sub.app_name, ref: sub.ref, issueNumber: sub.issue_number!, issueUrl: sub.issue_url!, repoPrivate: sub.repo_private,
+        files: await fileCounts(deps.db, sub.id),
+      });
     } else if (kind === 'queued') payload = messages.queuedMessage({ appName: sub.app_name, ref: sub.ref });
     else if (kind === 'uncertain') payload = messages.uncertainMessage({ appName: sub.app_name, ref: sub.ref });
     else payload = messages.failedMessage({ appName: sub.app_name, ref: sub.ref });

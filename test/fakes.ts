@@ -14,7 +14,7 @@ export interface FakeRepo {
   has_issues: boolean;
   archived: boolean;
   labels: string[];
-  issues: { number: number; title: string; body: string; labels: string[]; created_at: string; user: string; state?: 'open' | 'closed'; state_reason?: string | null; comments?: string[] }[];
+  issues: { number: number; title: string; body: string; labels: string[]; created_at: string; user: string; state?: 'open' | 'closed'; state_reason?: string | null; closed_at?: string | null; comments?: string[]; bodyEdits?: number }[];
 }
 
 /** How the next create-issue call behaves. */
@@ -97,7 +97,7 @@ export class FakeGitHub {
   searchCalls = 0;
 
   issueJson(r: FakeRepo, i: FakeRepo['issues'][number]) {
-    return { number: i.number, title: i.title, body: i.body, state: i.state ?? 'open', labels: i.labels.map((name) => ({ name })), html_url: `https://github.com/${r.owner}/${r.name}/issues/${i.number}` };
+    return { number: i.number, title: i.title, body: i.body, state: i.state ?? 'open', state_reason: i.state_reason ?? null, closed_at: i.closed_at ?? null, labels: i.labels.map((name) => ({ name })), html_url: `https://github.com/${r.owner}/${r.name}/issues/${i.number}` };
   }
 
   private repoJson(r: FakeRepo) {
@@ -199,8 +199,15 @@ export class FakeGitHub {
         return json(201, { id: issue.comments.length });
       }
       if (method === 'PATCH') {
-        if (body.state) issue.state = body.state;
+        if (body.state) {
+          if (body.state === 'closed' && issue.state !== 'closed') issue.closed_at = new Date().toISOString();
+          issue.state = body.state;
+        }
         if ('state_reason' in body) issue.state_reason = body.state_reason;
+        if (typeof body.body === 'string') {
+          issue.body = body.body;
+          issue.bodyEdits = (issue.bodyEdits ?? 0) + 1;
+        }
       }
       return json(200, this.issueJson(r!, issue));
     }
@@ -276,6 +283,23 @@ export class FakeDiscord {
   failNextCreate: { status: number; code: number } | null = null;
   roleChanges: { method: string; guildId: string; userId: string; roleId: string }[] = [];
   failRoleChange: { status: number; code: number } | null = null;
+  /** Files on Discord's CDN, by path (e.g. /ephemeral-attachments/1/2/shot.png). */
+  cdn = new Map<string, { status?: number; body: Buffer; type?: string }>();
+  cdnRequests: string[] = [];
+
+  /** Puts a file on the fake CDN and returns its URL. */
+  addCdnFile(name: string, body: Buffer, type = 'image/png', status = 200): string {
+    const p = `/ephemeral-attachments/${this.cdn.size + 1}/${this.cdn.size + 100}/${name}`;
+    this.cdn.set(p, { body, type, status });
+    return `https://cdn.discordapp.com${p}?ex=abc&is=def&hm=123`;
+  }
+
+  async handleCdn(url: URL): Promise<Response> {
+    this.cdnRequests.push(url.pathname);
+    const f = this.cdn.get(url.pathname);
+    if (!f) return new Response('Not found', { status: 404 });
+    return new Response(f.status && f.status >= 400 ? 'error' : new Uint8Array(f.body), { status: f.status ?? 200, headers: { 'content-type': f.type ?? 'application/octet-stream' } });
+  }
 
   addGuild(id: string, name: string, channels: FakeGuild['channels'], opts: { botPermissions?: bigint } = {}) {
     const perms = (opts.botPermissions ?? (1n << 10n) | (1n << 11n) | (1n << 14n) | (1n << 16n)).toString();
@@ -414,6 +438,7 @@ export function fakeFetch(github: FakeGitHub, discord: FakeDiscord, anthropic: F
     const url = new URL(input);
     if (url.hostname === 'api.github.com' || url.hostname === 'github.com') return github.handle(url, init);
     if (url.hostname === 'discord.com') return discord.handle(url, init);
+    if (url.hostname === 'cdn.discordapp.com' || url.hostname === 'media.discordapp.net') return discord.handleCdn(url);
     if (url.hostname === 'api.anthropic.com') return anthropic.handle(url, init);
     throw netError('ENOTFOUND');
   };

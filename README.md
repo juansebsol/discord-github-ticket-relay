@@ -68,6 +68,7 @@ Processes, operations, backups and scaling: [docs/DEPLOYMENT.md](docs/DEPLOYMENT
 | Variable | Description |
 |---|---|
 | `DATABASE_PATH` | SQLite file (default `./data/ticket-relay.db`) |
+| `FILES_DIR` | Files attached to tickets (default `./data/files`, next to the database) |
 | `PUBLIC_URL` | Public HTTPS origin |
 | `ENCRYPTION_KEY` | `openssl rand -base64 32`; keep it stable |
 | `DISCORD_*` | `APPLICATION_ID`, `PUBLIC_KEY`, `CLIENT_SECRET`, `BOT_TOKEN` |

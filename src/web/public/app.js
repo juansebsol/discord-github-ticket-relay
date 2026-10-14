@@ -443,4 +443,190 @@
     repoSelect.addEventListener('change', function () { selected.clear(); load(); });
     load();
   }
+  // ---- Form builder (Ticket types › Form) -----------------------------------------------------
+
+  var builder = document.getElementById('form-builder');
+  if (builder) (function () {
+    var list = document.getElementById('fsecs');
+    var preview = document.getElementById('form-preview');
+    var MAX = 5;
+    function secs() { return $$('.fsec', list); }
+    function kind(sec) { return sec.getAttribute('data-kind'); }
+    function field(sec, name) { return sec.querySelector('[name="' + sec.getAttribute('data-key') + '.' + name + '"]'); }
+    function value(sec, name) { var f = field(sec, name); return f ? (f.type === 'checkbox' ? f.checked : f.value) : ''; }
+    function text(sec, name) { return String(value(sec, name)).trim(); }
+    function required(sec) { var k = kind(sec); return k === 'title' || k === 'description' || (k !== 'intro' && value(sec, 'required') === true); }
+    function el(tag, cls, content) { var e = document.createElement(tag); if (cls) e.className = cls; if (content !== undefined) e.textContent = content; return e; }
+
+    function drawPreview(all) {
+      var box = preview && preview.querySelector('[data-pv-sections]');
+      if (!box) return;
+      box.textContent = '';
+      all.forEach(function (sec) {
+        var k = kind(sec);
+        if (k === 'intro') {
+          var app = preview.getAttribute('data-app'), type = preview.getAttribute('data-type');
+          var lead = type ? '**' + type + '** for **' + app + '**.' : 'Describe your problem with **' + app + '**.';
+          var p = el('p', 'dp-text');
+          p.innerHTML = discordHtml(lead + ' ' + text(sec, 'text') + '\n\n' + preview.getAttribute('data-notice') + ' Do not include passwords, tokens or other secrets.', {});
+          box.appendChild(p);
+          return;
+        }
+        var f = el('div', 'dp-field');
+        var l = el('div', 'dp-l', text(sec, 'label') || 'Question');
+        if (required(sec)) l.appendChild(el('span', 'dp-req', ' *'));
+        f.appendChild(l);
+        if (text(sec, 'hint')) f.appendChild(el('div', 'dp-d', text(sec, 'hint')));
+        if (k === 'files') {
+          var drop = el('div', 'dp-drop');
+          drop.appendChild(iconNode('upload'));
+          drop.appendChild(el('span', '', 'Drag and drop or click to upload'));
+          f.appendChild(drop);
+        } else {
+          var input = el('div', 'dp-input' + (k === 'description' || k === 'paragraph' ? ' tall' : ''));
+          if (text(sec, 'placeholder')) input.appendChild(el('span', 'dp-ph', text(sec, 'placeholder')));
+          f.appendChild(input);
+        }
+        box.appendChild(f);
+      });
+    }
+
+    function refresh() {
+      var all = secs();
+      var n = all.length;
+      var has = function (k) { return all.some(function (s) { return kind(s) === k; }); };
+      $$('.pip', builder).forEach(function (p, i) { p.classList.toggle('on', i < n); });
+      var slots = builder.querySelector('.slots');
+      if (slots) slots.classList.toggle('full', n >= MAX);
+      var slotText = builder.querySelector('[data-slot-text]');
+      if (slotText) slotText.textContent = n + ' of ' + MAX + ' used';
+      $$('[data-fb-add]', builder).forEach(function (b) {
+        var k = b.getAttribute('data-fb-add');
+        b.hidden = (k === 'intro' || k === 'files') && has(k);
+        b.disabled = n >= MAX;
+      });
+      var full = builder.querySelector('[data-fb-full]');
+      if (full) full.hidden = n < MAX;
+      all.forEach(function (sec, i) {
+        var up = sec.querySelector('[data-fb-move="up"]'), down = sec.querySelector('[data-fb-move="down"]');
+        if (up) up.disabled = !all[i - 1] || kind(all[i - 1]) === 'intro';
+        if (down) down.disabled = !all[i + 1];
+        var k = kind(sec);
+        var title = sec.querySelector('[data-fb-title]');
+        if (title) title.textContent = k === 'intro' ? 'Intro text' : text(sec, 'label') || sec.getAttribute('data-kind-name');
+        var sub = sec.querySelector('[data-fb-sub]');
+        if (sub) sub.textContent = sec.getAttribute('data-kind-name') + (k === 'intro' ? '' : required(sec) ? ' · Required' : ' · Optional');
+      });
+      drawPreview(all);
+    }
+
+    // Structural edits don't fire input events, so tell the unsaved-changes footer.
+    function changed() { builder.dispatchEvent(new Event('change', { bubbles: true })); refresh(); }
+
+    function newKey() {
+      var key;
+      do { key = Math.random().toString(36).slice(2, 10); } while (key.length < 6 || list.querySelector('[data-key="' + key + '"]'));
+      return key;
+    }
+
+    builder.addEventListener('click', function (e) {
+      var add = e.target.closest('[data-fb-add]');
+      if (add) {
+        var k = add.getAttribute('data-fb-add');
+        var tpl = builder.querySelector('template[data-fb-template="' + k + '"]');
+        if (!tpl || secs().length >= MAX) return;
+        var holder = document.createElement('div');
+        holder.innerHTML = tpl.innerHTML.replace(/__KEY__/g, newKey());
+        var sec = holder.firstElementChild;
+        if (k === 'intro') list.insertBefore(sec, list.firstElementChild); else list.appendChild(sec);
+        sec.classList.add('enter');
+        changed();
+        var first = sec.querySelector('input[type="text"], textarea');
+        if (first) first.focus();
+        return;
+      }
+      var move = e.target.closest('[data-fb-move]');
+      if (move) {
+        var s = move.closest('.fsec');
+        if (move.getAttribute('data-fb-move') === 'up' && s.previousElementSibling && kind(s.previousElementSibling) !== 'intro') list.insertBefore(s, s.previousElementSibling);
+        else if (move.getAttribute('data-fb-move') === 'down' && s.nextElementSibling) list.insertBefore(s.nextElementSibling, s);
+        changed();
+        if (!move.disabled) move.focus(); else { var other = s.querySelector('[data-fb-move]:not([disabled])'); if (other) other.focus(); }
+        return;
+      }
+      var remove = e.target.closest('[data-fb-remove]');
+      if (remove) {
+        var r = remove.closest('.fsec');
+        var next = r.nextElementSibling || r.previousElementSibling;
+        r.parentNode.removeChild(r);
+        changed();
+        var focus = next && next.querySelector('button:not([disabled]), input:not([type="hidden"])');
+        if (focus) focus.focus();
+      }
+    });
+    builder.addEventListener('input', function (e) {
+      if (e.target.id && e.target.hasAttribute('maxlength')) syncField(e.target);
+      refresh();
+    });
+    builder.addEventListener('change', refresh);
+    refresh();
+  })();
+
+  // ---- Bulk selection (Files tab) -------------------------------------------------------------
+
+  function selection(formId) {
+    return $$('input[type="checkbox"][form="' + formId + '"]');
+  }
+  function updateSelection(formId) {
+    var boxes = selection(formId);
+    var n = boxes.filter(function (b) { return b.checked; }).length;
+    $$('[data-select-all="' + formId + '"]').forEach(function (all) {
+      all.checked = n > 0 && n === boxes.length;
+      all.indeterminate = n > 0 && n < boxes.length;
+    });
+    $$('[data-selected-text="' + formId + '"]').forEach(function (t) {
+      t.textContent = n ? n + (n === 1 ? ' ticket selected' : ' tickets selected') : 'Select tickets to delete their files.';
+    });
+    $$('[data-needs-selection="' + formId + '"]').forEach(function (b) { b.disabled = n === 0; });
+  }
+  $$('[data-select-all]').forEach(function (all) {
+    var formId = all.getAttribute('data-select-all');
+    all.addEventListener('change', function () {
+      selection(formId).forEach(function (b) { b.checked = all.checked; });
+      updateSelection(formId);
+    });
+    selection(formId).forEach(function (b) { b.addEventListener('change', function () { updateSelection(formId); }); });
+    updateSelection(formId);
+  });
+
+  // ---- File upload drop zone (ticket page) ----------------------------------------------------
+
+  $$('form[data-upload]').forEach(function (form) {
+    var input = form.querySelector('input[type="file"]');
+    var zone = form.querySelector('[data-dropzone]');
+    var label = form.querySelector('[data-dz-text]');
+    var submit = form.querySelector('button[type="submit"]');
+    if (!input || !zone) return;
+    var initial = label ? label.textContent : '';
+    function show() {
+      var n = input.files ? input.files.length : 0;
+      if (label) label.textContent = n ? (n === 1 ? input.files[0].name : n + ' files selected') : initial;
+      if (submit) submit.disabled = n === 0;
+    }
+    input.addEventListener('change', show);
+    ['dragenter', 'dragover'].forEach(function (t) {
+      zone.addEventListener(t, function (e) { e.preventDefault(); zone.classList.add('over'); });
+    });
+    ['dragleave', 'drop'].forEach(function (t) {
+      zone.addEventListener(t, function () { zone.classList.remove('over'); });
+    });
+    zone.addEventListener('drop', function (e) {
+      e.preventDefault();
+      if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) {
+        input.files = e.dataTransfer.files;
+        show();
+      }
+    });
+    show();
+  });
 })();

@@ -1,5 +1,7 @@
 /** Server-rendered previews of what members see in Discord. app.js keeps them in sync while typing. */
 import { escapeHtml, html, raw, type SafeHtml } from '../lib/html.js';
+import { formIntro, truncate, visibilityNotice } from '../discord/messages.js';
+import type { FormSection } from '../domain/forms.js';
 import type { Deps } from '../domain/types.js';
 import { icon } from './ui.js';
 
@@ -54,4 +56,25 @@ export function previewCaption(channel: string | null, link: string | null, pref
 
 export function selectPreview(placeholder: string): SafeHtml {
   return html`<div class="dp-select"><span>${placeholder}</span>${icon('chevron-down', 16)}</div>`;
+}
+
+/**
+ * A ticket form as members see it in Discord. app.js redraws the sections while the form
+ * builder is edited, from the same data attributes.
+ */
+export function formPreview(app: { name: string; repoPrivate: boolean }, type: { name: string } | undefined, sections: FormSection[], o: { id?: string } = {}): SafeHtml {
+  return html`<div class="dp dp-form" ${o.id ? html`id="${o.id}"` : ''} aria-label="Preview of the form in Discord" data-app="${app.name}" data-type="${type?.name ?? ''}" data-notice="${visibilityNotice(app.repoPrivate)}">
+    <p class="dp-modal-title">${truncate(type ? `${type.name}: ${app.name}` : `New ticket: ${app.name}`, 45)}</p>
+    <div data-pv-sections>${sections.map((s) => formPreviewSection(app, type, s))}</div>
+    <div class="dp-actions"><span class="dp-btn link">Cancel</span><span class="dp-btn">Submit</span></div>
+  </div>`;
+}
+
+function formPreviewSection(app: { name: string; repoPrivate: boolean }, type: { name: string } | undefined, s: FormSection): SafeHtml {
+  if (s.kind === 'intro') return html`<p class="dp-text">${discordMd(formIntro(app, type, s.text, false))}</p>`;
+  const required = s.kind === 'title' || s.kind === 'description' || s.required;
+  const field = s.kind === 'files'
+    ? html`<div class="dp-drop">${icon('upload', 16)}<span>Drag and drop or click to upload</span></div>`
+    : html`<div class="dp-input${s.kind === 'description' || s.kind === 'paragraph' ? ' tall' : ''}">${s.placeholder ? html`<span class="dp-ph">${s.placeholder}</span>` : ''}</div>`;
+  return html`<div class="dp-field"><div class="dp-l">${s.label || 'Question'}${required ? html`<span class="dp-req"> *</span>` : ''}</div>${s.hint ? html`<div class="dp-d">${s.hint}</div>` : ''}${field}</div>`;
 }

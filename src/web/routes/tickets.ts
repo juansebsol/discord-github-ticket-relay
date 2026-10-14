@@ -7,6 +7,8 @@ import { countByStatus, decryptPayload, getSubmission, listEvents, listSubmissio
 import { describeAction, triageSummaries, type TriageAction, type TriageResultRow } from '../../triage/engine.js';
 import { getTriageSettings, MISSING_SHORT, type Priority } from '../../triage/settings.js';
 import { listTicketTypes } from '../../domain/ticket-types.js';
+import { listTicketFiles } from '../../domain/files.js';
+import { filesCard } from './files.js';
 import { UserFacingError, type SubmissionRow, type SubmissionStatus } from '../../domain/types.js';
 import { updateTicketLimits, userNames } from '../../domain/workspaces.js';
 import { html, raw, type SafeHtml } from '../../lib/html.js';
@@ -46,7 +48,7 @@ import {
 
 const PAGE_SIZE = 25;
 
-export type TicketsTab = 'inbox' | 'panel' | 'types' | 'triage' | 'settings';
+export type TicketsTab = 'inbox' | 'panel' | 'types' | 'triage' | 'files' | 'settings';
 
 const VIEW_ONLY_TICKETS = 'You can read tickets. Checking GitHub, retrying, linking and closing need the Act on tickets permission. Ask an admin or the owner.';
 
@@ -77,6 +79,7 @@ export async function ticketsHeader(web: Web, ctx: WorkspaceRequestContext, tab:
         { href: `${b}/tickets/panel`, label: 'Panel', current: tab === 'panel' },
         { href: `${b}/tickets/types`, label: 'Ticket types', current: tab === 'types' },
         { href: `${b}/tickets/triage`, label: 'Triage', current: tab === 'triage' },
+        { href: `${b}/tickets/files`, label: 'Files', current: tab === 'files' },
         { href: `${b}/tickets/settings`, label: 'Settings', current: tab === 'settings' },
       ])
     : ''}`;
@@ -239,6 +242,19 @@ function eventView(e: EventRow, s: SubmissionRow, names: Map<string, string>): {
       return { actor: by, text: html`<span class="actor">${by}</span> linked issue #${String(n ?? '')}` };
     case 'admin_dismissed':
       return { actor: by, text: html`<span class="actor">${by}</span> closed it without filing${s.resolution_note ? ` · ${s.resolution_note}` : ''}` };
+    case 'files_stored': {
+      const stored = Number(d.stored ?? 0);
+      const failed = Number(d.failed ?? 0);
+      return { icon: failed ? 'triangle-alert' : 'paperclip', tone: failed ? 'warn' : 'muted', text: html`${stored ? `Saved ${plural(stored, 'attached file')}` : ''}${stored && failed ? ' · ' : ''}${failed ? `${plural(failed, 'file')} couldn’t be attached` : ''}` };
+    }
+    case 'files_added':
+      return { actor: by, text: html`<span class="actor">${by}</span> added ${plural(Number(d.count ?? 1), 'file')}` };
+    case 'files_deleted': {
+      const n = plural(Number(d.count ?? 1), 'file');
+      if (d.reason === 'manual' && typeof d.by === 'string') return { actor: by, text: html`<span class="actor">${by}</span> deleted ${n}` };
+      if (typeof d.by === 'string') return { actor: by, text: html`<span class="actor">${by}</span> deleted ${n} in a cleanup` };
+      return { icon: 'trash-2', tone: 'muted', text: html`Deleted ${n} ${d.reason === 'spam' ? 'from a spam ticket' : 'in the automatic cleanup'}` };
+    }
     case 'triage_done': {
       const applied = Array.isArray(d.applied) ? (d.applied as string[]) : [];
       const suggested = Array.isArray(d.suggested) ? (d.suggested as string[]) : [];
@@ -403,7 +419,8 @@ export function registerTicketRoutes(app: FastifyInstance, web: Web): void {
     const b = ctx.base;
     const events = await listEvents(deps.db, s.id);
     const triageRow = await web.triage.getResult(ctx.workspace.id, s.id);
-    const names = await userNames(deps.db, [s.resolved_by, ...events.map((e) => (typeof e.detail.by === 'string' ? e.detail.by : null))]);
+    const files = await listTicketFiles(deps.db, s.id);
+    const names = await userNames(deps.db, [s.resolved_by, ...events.map((e) => (typeof e.detail.by === 'string' ? e.detail.by : null)), ...files.flatMap((f) => [f.added_by, f.deleted_by])]);
     const payload = decryptPayload(deps.box, s);
     const act = can(ctx.membership, 'tickets.act');
     const actionBase = `${b}/tickets/${s.id}`;
@@ -470,12 +487,13 @@ export function registerTicketRoutes(app: FastifyInstance, web: Web): void {
       ${unresolved && !act ? html`<div class="viewonly">${icon('eye', 16)}View only. Check, retry, link and close need the Act on tickets permission. Ask an admin or the owner.</div>` : ''}
 
       <div class="detail-grid">
-        <div class="a-desc card"><div class="card-h"><h2>Description</h2></div>
+        <div class="a-desc a-col"><div class="card"><div class="card-h"><h2>Description</h2></div>
           <div class="card-b">${payload?.description
-            ? html`<p class="ticket-text">${payload.description}</p>`
-            : html`<p class="muted small">${s.status === 'created' ? 'The description now lives in the GitHub issue. Only the title is kept here.' : s.payload_purged_at ? `Deleted after the retention period (${formatDate(s.payload_purged_at)}).` : 'Not available.'}</p>`}</div>
+            ? html`<p class="ticket-text">${payload.description}</p>${(payload.answers ?? []).map((a) => html`<h3 class="answer-q">${a.question}</h3><p class="ticket-text">${a.value}</p>`)}`
+            : html`<p class="muted small">${s.status === 'created' ? 'The description and answers now live in the GitHub issue. Only the title is kept here.' : s.payload_purged_at ? `Deleted after the retention period (${formatDate(s.payload_purged_at)}).` : 'Not available.'}</p>`}</div>
           ${payload?.description && (unresolved || s.status === 'pending') ? html`<div class="card-note">Stored encrypted so the ticket can be retried. Kept until it’s resolved, at most 90 days.</div>` : ''}
         </div>
+        ${files.length || (act && s.status === 'created') ? filesCard({ files, actionBase, csrf: ctx.csrf, canAct: act, filed: s.status === 'created', names }) : ''}</div>
 
         <div class="a-activity card"><div class="card-h"><h2>Activity</h2></div>
           <div class="card-b"><ol class="activity">${events.map((e) => {

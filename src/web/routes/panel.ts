@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
-import { buildTicketModal, DEFAULT_PANEL_INTRO, DEFAULT_PANEL_TITLE, MORE_APPS_VALUE } from '../../discord/messages.js';
+import { DEFAULT_PANEL_INTRO, DEFAULT_PANEL_TITLE, MORE_APPS_VALUE } from '../../discord/messages.js';
+import { formFor } from '../../domain/forms.js';
 import { inspectGuild } from '../../domain/discord-checks.js';
 import { checkPanel, panelPayloadFor, publishPanel, unpublishPanel } from '../../domain/panel.js';
 import { getApp, getDiscordConnection, getGitHubConnection, getPanel, listApps, setTicketsChannel } from '../../domain/store.js';
@@ -9,7 +10,7 @@ import { UserFacingError } from '../../domain/types.js';
 import { validateWorkspace, type Check } from '../../domain/validation.js';
 import { updatePanelText } from '../../domain/workspaces.js';
 import { html, raw, type SafeHtml } from '../../lib/html.js';
-import { botIdentity, botMessage, discordMd, previewCaption, selectPreview } from '../discord-preview.js';
+import { botIdentity, botMessage, discordMd, formPreview, previewCaption, selectPreview } from '../discord-preview.js';
 import { setFlash } from '../session.js';
 import type { Web } from '../server.js';
 import { csrfField, icon, linkBtn, pill, selectWrap, setting, submitBtn, timeAgo, type IconName } from '../ui.js';
@@ -95,12 +96,6 @@ export function registerPanelRoutes(app: FastifyInstance, web: Web): void {
 
     const firstType = types[0];
     const sample = enabledApps[0];
-    const modal = sample
-      ? buildTicketModal(
-          { publicId: sample.public_id, name: sample.name, repoId: sample.repo_id, repoPrivate: sample.repo_private },
-          firstType ? { publicId: firstType.public_id, name: firstType.name, guidance: firstType.guidance, placeholder: firstType.placeholder } : undefined,
-        )
-      : null;
 
     const body = html`
       ${await ticketsHeader(web, ctx, 'panel')}
@@ -152,17 +147,12 @@ export function registerPanelRoutes(app: FastifyInstance, web: Web): void {
             ${selectPreview('Choose an app…')}
             ${options.length ? html`<div class="dp-options">${options.map((o) => html`<div class="dp-option"><strong>${o.label}</strong>${'description' in o && o.description ? html`<span>${o.description}</span>` : ''}${o.value === MORE_APPS_VALUE ? html`<span>Opens a private, page-by-page list</span>` : ''}</div>`)}</div>` : ''}`, 'Preview of the ticket panel in Discord')}
           <p class="dp-note">${enabledApps.length ? `The menu lists your ${enabledApps.length} enabled app${enabledApps.length === 1 ? '' : 's'}.${types.length ? ' Members pick a ticket type next.' : ''}` : 'No enabled apps yet, so the menu is empty.'}</p>
-          ${modal ? html`
+          ${sample ? html`
             ${previewCaption(null, null, types.length ? 'Next steps · ' : 'Form · ')}
-            <div class="dp">
-              ${types.length ? html`<p class="dp-modal-title">What kind of ticket is this?</p>
-                <div class="dp-options">${types.map((t) => html`<div class="dp-option"><strong>${t.name}</strong>${t.description ? html`<span>${t.description}</span>` : ''}</div>`)}</div><br>` : ''}
-              <p class="dp-modal-title">${modal.title}</p>
-              <p>${discordMd((modal.components[0] as { content: string }).content)}</p>
-              <div class="dp-field"><div class="dp-l">Title *</div><div class="dp-input"></div></div>
-              <div class="dp-field"><div class="dp-l">Description *</div><div class="dp-input tall"></div></div>
-            </div>
-            <p class="dp-note">${firstType ? `Form for “${firstType.name}”. ` : ''}After submitting, the member gets a private confirmation with the ticket number and a link to the issue.</p>` : ''}
+            ${types.length ? html`<div class="dp"><p class="dp-modal-title">What kind of ticket is this?</p>
+                <div class="dp-options">${types.map((t) => html`<div class="dp-option"><strong>${t.name}</strong>${t.description ? html`<span>${t.description}</span>` : ''}</div>`)}</div></div><div class="mt-8"></div>` : ''}
+            ${formPreview({ name: sample.name, repoPrivate: sample.repo_private }, firstType ? { name: firstType.name } : undefined, formFor(firstType ?? null))}
+            <p class="dp-note">${firstType ? html`Form for “${firstType.name}”. Change the questions on <a href="${b}/tickets/types/${firstType.id}/form">its form page</a>. ` : ''}After submitting, the member gets a private confirmation with the ticket number and a link to the issue.</p>` : ''}
         </div>
       </div>
       <form method="post" action="${b}/tickets/panel/test" id="test-form" hidden data-confirm-title="Send a test ticket?" data-confirm-body="This creates a real issue on GitHub, labelled as a test. You can close it afterwards." data-confirm-label="Send test">${csrfField(ctx.csrf)}</form>

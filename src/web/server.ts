@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import cookie from '@fastify/cookie';
 import formbody from '@fastify/formbody';
+import multipart from '@fastify/multipart';
 import fastifyStatic from '@fastify/static';
 import { safeEqual } from '../lib/crypto.js';
 import { html } from '../lib/html.js';
@@ -28,6 +29,8 @@ import { registerLegalRoutes } from './routes/legal.js';
 import { registerTriageRoutes } from './routes/triage.js';
 import { registerContributorRoutes } from './routes/contributors.js';
 import { registerTicketTypeRoutes } from './routes/ticket-types.js';
+import { registerFileRoutes, UPLOAD_ROUTE } from './routes/files.js';
+import { MAX_FILE_BYTES } from '../domain/files.js';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -102,6 +105,8 @@ export async function buildServer(deps: Deps, processor: Processor, opts: { logg
   });
   await app.register(cookie);
   await app.register(formbody);
+  // File uploads (only the ticket "Add files" form); each file is read one at a time.
+  await app.register(multipart, { limits: { fileSize: MAX_FILE_BYTES, files: 10, fields: 4, parts: 16, fieldSize: 1024 } });
   await app.register(fastifyStatic, { root: STATIC_DIR, prefix: '/static/', maxAge: '1h' });
 
   const secureCookies = deps.config.publicUrl.startsWith('https://');
@@ -126,6 +131,8 @@ export async function buildServer(deps: Deps, processor: Processor, opts: { logg
     if (url === '/discord/interactions' || url === '/github/webhook') return;
     // Local-only development sign-in has no session yet (never registered in production).
     if (url === '/dev-login' && deps.config.devLogin) return;
+    // The upload form's token is the first form field; that route checks it before reading any file.
+    if (req.isMultipart() && UPLOAD_ROUTE.test(url)) return;
     const token = (req.body as Record<string, unknown> | undefined)?._csrf;
     if (!req.auth || typeof token !== 'string' || !safeEqual(token, req.auth.session.csrf_token)) {
       reply.code(403).type('text/html').send(simplePage('Session expired', html`<h1>Your session expired</h1><p class="muted">For your security this action wasn’t performed. Go back, reload the page and try again.</p>${linkBtn('/', 'Back to the app', { block: true })}`));
@@ -226,6 +233,7 @@ export async function buildServer(deps: Deps, processor: Processor, opts: { logg
   registerMemberRoutes(app, web);
   registerContributorRoutes(app, web);
   registerTicketTypeRoutes(app, web);
+  registerFileRoutes(app, web);
 
   return app;
 }

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { isUniqueViolation, type Queryable } from '../db/database.js';
 import { randomCode } from '../lib/crypto.js';
+import type { FormSection } from './forms.js';
 import { UserFacingError } from './types.js';
 
 /**
@@ -19,6 +20,8 @@ export interface TicketType {
   placeholder: string | null;
   enabled: boolean;
   position: number;
+  /** Saved form sections (see forms.ts); null uses the default form for this kind of type. */
+  form: unknown[] | null;
 }
 
 export interface TicketTypeInput {
@@ -80,6 +83,11 @@ export async function updateTicketType(q: Queryable, workspaceId: string, id: st
     if (isUniqueViolation(err)) throw new UserFacingError(`A ticket type named “${input.name}” already exists.`, 409);
     throw err;
   }
+}
+
+/** Saves the type's form, or restores the default with null. */
+export async function saveTicketTypeForm(q: Queryable, workspaceId: string, id: string, form: FormSection[] | null): Promise<void> {
+  await q.query('UPDATE ticket_types SET form = $3, updated_at = now_ms() WHERE workspace_id = $1 AND id = $2', [workspaceId, id, form]);
 }
 
 export async function deleteTicketType(q: Queryable, workspaceId: string, id: string): Promise<void> {

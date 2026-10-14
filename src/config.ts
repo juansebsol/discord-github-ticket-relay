@@ -45,6 +45,8 @@ export interface Config {
   publicUrl: string;
   /** SQLite database file. */
   databasePath: string;
+  /** Folder for files attached to tickets (screenshots and recordings). */
+  filesDir: string;
   encryptionKey: Buffer;
   discord: DiscordAppConfig | null;
   github: GitHubAppConfig | null;
@@ -108,6 +110,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const nodeEnv = (env.NODE_ENV === 'production' || env.NODE_ENV === 'test' ? env.NODE_ENV : 'development') as Config['nodeEnv'];
 
   const databasePath = fromRoot(env.DATABASE_PATH || './data/ticket-relay.db');
+  const filesDir = env.FILES_DIR
+    ? fromRoot(env.FILES_DIR)
+    : path.join(databasePath === ':memory:' ? APP_ROOT : path.dirname(databasePath), 'files');
 
   const port = Number(env.PORT ?? 3000);
   const publicUrl = (env.PUBLIC_URL ?? `http://localhost:${port}`).replace(/\/+$/, '');
@@ -166,6 +171,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     port,
     publicUrl,
     databasePath,
+    filesDir,
     encryptionKey,
     discord,
     github,

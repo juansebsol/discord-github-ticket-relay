@@ -151,7 +151,7 @@ describe('Discord payloads respect platform limits', () => {
     expect(text).toMatch(/steps to reproduce/);
     expect(text).toMatch(/publicly on GitHub/);
     expect(text).toMatch(/passwords, tokens or other secrets/);
-    for (const c of modal.components.slice(1) as { label: string; description: string; component: { placeholder: string; max_length: number } }[]) {
+    for (const c of modal.components.slice(1) as unknown as { label: string; description: string; component: { placeholder: string; max_length: number } }[]) {
       expect(c.label.length).toBeLessThanOrEqual(45);
       expect(c.description.length).toBeLessThanOrEqual(100);
       expect(c.component.placeholder.length).toBeLessThanOrEqual(100);

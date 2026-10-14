@@ -57,6 +57,7 @@ const ICON_TEMPLATES = html`<template id="icon-templates">
   <span data-i="ok">${icon('circle-check', 16, 'ok lead')}</span><span data-i="warn">${icon('triangle-alert', 16, 'warn lead')}</span>
   <span data-i="danger">${icon('circle-x', 16, 'danger lead')}</span><span data-i="info">${icon('info', 16, 'muted lead')}</span>
   <span data-i="check">${icon('check', 14, 'ok')}</span><span data-i="check-16">${icon('check', 16, 'ok')}</span><span data-i="x">${icon('x', 16)}</span>
+  <span data-i="upload">${icon('upload', 16)}</span>
 </template>`;
 
 /** The generic confirmation dialog filled in by app.js from a form's data-confirm-* attributes. */

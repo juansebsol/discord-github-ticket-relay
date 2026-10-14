@@ -12,6 +12,9 @@ const NAMES = [
   'lock', 'log-out', 'menu', 'message-circle', 'message-circle-question', 'pencil', 'plus', 'refresh-cw', 'rotate-ccw', 'search',
   'search-check', 'search-x', 'send', 'server', 'settings', 'sliders-horizontal', 'tag', 'ticket', 'trash-2', 'triangle-alert', 'undo-2',
   'unplug', 'user-cog', 'user-minus', 'user-plus', 'user-x', 'users', 'x',
+  // Forms and files
+  'align-left', 'clipboard-list', 'file-x', 'film', 'hard-drive', 'heading', 'image', 'paperclip', 'scan-search', 'text',
+  'text-cursor-input', 'upload',
 ];
 
 const require = createRequire(import.meta.url);

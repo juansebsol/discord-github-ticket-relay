@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { withTransaction, type Queryable } from '../db/database.js';
 import { newSubmissionRef, type SecretBox } from '../lib/crypto.js';
+import { recordIncomingFiles } from './files.js';
 import type { AppRow, Deps, SubmissionRow, SubmissionStatus, TicketPayload, WorkspaceRow } from './types.js';
 
 /** Discord interaction tokens stay valid for 15 minutes. */
@@ -19,6 +20,19 @@ export async function addEvent(q: Queryable, submissionId: string, kind: string,
   await q.query('INSERT INTO submission_events (submission_id, kind, detail) VALUES ($1, $2, $3)', [submissionId, kind, detail]);
 }
 
+export interface TicketAnswer {
+  question: string;
+  value: string;
+}
+
+/** A file a member attached in the Discord form, still on Discord's CDN. */
+export interface IncomingFile {
+  filename: string;
+  size: number;
+  url: string;
+  contentType: string | null;
+}
+
 export interface AcceptInput {
   workspace: WorkspaceRow;
   app: AppRow;
@@ -32,6 +46,9 @@ export interface AcceptInput {
   reporter: { id: string; displayName: string; username: string | null };
   title: string;
   description: string;
+  answers?: TicketAnswer[];
+  /** Downloaded and stored when the ticket is filed (see files.ts). */
+  files?: IncomingFile[];
   /** Chosen ticket type: its label is merged into the app's labels; frozen with the routing. */
   ticketType?: { name: string; label: string | null; titlePrefix: string | null } | null;
 }
@@ -83,7 +100,7 @@ export async function acceptSubmission(deps: Pick<Deps, 'db' | 'box'>, input: Ac
       }
     }
 
-    const payload: TicketPayload = { title: input.title, description: input.description };
+    const payload: TicketPayload = { title: input.title, description: input.description, ...(input.answers?.length ? { answers: input.answers } : {}) };
     const { rows } = await c.query<SubmissionRow>(
       `INSERT INTO submissions (
          id, workspace_id, ref, source, app_id, app_name, installation_id, repo_id, repo_owner, repo_name, repo_private, labels,
@@ -126,8 +143,10 @@ export async function acceptSubmission(deps: Pick<Deps, 'db' | 'box'>, input: Ac
       const existing = await c.query<SubmissionRow>('SELECT * FROM submissions WHERE discord_interaction_id = $1', [input.interactionId]);
       return { kind: 'duplicate_delivery', submission: existing.rows[0]! };
     }
+    if (input.files?.length) await recordIncomingFiles(c, box, rows[0], input.files);
     await addEvent(c, rows[0].id, 'accepted', {
       source: input.source,
+      files: input.files?.length ?? 0,
       repo: `${input.app.repo_owner}/${input.app.repo_name}`,
       labels: input.app.labels,
       type: input.ticketType?.name ?? null,

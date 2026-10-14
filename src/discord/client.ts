@@ -27,6 +27,19 @@ export const DiscordErrorCode = {
   MissingPermissions: 50013,
 } as const;
 
+/** Hosts Discord serves message and form attachments from. */
+const ATTACHMENT_HOSTS = new Set(['cdn.discordapp.com', 'media.discordapp.net']);
+
+export class AttachmentError extends Error {
+  constructor(
+    readonly code: 'not_discord' | 'unavailable' | 'too_large',
+    message: string,
+  ) {
+    super(message);
+    this.name = 'AttachmentError';
+  }
+}
+
 export interface DiscordGuildSummary {
   id: string;
   name: string;
@@ -118,6 +131,37 @@ export class DiscordClient {
         retryAfter,
       );
     }
+  }
+
+  // ---- Attachments ------------------------------------------------------------------
+
+  /**
+   * Downloads a file a member attached in a form. Only Discord's own file hosts are
+   * fetched (never a URL from anywhere else), and the download stops past `maxBytes`.
+   */
+  async downloadAttachment(url: string, maxBytes: number): Promise<Buffer> {
+    let u = new URL(url);
+    let res: Response;
+    // Redirects are followed by hand, and only to Discord's own file hosts.
+    for (let hop = 0; ; hop++) {
+      if (u.protocol !== 'https:' || !ATTACHMENT_HOSTS.has(u.hostname)) throw new AttachmentError('not_discord', 'The file wasn’t on Discord’s file servers.');
+      res = await fetchWithTimeout(this.fetchImpl, u.toString(), { method: 'GET', headers: { 'User-Agent': 'DiscordBot (discord-github-ticket-relay, 0.1)' }, redirect: 'manual' }, 30_000);
+      const location = res.status >= 300 && res.status < 400 ? res.headers.get('location') : null;
+      if (!location) break;
+      if (hop >= 2) throw new AttachmentError('unavailable', 'Discord redirected too many times.');
+      u = new URL(location, u);
+    }
+    if (!res.ok) throw new AttachmentError('unavailable', res.status === 404 || res.status === 403 ? 'Discord no longer has the file.' : `Discord returned ${res.status}.`);
+    if (Number(res.headers.get('content-length') ?? 0) > maxBytes) throw new AttachmentError('too_large', 'The file is too large.');
+    const chunks: Buffer[] = [];
+    let total = 0;
+    if (!res.body) return Buffer.alloc(0);
+    for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
+      total += chunk.byteLength;
+      if (total > maxBytes) throw new AttachmentError('too_large', 'The file is too large.');
+      chunks.push(Buffer.from(chunk));
+    }
+    return Buffer.concat(chunks);
   }
 
   // ---- OAuth2 -------------------------------------------------------------------------

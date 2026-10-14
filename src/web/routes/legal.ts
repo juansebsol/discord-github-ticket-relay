@@ -5,7 +5,7 @@ import { legalPage } from '../layout.js';
 import type { Web } from '../server.js';
 
 /** Bump when either document changes in substance. */
-const LAST_UPDATED = 'October 13, 2026';
+const LAST_UPDATED = 'October 14, 2026';
 
 /**
  * Public Terms of Service and Privacy Policy. Discord asks for both URLs before a bot can be
@@ -37,7 +37,7 @@ export function registerLegalRoutes(app: FastifyInstance, web: Web): void {
 
       <h2>2. What the Service does</h2>
       <ul>
-        <li><strong>Tickets.</strong> Members of a Discord server pick an app and fill in a short form. The Service files the ticket as an issue in the GitHub repository the server’s administrators chose for that app, and sends the member a private confirmation.</li>
+        <li><strong>Tickets.</strong> Members of a Discord server pick an app and fill in a short form, which can include screenshots or recordings. The Service files the ticket as an issue in the GitHub repository the server’s administrators chose for that app, and sends the member a private confirmation.</li>
         <li><strong>Contributor roles.</strong> Members can sign in with GitHub so the Service can count their merged pull requests or commits in the server’s repositories and give them a matching Discord role.</li>
         <li><strong>Console.</strong> Server owners, admins and moderators manage setup and tickets in the web console after signing in with Discord.</li>
         <li><strong>AI triage (optional).</strong> If a server’s administrators turn it on, an AI model reviews filed tickets and may label them, comment on them, update the member’s private confirmation in Discord, or close them as duplicates, spam or questions for the community, as the administrators configured. Its calls can be wrong; administrators can review and undo them on GitHub.</li>
@@ -50,7 +50,8 @@ export function registerLegalRoutes(app: FastifyInstance, web: Web): void {
       <ul>
         <li>You are responsible for what you submit. Only submit information you have the right to share.</li>
         <li><strong>Never include passwords, access tokens, payment details or other secrets</strong>, or other people’s personal information.</li>
-        <li>Tickets become GitHub issues. If the repository is <strong>public, anyone on the internet can read the issue</strong>, including your Discord display name and username. The form tells you whether the repository is public or private before you submit.</li>
+        <li>Tickets become GitHub issues. If the repository is <strong>public, anyone on the internet can read the issue</strong>, including your Discord display name and username, and see the files you attach. The form tells you whether the repository is public or private before you submit.</li>
+        <li>Only attach screenshots and recordings you have the right to share, and hide anything private in them first.</li>
         <li>You allow us to store, process and send your submission to GitHub and Discord as needed to run the Service. Once an issue exists on GitHub, the repository’s owners control it, and GitHub’s terms apply to it.</li>
       </ul>
 
@@ -104,7 +105,7 @@ export function registerLegalRoutes(app: FastifyInstance, web: Web): void {
       <ul>
         <li>Your Discord user ID, username and display name.</li>
         <li>The Discord server’s ID and name and the channel ID where you opened the ticket.</li>
-        <li>What you submit: the app and ticket type you pick, the title and the description.</li>
+        <li>What you submit: the app and ticket type you pick, the title, the description, your answers to the form’s other questions (for example your operating system), and any screenshots or recordings you attach.</li>
         <li>The time of the submission, its status, the GitHub issue it became, and a keyed fingerprint of the text used to spot duplicate submissions.</li>
         <li>A short-lived token from Discord that lets the bot update your private confirmation message.</li>
       </ul>
@@ -142,7 +143,7 @@ export function registerLegalRoutes(app: FastifyInstance, web: Web): void {
 
       <h2>4. Who we share it with</h2>
       <ul>
-        <li><strong>GitHub.</strong> The issue contains your ticket’s title and description, the app and type, your Discord display name and username, your Discord user ID, the server’s name and ID, the channel ID, the submission time and a reference number. <strong>If the repository is public, the issue is public.</strong> The form tells you which before you submit.</li>
+        <li><strong>GitHub.</strong> The issue contains your ticket’s title, description and answers, links to the files you attached, the app and type, your Discord display name and username, your Discord user ID, the server’s name and ID, the channel ID, the submission time and a reference number. <strong>If the repository is public, the issue is public.</strong> The form tells you which before you submit.</li>
         <li><strong>Discord.</strong> To show panels, send your confirmation and add or remove roles.</li>
         <li><strong>The server’s administrators and moderators</strong> can see the tickets and contributor verifications for their server in the console.</li>
         <li><strong>Anthropic</strong>, only if the server’s administrators turn on AI triage. The ticket’s app, type, title and description, plus the titles and short excerpts of open issues in the same repository, are sent to Anthropic’s Claude API to assess the ticket. Anthropic processes them under its commercial terms and <a href="https://www.anthropic.com/legal/privacy" rel="noopener noreferrer">privacy policy</a>.</li>
@@ -154,6 +155,7 @@ export function registerLegalRoutes(app: FastifyInstance, web: Web): void {
       <h2>5. How long we keep it</h2>
       <ul>
         <li><strong>Ticket text</strong> is stored encrypted. Once the GitHub issue is created, we delete the description from our database; it lives on in the issue. The remaining text (the title) is deleted after the retention period the server sets (30 days by default). Text of tickets that couldn’t be filed is kept for at least 90 days so administrators can retry them.</li>
+        <li><strong>Attached files</strong> are stored on our server under a long random link, which the GitHub issue uses to show them. Anyone with the link can open a file, so in a public repository attached files are public too. Before a file is saved we remove location and camera data from photos and videos. Files are kept until the server’s administrators or moderators delete them, or until the server’s cleanup rules remove them (for example some days after the issue is closed). Deleting a file removes it from our server, and the issue then shows that it was removed.</li>
         <li><strong>Ticket records</strong> (reporter, status, issue link and reference) are kept as the server’s ticket history until the workspace is deleted, or until you ask us to delete them.</li>
         <li><strong>Confirmation tokens</strong> from Discord expire after 15 minutes. <strong>Console sessions</strong> expire after 7 days.</li>
         <li><strong>Contributor verifications</strong> and the link to your GitHub account are kept until an administrator revokes them or the workspace is deleted.</li>
@@ -168,7 +170,7 @@ export function registerLegalRoutes(app: FastifyInstance, web: Web): void {
       <h2>7. Your choices and rights</h2>
       <ul>
         <li>You can ask us for a copy of your information, or ask us to correct or delete it, by contacting ${contact}. We may ask you to confirm that the Discord account is yours.</li>
-        <li>You can ask a server’s administrators to close your ticket, or to revoke your contributor role and unlink your GitHub account.</li>
+        <li>You can ask a server’s administrators to close your ticket, delete files you attached, or revoke your contributor role and unlink your GitHub account.</li>
         <li>To remove a GitHub issue, contact the repository’s owners. To revoke the Service’s access to your GitHub account, go to GitHub › Settings › Applications.</li>
         <li>Depending on where you live, you may have more rights, such as objecting to processing or complaining to a data protection authority.</li>
       </ul>

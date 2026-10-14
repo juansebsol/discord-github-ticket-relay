@@ -2,7 +2,8 @@ import { handleContributorComponent } from '../domain/contributors.js';
 import type { Processor } from '../domain/processor.js';
 import { enabledTicketTypes, getTicketTypeByPublicId, type TicketType } from '../domain/ticket-types.js';
 import { getAppByPublicId, getDiscordConnectionByGuild, getGitHubConnection, listApps } from '../domain/store.js';
-import { acceptSubmission } from '../domain/submissions.js';
+import { answerMax, filesId, formFor, MAX_FILES_LIMIT, questionId } from '../domain/forms.js';
+import { acceptSubmission, type IncomingFile, type TicketAnswer } from '../domain/submissions.js';
 import type { Deps } from '../domain/types.js';
 import { getWorkspace } from '../domain/workspaces.js';
 import * as m from './messages.js';
@@ -18,7 +19,12 @@ export interface Interaction {
   channel_id?: string;
   member?: { nick?: string | null; user: { id: string; username: string; global_name?: string | null } };
   user?: { id: string; username: string };
-  data?: { custom_id?: string; values?: string[]; components?: unknown[] };
+  data?: {
+    custom_id?: string;
+    values?: string[];
+    components?: unknown[];
+    resolved?: { attachments?: Record<string, { id: string; filename?: string; size?: number; url?: string; content_type?: string }> };
+  };
 }
 
 export interface InteractionResult {
@@ -41,6 +47,19 @@ export function modalValues(components: unknown[] | undefined): Record<string, s
   const visit = (node: any) => {
     if (!node || typeof node !== 'object') return;
     if (typeof node.custom_id === 'string' && typeof node.value === 'string') out[node.custom_id] = node.value;
+    if (node.component) visit(node.component);
+    if (Array.isArray(node.components)) node.components.forEach(visit);
+  };
+  (components ?? []).forEach(visit);
+  return out;
+}
+
+/** Collects file upload values (attachment IDs) from a modal submission, by custom_id. */
+export function modalFiles(components: unknown[] | undefined): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  const visit = (node: any) => {
+    if (!node || typeof node !== 'object') return;
+    if (typeof node.custom_id === 'string' && Array.isArray(node.values)) out[node.custom_id] = node.values.filter((v: unknown) => typeof v === 'string');
     if (node.component) visit(node.component);
     if (Array.isArray(node.components)) node.components.forEach(visit);
   };
@@ -92,7 +111,7 @@ export async function handleInteraction(deps: Deps, processor: Processor, i: Int
       // With ticket types configured, members choose one before the form (required).
       const types = await enabledTicketTypes(deps.db, workspace.id);
       if (types.length) {
-        const picker = m.buildTypePicker({ publicId: app.public_id, name: app.name, repoId: app.repo_id }, types.map(toFormTypeOption));
+        const picker = m.buildTypePicker({ publicId: app.public_id, name: app.name, repoId: app.repo_id, repoPrivate: app.repo_private }, types.map(toFormTypeOption));
         return { response: { type: ResponseType.ChannelMessage, data: picker } };
       }
       return {
@@ -116,6 +135,7 @@ export async function handleInteraction(deps: Deps, processor: Processor, i: Int
           data: m.buildTicketModal(
             { publicId: app.public_id, name: app.name, repoId: app.repo_id, repoPrivate: app.repo_private },
             { publicId: type.public_id, name: type.name, guidance: type.guidance, placeholder: type.placeholder },
+            formFor(type),
           ),
         },
       };
@@ -149,6 +169,25 @@ export async function handleInteraction(deps: Deps, processor: Processor, i: Int
   // A type removed or disabled while the form was open: file the ticket anyway, without it.
   const type: TicketType | null = typePublicId ? await getTicketTypeByPublicId(deps.db, workspace.id, typePublicId) : null;
 
+  // Answers to the type's own questions, labelled with the question as it reads now. A
+  // question removed while the form was open is dropped; empty optional answers are skipped.
+  const form = formFor(type);
+  const answers: TicketAnswer[] = [];
+  const files: IncomingFile[] = [];
+  const uploads = modalFiles(i.data?.components);
+  const resolved = i.data?.resolved?.attachments ?? {};
+  for (const s of form) {
+    if (s.kind === 'short' || s.kind === 'paragraph') {
+      const value = (values[questionId(s.key)] ?? '').trim().slice(0, answerMax(s.kind));
+      if (value) answers.push({ question: s.label, value });
+    } else if (s.kind === 'files') {
+      for (const id of (uploads[filesId(s.key)] ?? []).slice(0, Math.min(s.maxFiles, MAX_FILES_LIMIT))) {
+        const a = resolved[id];
+        if (a?.url) files.push({ filename: a.filename ?? 'file', size: a.size ?? 0, url: a.url, contentType: a.content_type ?? null });
+      }
+    }
+  }
+
   const member = i.member;
   const result = await acceptSubmission(deps, {
     workspace,
@@ -167,6 +206,8 @@ export async function handleInteraction(deps: Deps, processor: Processor, i: Int
     },
     title: ticket.title,
     description: ticket.description,
+    answers,
+    files,
     ticketType: type && type.enabled ? { name: type.name, label: type.label, titlePrefix: type.title_prefix || type.name } : null,
   });
 

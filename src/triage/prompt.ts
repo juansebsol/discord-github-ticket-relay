@@ -45,7 +45,14 @@ export function extractDescription(body: string): string {
   const start = body.indexOf('### Description');
   const end = body.indexOf('### Ticket details');
   const text = start >= 0 ? body.slice(start + '### Description'.length, end > start ? end : undefined) : body;
-  return text.replace(/<!--[\s\S]*?-->/g, '').trim();
+  return text
+    // Claude can't see the files, so say how many there are instead of passing their links.
+    .replace(/<!-- ticket-relay:files -->[\s\S]*?<!-- \/ticket-relay:files -->/g, (block) => {
+      const n = (block.match(/^(!\[|Video: \[)/gm) ?? []).length;
+      return n ? `(The member attached ${n} screenshot${n === 1 ? '' : 's'} or recording${n === 1 ? '' : 's'}.)` : '';
+    })
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .trim();
 }
 
 /** Verdict fields for each action, to tell Claude which checks are off for a ticket type. */

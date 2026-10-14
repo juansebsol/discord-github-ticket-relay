@@ -1,4 +1,6 @@
 import { generateKeyPairSync, sign } from 'node:crypto';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import type { InjectOptions } from 'fastify';
 import { createApp, type AppInstance } from '../src/app.js';
 import { loadConfig, type Config } from '../src/config.js';
@@ -18,6 +20,9 @@ export const DISCORD_PUBLIC_KEY_HEX = Buffer.from(ed.publicKey.export({ format: 
 
 export const ENCRYPTION_KEY = Buffer.alloc(32, 7).toString('base64');
 
+/** Each test worker keeps attached files in its own temporary folder. */
+export const TEST_FILES_DIR = path.join(tmpdir(), `ticket-relay-test-files-${process.pid}`);
+
 export function testConfig(env: Record<string, string> = {}): Config {
   return loadConfig({
     NODE_ENV: 'test',
@@ -34,6 +39,7 @@ export function testConfig(env: Record<string, string> = {}): Config {
     GITHUB_CLIENT_ID: 'Iv1.test',
     GITHUB_CLIENT_SECRET: 'gh-secret',
     GITHUB_WEBHOOK_SECRET: 'webhook-secret',
+    FILES_DIR: TEST_FILES_DIR,
     ...env,
   });
 }

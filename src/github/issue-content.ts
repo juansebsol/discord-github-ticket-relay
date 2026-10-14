@@ -18,6 +18,10 @@ export interface IssueContentInput {
   channelId: string | null;
   isTest: boolean;
   ticketType?: string | null;
+  /** Answers to the ticket type's own questions; each becomes a section. */
+  answers?: { question: string; value: string }[];
+  /** The Attachments section (see domain/files.ts). */
+  filesBlock?: string | null;
 }
 
 const GITHUB_TITLE_MAX = 256;
@@ -47,6 +51,11 @@ export function neutralizeGitHubMentions(text: string): string {
 /** Table cells must not contain pipes or newlines. */
 function cell(value: string): string {
   return value.replace(/\|/g, '\\|').replace(/[\r\n]+/g, ' ').trim();
+}
+
+/** A question used as a heading: one line, no Markdown heading marks. */
+function headingText(q: string): string {
+  return neutralizeGitHubMentions(q.replace(/[\r\n#]+/g, ' ').replace(/\s+/g, ' ').trim()) || 'Answer';
 }
 
 export function buildIssueTitle(appName: string, title: string, isTest: boolean, typePrefix: string | null = null): string {
@@ -79,6 +88,8 @@ export function buildIssueBody(input: IssueContentInput): string {
     '',
     neutralizeGitHubMentions(input.description.trim()),
     '',
+    ...(input.answers ?? []).flatMap((a) => [`### ${headingText(a.question)}`, '', neutralizeGitHubMentions(a.value.trim()), '']),
+    ...(input.filesBlock ? [input.filesBlock, ''] : []),
     '### Ticket details',
     '',
     '| | |',

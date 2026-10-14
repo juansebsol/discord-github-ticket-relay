@@ -79,10 +79,16 @@ All other configuration is stored in the database and managed in the console.
 | Logs | `pm2 logs ticket-relay-web` / `pm2 logs ticket-relay-worker` |
 | Scale workers | `pm2 scale ticket-relay-worker 4` |
 | Backup (online) | `sqlite3 data/ticket-relay.db ".backup 'backups/relay-$(date +%F).db'"` |
+| Backup files | `tar czf backups/files-$(date +%F).tgz -C data files` (screenshots attached to tickets) |
 | Restore | `pm2 stop all`, replace the database file (remove `-wal`/`-shm`), `pm2 start all` |
 
 Keep the `.env` (especially `ENCRYPTION_KEY`) alongside database backups. A backup can't be
 decrypted without it.
+
+Attached files live in `FILES_DIR` (default `data/files`). They're served at `/f/<id>` through
+the web process, so no Caddy change is needed. A file deleted in the console (or by the cleanup
+rules on the Tickets › Files tab) is gone from disk right away, but stays in older backups until
+they rotate out.
 
 ## Scaling
 

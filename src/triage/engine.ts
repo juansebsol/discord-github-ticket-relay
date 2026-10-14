@@ -8,6 +8,7 @@
  */
 import type { Queryable } from '../db/database.js';
 import { createdWithNoteMessage } from '../discord/messages.js';
+import { cleanUpSpam, fileCounts } from '../domain/files.js';
 import { decryptPayload, getSubmission, addEvent } from '../domain/submissions.js';
 import { getDiscordConnection, getGitHubConnection } from '../domain/store.js';
 import { neutralizeGitHubMentions } from '../github/issue-content.js';
@@ -172,6 +173,10 @@ export async function applyToGitHub(deps: Deps, sub: SubmissionRow, actions: Tri
   }
   if (parts.length) await gh.createComment(inst, owner, repo, n, parts.join('\n\n'));
   if (closing) await gh.closeIssue(inst, owner, repo, n);
+  if (actions.some((a) => a.kind === 'spam' && a.close)) {
+    // Spam files aren't kept around when the cleanup rules say so.
+    await cleanUpSpam(deps, sub).catch((err) => deps.log.warn({ submission: sub.ref, err: (err as Error).message }, 'could not delete spam files'));
+  }
 }
 
 /** Suggestions saved before comment templates existed keep their original fixed text. */
@@ -195,7 +200,7 @@ export async function tellMember(deps: Deps, sub: SubmissionRow, actions: Triage
   const t = rows[0];
   if (!t?.interaction_token_enc || !t.interaction_token_expires_at || t.interaction_token_expires_at.getTime() < Date.now()) return false;
   const { flags: _ephemeralIsFixedAtCreation, ...edit } = createdWithNoteMessage(
-    { appName: sub.app_name, ref: sub.ref, issueNumber: sub.issue_number, issueUrl: sub.issue_url, repoPrivate: sub.repo_private },
+    { appName: sub.app_name, ref: sub.ref, issueNumber: sub.issue_number, issueUrl: sub.issue_url, repoPrivate: sub.repo_private, files: await fileCounts(deps.db, sub.id) },
     note,
   );
   try {

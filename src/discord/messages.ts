@@ -5,8 +5,11 @@
  * Limits (Discord docs): select menus hold 25 options; option label/value/description
  * max 100 chars; custom_id max 100; modal title max 45; modals hold 1-5 top-level
  * components; Label label max 45 / description max 100; text input placeholder max 100,
- * value max 4000; embed title 256, description 4096.
+ * value max 4000; file uploads 1-10 files; embed title 256, description 4096.
  */
+import { answerMax, defaultForm, filesId, questionId, type FormSection } from '../domain/forms.js';
+
+export { DEFAULT_GUIDANCE } from '../domain/forms.js';
 
 export const NO_MENTIONS = { parse: [] as string[] };
 export const EPHEMERAL = 1 << 6;
@@ -18,6 +21,7 @@ export const ComponentType = {
   TextInput: 4,
   TextDisplay: 10,
   Label: 18,
+  FileUpload: 19,
 } as const;
 
 export const CustomId = {
@@ -190,13 +194,15 @@ export interface FormType {
   placeholder: string | null;
 }
 
-export const DEFAULT_GUIDANCE = 'When it applies, include the steps to reproduce it, what you expected to happen and what actually happened.';
-
 /** Ephemeral step between choosing the app and the form: what kind of ticket is it? */
-export function buildTypePicker(app: { publicId: string; name: string; repoId: number }, types: { publicId: string; name: string; description: string | null }[]) {
+export function buildTypePicker(app: { publicId: string; name: string; repoId: number; repoPrivate: boolean }, types: { publicId: string; name: string; description: string | null }[]) {
   return {
     content: '',
-    embeds: [{ title: 'What kind of ticket is this?', description: `Choose a type for your **${escapeMarkdown(app.name)}** ticket.`, color: COLORS.brand }],
+    embeds: [{
+      title: 'What kind of ticket is this?',
+      description: `Choose a type for your **${escapeMarkdown(app.name)}** ticket.\n\n${visibilityNotice(app.repoPrivate)} Don’t include passwords or other private details, in the text or in screenshots.`,
+      color: COLORS.brand,
+    }],
     flags: EPHEMERAL,
     components: [
       {
@@ -219,48 +225,47 @@ export function buildTypePicker(app: { publicId: string; name: string; repoId: n
   };
 }
 
-export function buildTicketModal(app: { publicId: string; name: string; repoId: number; repoPrivate: boolean }, type?: FormType) {
+/** The intro text at the top of a form, always followed by who can see the report. */
+export function formIntro(app: { name: string; repoPrivate: boolean }, type: { name: string } | undefined, text: string, escape = true): string {
+  const e = escape ? escapeMarkdown : (v: string) => v;
+  const lead = type ? `**${e(type.name)}** for **${e(app.name)}**.` : `Describe your problem with **${e(app.name)}**.`;
+  return [`${lead} ${text.trim()}`, '', `${visibilityNotice(app.repoPrivate)} Do not include passwords, tokens or other secrets.`].join('\n');
+}
+
+function labelled(s: FormSection, component: Record<string, unknown>) {
+  return {
+    type: ComponentType.Label,
+    label: truncate(s.label.trim() || 'Question', 45),
+    ...(s.hint.trim() ? { description: truncate(s.hint.trim(), 100) } : {}),
+    component,
+  };
+}
+
+function textInput(s: FormSection, o: { custom_id: string; style: 1 | 2; min_length?: number; max_length: number; required: boolean }) {
+  return { type: ComponentType.TextInput, ...o, ...(s.placeholder.trim() ? { placeholder: truncate(s.placeholder.trim(), 100) } : {}) };
+}
+
+/** The ticket form for an app (and type), built from the type's sections. */
+export function buildTicketModal(app: { publicId: string; name: string; repoId: number; repoPrivate: boolean }, type?: FormType, sections?: FormSection[]) {
+  const form = sections ?? defaultForm(type ? { name: type.name, guidance: type.guidance, placeholder: type.placeholder } : null);
   return {
     custom_id: CustomId.form(app.publicId, app.repoId, type?.publicId),
     title: truncate(type ? `${type.name}: ${app.name}` : `New ticket: ${app.name}`, 45),
-    components: [
-      {
-        type: ComponentType.TextDisplay,
-        content: [
-          `${type ? `**${escapeMarkdown(type.name)}** for **${escapeMarkdown(app.name)}**.` : `Describe your problem with **${escapeMarkdown(app.name)}**.`} ${type?.guidance?.trim() || DEFAULT_GUIDANCE}`,
-          '',
-          `${visibilityNotice(app.repoPrivate)} Do not include passwords, tokens or other secrets.`,
-        ].join('\n'),
-      },
-      {
-        type: ComponentType.Label,
-        label: 'Title',
-        description: 'A short summary of the problem.',
-        component: {
-          type: ComponentType.TextInput,
-          custom_id: CustomId.titleInput,
-          style: 1,
-          min_length: 3,
-          max_length: TITLE_MAX,
-          required: true,
-          placeholder: 'e.g. Export button does nothing on the reports page',
-        },
-      },
-      {
-        type: ComponentType.Label,
-        label: 'Description',
-        description: type ? 'The details that help the team act on it.' : 'Steps to reproduce, expected behavior and actual behavior.',
-        component: {
-          type: ComponentType.TextInput,
-          custom_id: CustomId.descriptionInput,
-          style: 2,
-          min_length: 10,
-          max_length: DESCRIPTION_MAX,
-          required: true,
-          placeholder: truncate(type?.placeholder?.trim() || '1. Go to…  2. Click…  Expected: …  Actual: …', 100),
-        },
-      },
-    ],
+    components: form.slice(0, 5).map((s) => {
+      switch (s.kind) {
+        case 'intro':
+          return { type: ComponentType.TextDisplay, content: formIntro(app, type, s.text) };
+        case 'title':
+          return labelled(s, textInput(s, { custom_id: CustomId.titleInput, style: 1, min_length: 3, max_length: TITLE_MAX, required: true }));
+        case 'description':
+          return labelled(s, textInput(s, { custom_id: CustomId.descriptionInput, style: 2, min_length: 10, max_length: DESCRIPTION_MAX, required: true }));
+        case 'short':
+        case 'paragraph':
+          return labelled(s, textInput(s, { custom_id: questionId(s.key), style: s.kind === 'short' ? 1 : 2, max_length: answerMax(s.kind), required: s.required }));
+        case 'files':
+          return labelled(s, { type: ComponentType.FileUpload, custom_id: filesId(s.key), min_values: s.required ? 1 : 0, max_values: s.maxFiles, required: s.required });
+      }
+    }),
   };
 }
 
@@ -279,12 +284,17 @@ function reply(embed: Embed, components: unknown[] = []) {
 }
 
 /** The "Ticket submitted" reply with a note from triage underneath (for example "ask in #help"). */
-export function createdWithNoteMessage(s: { appName: string; ref: string; issueNumber: number; issueUrl: string; repoPrivate: boolean }, note: string) {
+export function createdWithNoteMessage(s: { appName: string; ref: string; issueNumber: number; issueUrl: string; repoPrivate: boolean; files?: { stored: number; failed: number } }, note: string) {
   const base = createdMessage(s);
   return { ...base, embeds: [...base.embeds, { title: 'A note about your ticket', description: truncate(note, 4000), color: COLORS.brand }] };
 }
 
-export function createdMessage(s: { appName: string; ref: string; issueNumber: number; issueUrl: string; repoPrivate: boolean }) {
+export function createdMessage(s: { appName: string; ref: string; issueNumber: number; issueUrl: string; repoPrivate: boolean; files?: { stored: number; failed: number } }) {
+  const files = s.files
+    ? s.files.failed
+      ? `${s.files.stored ? `${s.files.stored} file${s.files.stored === 1 ? ' was' : 's were'} attached. ` : ''}${s.files.failed} file${s.files.failed === 1 ? '' : 's'} couldn’t be attached: only images and videos up to 25 MB are accepted.`
+      : `${s.files.stored} file${s.files.stored === 1 ? ' was' : 's were'} attached to the ticket.`
+    : null;
   return reply(
     {
       title: 'Ticket submitted',
@@ -294,6 +304,7 @@ export function createdMessage(s: { appName: string; ref: string; issueNumber: n
         s.repoPrivate
           ? 'The ticket is stored in a private repository. The link below only works for people with access to that repository.'
           : 'The ticket is public on GitHub, so anyone with the link can read it.',
+        ...(files ? ['', files] : []),
       ].join('\n'),
       color: COLORS.success,
       fields: [
