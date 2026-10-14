@@ -103,3 +103,31 @@ export function buildIssueBody(input: IssueContentInput): string {
   ];
   return parts.filter((p) => p !== null).join('\n');
 }
+
+export interface IssueText {
+  description: string;
+  answers: { question: string; value: string }[];
+}
+
+/**
+ * Reads the description and answers back out of an issue this app filed (the reverse of
+ * buildIssueBody), for showing the ticket in the console. Edits made on GitHub are kept;
+ * if the sections were removed, the whole body is the description.
+ */
+export function parseIssueBody(body: string): IssueText {
+  const start = body.indexOf('### Description');
+  const end = body.indexOf('### Ticket details');
+  const main = start >= 0 ? body.slice(start + '### Description'.length, end > start ? end : undefined) : body;
+  const text = main
+    .replace(/<!-- ticket-relay:files -->[\s\S]*?<!-- \/ticket-relay:files -->/g, '')
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/​/g, '')
+    .replace(/\r\n/g, '\n');
+  const parts = text.split(/^### (.+)$/m);
+  const answers: IssueText['answers'] = [];
+  for (let i = 1; i + 1 < parts.length; i += 2) {
+    const value = parts[i + 1]!.trim();
+    if (value) answers.push({ question: parts[i]!.trim(), value });
+  }
+  return { description: parts[0]!.trim(), answers };
+}

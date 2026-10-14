@@ -2,7 +2,9 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { checkPanel } from '../../domain/panel.js';
 import { can } from '../../domain/permissions.js';
-import { getDiscordConnection, listApps } from '../../domain/store.js';
+import { getDiscordConnection, getGitHubConnection, listApps } from '../../domain/store.js';
+import { GitHubApiError } from '../../github/client.js';
+import { parseIssueBody, type IssueText } from '../../github/issue-content.js';
 import { countByStatus, decryptPayload, getSubmission, listEvents, listSubmissions, type SubmissionFilter, type TriageFilter } from '../../domain/submissions.js';
 import { describeAction, triageSummaries, type TriageAction, type TriageResultRow } from '../../triage/engine.js';
 import { getTriageSettings, MISSING_SHORT, type Priority } from '../../triage/settings.js';
@@ -309,6 +311,45 @@ function triageCard(t: TriageResultRow, s: SubmissionRow, o: { act: boolean; csr
   return html`<div class="card"><div class="card-h"><div class="title">${icon('bot', 16)}<h2>Triage</h2></div>${status}</div><div class="card-b tight">${content}</div></div>`;
 }
 
+/** The issue's text as it is on GitHub now, for filed tickets. Nothing is stored except its state. */
+type LiveIssue = { kind: 'ok'; text: IssueText; state: 'open' | 'closed'; stateReason: string | null } | { kind: 'missing' } | { kind: 'error' };
+
+const LIVE_TIMEOUT_MS = 5000;
+
+async function loadLiveIssue(deps: Web['deps'], s: SubmissionRow): Promise<LiveIssue> {
+  if (!deps.github || !s.issue_number) return { kind: 'error' };
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const conn = await getGitHubConnection(deps.db, s.workspace_id);
+    const detail = await Promise.race([
+      deps.github.getIssueDetail(conn?.installation_id ?? s.installation_id, s.repo_owner, s.repo_name, s.issue_number),
+      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('timeout')), LIVE_TIMEOUT_MS); }),
+    ]);
+    // Keep the Files tab's view of the issue current while we're here.
+    await deps.db.query('UPDATE submissions SET issue_state = $2, issue_state_reason = $3, issue_closed_at = $4, issue_checked_at = now_ms() WHERE id = $1', [s.id, detail.state, detail.stateReason, detail.closedAt]);
+    return { kind: 'ok', text: parseIssueBody(detail.body), state: detail.state, stateReason: detail.stateReason };
+  } catch (err) {
+    if (err instanceof GitHubApiError && (err.status === 404 || err.status === 410)) {
+      await deps.db.query(`UPDATE submissions SET issue_state = 'missing', issue_checked_at = now_ms() WHERE id = $1`, [s.id]);
+      return { kind: 'missing' };
+    }
+    return { kind: 'error' };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function issueStatePill(live: LiveIssue): SafeHtml | string {
+  if (live.kind === 'missing') return pill('Deleted on GitHub', 'warn');
+  if (live.kind !== 'ok') return '';
+  if (live.state === 'open') return pill('Open', 'ok');
+  return pill(live.stateReason === 'not_planned' ? 'Closed · not planned' : live.stateReason === 'duplicate' ? 'Closed · duplicate' : 'Closed', 'closed');
+}
+
+function ticketText(description: string, answers: IssueText['answers']): SafeHtml {
+  return html`${description ? html`<p class="ticket-text">${description}</p>` : html`<p class="small muted">No description.</p>`}${answers.map((a) => html`<h3 class="answer-q">${a.question}</h3><p class="ticket-text">${a.value}</p>`)}`;
+}
+
 const CLOSE_REASONS = [
   { value: 'Spam', title: 'Spam', desc: 'Not a real ticket.' },
   { value: 'Duplicate', title: 'Duplicate', desc: 'Already reported in another issue.' },
@@ -422,6 +463,7 @@ export function registerTicketRoutes(app: FastifyInstance, web: Web): void {
     const files = await listTicketFiles(deps.db, s.id);
     const names = await userNames(deps.db, [s.resolved_by, ...events.map((e) => (typeof e.detail.by === 'string' ? e.detail.by : null)), ...files.flatMap((f) => [f.added_by, f.deleted_by])]);
     const payload = decryptPayload(deps.box, s);
+    const live: LiveIssue | null = s.status === 'created' && s.issue_number ? await loadLiveIssue(deps, s) : null;
     const act = can(ctx.membership, 'tickets.act');
     const actionBase = `${b}/tickets/${s.id}`;
     const repo = `${s.repo_owner}/${s.repo_name}`;
@@ -487,11 +529,18 @@ export function registerTicketRoutes(app: FastifyInstance, web: Web): void {
       ${unresolved && !act ? html`<div class="viewonly">${icon('eye', 16)}View only. Check, retry, link and close need the Act on tickets permission. Ask an admin or the owner.</div>` : ''}
 
       <div class="detail-grid">
-        <div class="a-desc a-col"><div class="card"><div class="card-h"><h2>Description</h2></div>
-          <div class="card-b">${payload?.description
-            ? html`<p class="ticket-text">${payload.description}</p>${(payload.answers ?? []).map((a) => html`<h3 class="answer-q">${a.question}</h3><p class="ticket-text">${a.value}</p>`)}`
-            : html`<p class="muted small">${s.status === 'created' ? 'The description and answers now live in the GitHub issue. Only the title is kept here.' : s.payload_purged_at ? `Deleted after the retention period (${formatDate(s.payload_purged_at)}).` : 'Not available.'}</p>`}</div>
-          ${payload?.description && (unresolved || s.status === 'pending') ? html`<div class="card-note">Stored encrypted so the ticket can be retried. Kept until it’s resolved, at most 90 days.</div>` : ''}
+        <div class="a-desc a-col"><div class="card"><div class="card-h"><h2>Description</h2>${live && s.issue_url ? html`<a class="small inline gap-4 nowrap" href="${s.issue_url}" target="_blank" rel="noopener noreferrer">Edit on GitHub${icon('arrow-up-right', 14)}</a>` : ''}</div>
+          <div class="card-b">${live
+            ? live.kind === 'ok'
+              ? ticketText(live.text.description, live.text.answers)
+              : live.kind === 'missing'
+                ? html`<p class="muted small">The GitHub issue was deleted, so its description is gone too.</p>`
+                : html`<p class="muted small">Couldn’t load the description from GitHub right now. Reload to try again, or <a href="${s.issue_url ?? '#'}" target="_blank" rel="noopener noreferrer">open the issue on GitHub</a>.</p>`
+            : payload?.description
+              ? ticketText(payload.description, payload.answers ?? [])
+              : html`<p class="muted small">${s.payload_purged_at ? `Deleted after the retention period (${formatDate(s.payload_purged_at)}).` : 'Not available.'}</p>`}</div>
+          ${live?.kind === 'ok' ? html`<div class="card-note">Shown live from the GitHub issue, including edits made there. It isn’t stored here.</div>` : ''}
+          ${!live && payload?.description && (unresolved || s.status === 'pending') ? html`<div class="card-note">Stored encrypted so the ticket can be retried. Kept until it’s resolved, at most 90 days.</div>` : ''}
         </div>
         ${files.length || (act && s.status === 'created') ? filesCard({ files, actionBase, csrf: ctx.csrf, canAct: act, filed: s.status === 'created', names }) : ''}</div>
 
@@ -512,7 +561,7 @@ export function registerTicketRoutes(app: FastifyInstance, web: Web): void {
             <dt>Discord ID</dt><dd><span class="mono">${s.reporter_discord_id}</span>${copyBtn(s.reporter_discord_id, 'Copy Discord ID')}</dd>
             <dt>Repository</dt><dd>${icon('folder-git-2', 14)}<a class="mono" href="${repoUrl}" target="_blank" rel="noopener noreferrer">${repo}</a>${tag(s.repo_private ? 'Private' : 'Public', { icon: s.repo_private ? 'lock' : 'globe' })}</dd>
             ${s.labels.length ? html`<dt>Labels</dt><dd>${s.labels.map((l) => labelTag(l))}</dd>` : ''}
-            <dt>GitHub issue</dt><dd>${s.issue_url ? issueRef(s) : html`<span class="muted">Not filed yet</span>`}</dd>
+            <dt>GitHub issue</dt><dd>${s.issue_url ? html`${issueRef(s)}${live ? issueStatePill(live) : ''}` : html`<span class="muted">Not filed yet</span>`}</dd>
             <dt>Reference</dt><dd><span class="mono">${s.ref}</span>${copyBtn(s.ref, 'Copy reference')}</dd>
             <dt>Submitted</dt><dd>${when(s.created_at)}</dd>
             ${s.attempts > 1 ? html`<dt>Attempts</dt><dd>${String(s.attempts)}</dd>` : ''}

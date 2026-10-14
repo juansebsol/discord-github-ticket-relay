@@ -374,6 +374,53 @@ describe('files members attach in Discord', () => {
   });
 });
 
+// ---- Live description ---------------------------------------------------------------------------------
+
+describe('ticket page description', () => {
+  it('shows the description and answers live from GitHub, with edits made there', async () => {
+    const { sub } = await submitBug({ files: [{ name: 'shot.png', body: png() }] });
+    const url = `${w()}/tickets/${sub.id}`;
+    // Nothing but the title is stored once the issue exists.
+    expect(JSON.stringify(await env.db.query('SELECT payload_enc FROM submissions WHERE id = $1', [sub.id]))).not.toContain('Windows');
+
+    let page = await env.server.inject({ method: 'GET', url, ...get(ws.owner) });
+    expect(page.body).toContain('I click export and the app closes right away.');
+    expect(page.body).toMatch(/<h3 class="answer-q">Operating system and version<\/h3><p class="ticket-text">Windows 11 23H2<\/p>/);
+    expect(page.body).toContain('Shown live from the GitHub issue');
+    expect(page.body).not.toContain('### Attachments');
+    expect(page.body).toContain('>Open</span>');
+
+    // A maintainer edits the issue and closes it: the page follows.
+    const i = env.github.repos.get(ws.repoIds[0]!)!.issues.find((x) => x.number === sub.issue_number)!;
+    i.body = i.body.replace('Windows 11 23H2', 'Windows 10 22H2 (corrected by a maintainer)');
+    i.state = 'closed';
+    i.state_reason = 'not_planned';
+    page = await env.server.inject({ method: 'GET', url, ...get(ws.owner) });
+    expect(page.body).toContain('Windows 10 22H2 (corrected by a maintainer)');
+    expect(page.body).toContain('Closed · not planned');
+    expect((await env.db.query('SELECT issue_state FROM submissions WHERE id = $1', [sub.id])).rows[0].issue_state).toBe('closed');
+
+    // Moderators who can only view tickets see it too.
+    const viewer = await joinAs('moderator', 'mod-reader');
+    expect((await env.server.inject({ method: 'GET', url, ...get(viewer) })).body).toContain('Windows 10 22H2');
+
+    // GitHub unavailable: the page still loads and says so.
+    const real = env.deps.github!.getIssueDetail.bind(env.deps.github!);
+    env.deps.github!.getIssueDetail = async () => { throw new Error('GitHub is down'); };
+    page = await env.server.inject({ method: 'GET', url, ...get(ws.owner) });
+    expect(page.statusCode).toBe(200);
+    expect(page.body).toContain('Couldn’t load the description from GitHub right now.');
+    env.deps.github!.getIssueDetail = real;
+
+    // Issue deleted on GitHub.
+    const repo = env.github.repos.get(ws.repoIds[0]!)!;
+    repo.issues = repo.issues.filter((x) => x.number !== sub.issue_number);
+    page = await env.server.inject({ method: 'GET', url, ...get(ws.owner) });
+    expect(page.body).toContain('The GitHub issue was deleted');
+    expect(page.body).toContain('Deleted on GitHub');
+  });
+});
+
 // ---- Files from the team -------------------------------------------------------------------------------
 
 describe('files on the ticket page', () => {
