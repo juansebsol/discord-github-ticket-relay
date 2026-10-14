@@ -782,6 +782,8 @@ th.th-perm:first-child { padding-left: 20px; }
 .ph-actions { margin-bottom: -2px; }
 @media (max-width: 640px) { th.th-perm:first-child { padding-left: 16px; } }
 .setting.stacked { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+/* The label column never collapses, even when a control is wide. */
+.setting:not(.stacked) > :first-child { min-width: min(220px, 100%); }
 .setting.stacked .control { justify-content: flex-start; }
 @media (max-width: 640px) { .ph-desc { order: 1; } .ph-actions { order: 2; } }
 @media (max-width: 640px) {
