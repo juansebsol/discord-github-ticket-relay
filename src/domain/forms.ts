@@ -51,7 +51,7 @@ const SectionSchema = z.object({
 });
 
 export const DEFAULT_GUIDANCE = 'When it applies, include the steps to reproduce it, what you expected to happen and what actually happened.';
-export const FILES_HINT = 'Images up to 10 MB each. Hide anything private first.';
+export const FILES_HINT = 'Up to 5 PNG or JPG images, 10 MB in total. Hide anything private first.';
 
 const KEY = /^[a-z0-9]{2,12}$/;
 

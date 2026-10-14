@@ -4,8 +4,9 @@
  * GitHub has no upload API for apps and Discord's file links expire, so files are kept on
  * this server under a long random ID and the GitHub issue shows them from that link.
  * Safety rules:
- * - Only images (PNG, JPEG, GIF, WebP) up to 10 MB are kept, recognised by their content,
- *   never by the name. No videos, and nothing a browser could run (HTML, SVG, PDF…).
+ * - Only PNG and JPG images are kept, recognised by their content, never by the name: no
+ *   videos, GIFs or anything a browser could run (HTML, SVG, PDF…). A member's files are
+ *   limited to 10 MB in total per ticket.
  * - Location and camera data is removed from photos before they are saved.
  * - Member files are copied from Discord as soon as the ticket arrives, before GitHub is
  *   contacted, because Discord's links expire.
@@ -27,6 +28,8 @@ import type { IncomingFile } from './submissions.js';
 import type { Deps, SubmissionRow } from './types.js';
 
 export const MAX_FILE_BYTES = 10 * 1024 * 1024;
+/** Everything a member attaches to one ticket. */
+export const MAX_TICKET_BYTES = 10 * 1024 * 1024;
 const MB = 1024 * 1024;
 /** Always leave this much disk free for the database and logs. */
 const MIN_FREE_DISK = 1024 * MB;
@@ -56,9 +59,13 @@ export interface TicketFile {
 }
 
 export const FILE_ID = /^[A-Za-z0-9_-]{22}$/;
-export const ACCEPTED = 'PNG, JPG, GIF or WebP';
-export const ACCEPT_ATTR = 'image/png,image/jpeg,image/gif,image/webp';
+export const ACCEPTED = 'PNG or JPG';
+export const ACCEPT_ATTR = 'image/png,image/jpeg';
+/** Extensions Discord's file picker is limited to (it only looks at the name; contents are checked here). */
+export const DISCORD_FILE_TYPES = ['.png', '.jpg', '.jpeg'];
 export const TOO_LARGE = 'Larger than 10 MB.';
+export const OVER_TOTAL = 'Over the 10 MB total for one ticket.';
+export const NOT_IMAGE = 'Only PNG or JPG images are accepted.';
 export const NO_VIDEOS = 'Videos aren’t accepted. Attach screenshots instead.';
 
 // ---- Recognising files -------------------------------------------------------------------
@@ -78,8 +85,6 @@ export function sniff(b: Buffer): FileType | null {
   const ascii = (start: number, end: number) => b.toString('latin1', start, end);
   if (b.length >= 8 && b.subarray(0, 8).equals(PNG_SIG)) return { kind: 'image', contentType: 'image/png', ext: 'png' };
   if (b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return { kind: 'image', contentType: 'image/jpeg', ext: 'jpg' };
-  if (b.length >= 6 && (ascii(0, 6) === 'GIF87a' || ascii(0, 6) === 'GIF89a')) return { kind: 'image', contentType: 'image/gif', ext: 'gif' };
-  if (b.length >= 12 && ascii(0, 4) === 'RIFF' && ascii(8, 12) === 'WEBP') return { kind: 'image', contentType: 'image/webp', ext: 'webp' };
   return null;
 }
 
@@ -99,7 +104,6 @@ export function stripMetadata(b: Buffer, ext: string): Buffer {
   try {
     if (ext === 'jpg') return stripJpeg(b);
     if (ext === 'png') return stripPng(b);
-    if (ext === 'webp') return stripWebp(b);
   } catch {
     return b;
   }
@@ -188,30 +192,6 @@ function stripPng(b: Buffer): Buffer {
     if (type === 'IEND') break;
   }
   return Buffer.concat(out);
-}
-
-/** WebP: drops EXIF and XMP chunks and clears their flags. */
-function stripWebp(b: Buffer): Buffer {
-  const chunks: Buffer[] = [];
-  let i = 12;
-  while (i + 8 <= b.length) {
-    const fourcc = b.toString('latin1', i, i + 4);
-    const size = b.readUInt32LE(i + 4);
-    const end = i + 8 + size + (size & 1);
-    if (end > b.length) return b;
-    if (fourcc !== 'EXIF' && fourcc !== 'XMP ') {
-      const chunk = Buffer.from(b.subarray(i, end));
-      if (fourcc === 'VP8X' && chunk.length > 8) chunk[8] = chunk[8]! & ~(0x08 | 0x04);
-      chunks.push(chunk);
-    }
-    i = end;
-  }
-  const body = Buffer.concat(chunks);
-  const head = Buffer.alloc(12);
-  head.write('RIFF', 0, 'latin1');
-  head.writeUInt32LE(body.length + 4, 4);
-  head.write('WEBP', 8, 'latin1');
-  return Buffer.concat([head, body]);
 }
 
 // ---- Names, links and sizes --------------------------------------------------------------
@@ -312,10 +292,13 @@ export async function fileCounts(q: Queryable, submissionId: string): Promise<{ 
 
 /** Records the files a member attached when the ticket is accepted (downloaded when it's filed). */
 export async function recordIncomingFiles(q: Queryable, box: SecretBox, sub: SubmissionRow, files: IncomingFile[]): Promise<void> {
+  let total = 0;
   for (const f of files) {
-    const video = /^video\//.test(f.contentType ?? '');
-    const wrongType = Boolean(f.contentType) && !/^image\//.test(f.contentType!);
-    const error = video ? NO_VIDEOS : wrongType ? `Not an image (${ACCEPTED}).` : f.size > MAX_FILE_BYTES ? TOO_LARGE : null;
+    const type = (f.contentType ?? '').toLowerCase();
+    const video = type.startsWith('video/');
+    const wrongType = Boolean(type) && !['image/png', 'image/jpeg', 'image/jpg'].includes(type);
+    const error = video ? NO_VIDEOS : wrongType ? NOT_IMAGE : f.size > MAX_FILE_BYTES ? TOO_LARGE : total + f.size > MAX_TICKET_BYTES ? OVER_TOTAL : null;
+    if (!error) total += Math.max(0, f.size);
     await q.query(
       `INSERT INTO ticket_files (id, workspace_id, submission_id, source, filename, size, status, source_url_enc, error)
        VALUES ($1, $2, $3, 'member', $4, $5, $6, $7, $8)`,
@@ -338,7 +321,7 @@ async function freeDisk(dir: string): Promise<number> {
 /** Checks, cleans and writes one file. */
 async function storeBuffer(deps: Pick<Deps, 'db' | 'config'>, f: Pick<TicketFile, 'id' | 'workspace_id'>, data: Buffer): Promise<StoreResult> {
   const type = sniff(data);
-  if (!type) return { ok: false, error: isHeic(data) ? 'HEIC photos aren’t supported. Send a screenshot or a JPG instead.' : isVideo(data) ? NO_VIDEOS : `Not an image (${ACCEPTED}).` };
+  if (!type) return { ok: false, error: isHeic(data) ? 'HEIC photos aren’t supported. Send a screenshot or a JPG instead.' : isVideo(data) ? NO_VIDEOS : NOT_IMAGE };
   if (data.length > MAX_FILE_BYTES) return { ok: false, error: TOO_LARGE };
   const clean = stripMetadata(data, type.ext);
   const [settings, usage] = await Promise.all([getFileSettings(deps.db, f.workspace_id), storageUsage(deps.db, f.workspace_id)]);
@@ -373,6 +356,8 @@ export async function storePendingFiles(deps: Deps, sub: SubmissionRow): Promise
   const { rows } = await deps.db.query<TicketFile>(`SELECT * FROM ticket_files WHERE submission_id = $1 AND status = 'pending' ORDER BY created_at, rowid`, [sub.id]);
   if (!rows.length) return;
   let stored = 0;
+  // The 10 MB total is checked again on the real sizes, which Discord only reported before.
+  let used = (await deps.db.query<{ n: number }>(`SELECT coalesce(sum(size), 0) AS n FROM ticket_files WHERE submission_id = $1 AND source = 'member' AND status = 'stored'`, [sub.id])).rows[0]!.n;
   // Stay well inside the filing lease (90s) even if Discord is very slow.
   const deadline = Date.now() + 60_000;
   for (const f of rows) {
@@ -380,7 +365,11 @@ export async function storePendingFiles(deps: Deps, sub: SubmissionRow): Promise
     try {
       if (!deps.discord || !f.source_url_enc) result = { ok: false, error: 'The file link is no longer available.' };
       else if (Date.now() > deadline) result = { ok: false, error: 'Discord was too slow to download it.' };
-      else result = await storeBuffer(deps, f, await deps.discord.downloadAttachment(deps.box.decrypt(f.source_url_enc), MAX_FILE_BYTES));
+      else {
+        const data = await deps.discord.downloadAttachment(deps.box.decrypt(f.source_url_enc), MAX_FILE_BYTES);
+        result = used + data.length > MAX_TICKET_BYTES ? { ok: false, error: OVER_TOTAL } : await storeBuffer(deps, f, data);
+        if (result.ok) used += result.size;
+      }
     } catch (err) {
       if (err instanceof AttachmentError) result = { ok: false, error: err.code === 'too_large' ? TOO_LARGE : err.message };
       else if (err instanceof NetworkError) result = { ok: false, error: 'Discord couldn’t be reached to download it.' };

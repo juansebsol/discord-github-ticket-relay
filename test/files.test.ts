@@ -180,7 +180,7 @@ describe('forms per ticket type', () => {
     expect(intro.content).toMatch(/publicly on GitHub/);
     expect([title.component.custom_id, desc.component.custom_id]).toEqual(['title', 'description']);
     expect(os).toMatchObject({ type: 18, label: 'Operating system and version', component: { type: 4, custom_id: 'q:os', style: 1, required: true } });
-    expect(files).toMatchObject({ type: 18, label: 'Screenshots', component: { type: 19, custom_id: 'f:shots', min_values: 0, max_values: 5, required: false } });
+    expect(files).toMatchObject({ type: 18, label: 'Screenshots', description: 'Up to 5 PNG or JPG images, 10 MB in total. Hide anything private first.', component: { type: 19, custom_id: 'f:shots', min_values: 0, max_values: 5, required: false, file_types: ['.png', '.jpg', '.jpeg'] } });
     for (const c of modal.components.slice(1) as any[]) {
       expect(c.label.length).toBeLessThanOrEqual(45);
       if (c.description) expect(c.description.length).toBeLessThanOrEqual(100);
@@ -284,18 +284,46 @@ describe('files members attach in Discord', () => {
         { name: 'sneaky.png', body: mp4(), type: 'image/png' },
       ],
     });
-    expect(files.map((f) => [f.filename, f.status])).toEqual([['evil.png', 'failed'], ['huge.png', 'failed'], ['gone.png', 'failed'], ['clip.mp4', 'failed'], ['sneaky.png', 'failed']]);
-    expect(files.map((f) => f.error)).toEqual([
-      'Not an image (PNG, JPG, GIF or WebP).',
-      'Larger than 10 MB.',
-      'Discord no longer has the file.',
-      'Videos aren’t accepted. Attach screenshots instead.',
-      'Videos aren’t accepted. Attach screenshots instead.',
+    // The form allows 5 files, so a second ticket brings the other odd formats.
+    const more = await submitBug({
+      title: 'Other formats',
+      files: [
+        { name: 'party.gif', body: Buffer.from('GIF89a\x01\x00\x01\x00', 'latin1'), type: 'image/gif' },
+        { name: 'logo.svg', body: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'), type: 'image/svg+xml' },
+        { name: 'photo.webp.png', body: Buffer.from('RIFF\x10\x00\x00\x00WEBPVP8 ', 'latin1'), type: 'image/png' },
+      ],
+    });
+    const all = [...files, ...more.files];
+    expect(all.every((f) => f.status === 'failed')).toBe(true);
+    expect(all.map((f) => [f.filename, f.error])).toEqual([
+      ['evil.png', 'Only PNG or JPG images are accepted.'],
+      ['huge.png', 'Larger than 10 MB.'],
+      ['gone.png', 'Discord no longer has the file.'],
+      ['clip.mp4', 'Videos aren’t accepted. Attach screenshots instead.'],
+      ['sneaky.png', 'Videos aren’t accepted. Attach screenshots instead.'],
+      ['party.gif', 'Only PNG or JPG images are accepted.'],
+      ['logo.svg', 'Only PNG or JPG images are accepted.'],
+      ['photo.webp.png', 'Only PNG or JPG images are accepted.'],
     ]);
     // Files refused up front are never downloaded.
-    expect(env.discord.cdnRequests.some((p) => p.endsWith('huge.png') || p.endsWith('clip.mp4'))).toBe(false);
-    expect(issue().body).toContain('_evil.png couldn’t be attached: Not an image');
-    expect(JSON.stringify(env.discord.interactionEdits.at(-1)!.payload)).toContain('5 files couldn’t be attached');
+    expect(env.discord.cdnRequests.some((p) => /huge\.png|clip\.mp4|party\.gif|logo\.svg/.test(p))).toBe(false);
+    expect(issue().body).toContain('_evil.png couldn’t be attached: Only PNG or JPG images are accepted._');
+    expect(JSON.stringify(env.discord.interactionEdits.at(-1)!.payload)).toContain('3 files couldn’t be attached. Only PNG or JPG images, 10 MB in total, are accepted.');
+  });
+
+  it('keeps a member’s files to 10 MB in total per ticket', async () => {
+    // Sizes Discord reports are checked first; the real sizes are checked again when copying.
+    const { files } = await submitBug({
+      files: [
+        { name: 'one.png', body: png(), size: 4 * 1024 * 1024 },
+        { name: 'two.png', body: png(), size: 4 * 1024 * 1024 },
+        { name: 'three.png', body: png(), size: 4 * 1024 * 1024 },
+      ],
+    });
+    expect(files.map((f) => [f.filename, f.status, f.error])).toEqual([['one.png', 'stored', null], ['two.png', 'stored', null], ['three.png', 'failed', 'Over the 10 MB total for one ticket.']]);
+    const big = () => Buffer.concat([png().subarray(0, -12), pngChunk('IDAT', Buffer.alloc(6 * 1024 * 1024)), pngChunk('IEND', Buffer.alloc(0))]);
+    const second = await submitBug({ title: 'Lying about sizes', files: [{ name: 'a.png', body: big(), size: 100 }, { name: 'b.png', body: big(), size: 100 }] });
+    expect(second.files.map((f) => [f.filename, f.status, f.error])).toEqual([['a.png', 'stored', null], ['b.png', 'failed', 'Over the 10 MB total for one ticket.']]);
   });
 
   it('copies the files from Discord right away, even while GitHub is down', async () => {
@@ -480,6 +508,8 @@ describe('file helpers', () => {
     expect(sniff(png())?.contentType).toBe('image/png');
     expect(sniff(jpeg())?.ext).toBe('jpg');
     expect(sniff(mp4())).toBeNull();
+    expect(sniff(Buffer.from('GIF89a\x01\x00\x01\x00', 'latin1'))).toBeNull();
+    expect(sniff(Buffer.from('RIFF\x10\x00\x00\x00WEBPVP8 ', 'latin1'))).toBeNull();
     expect(sniff(Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"></svg>'))).toBeNull();
     expect(sniff(Buffer.from('%PDF-1.7'))).toBeNull();
     expect(cleanFilename('../../etc/passwd')).toBe('passwd');

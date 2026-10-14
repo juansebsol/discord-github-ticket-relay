@@ -89,7 +89,7 @@ function sectionEditor(s: FormSection): SafeHtml {
   const questionFields = html`<div class="fields-2">
       ${counterField({ id: id('label'), name: `${k}.label`, label: 'Question', value: s.label, max: LIMITS.label, placeholder: s.kind === 'files' ? 'Screenshots' : 'e.g. Which version are you using?' })}
       ${s.kind === 'files'
-        ? html`<div class="field"><label for="${id('max')}">Files members can attach</label><input type="number" id="${id('max')}" name="${k}.max" value="${String(s.maxFiles)}" min="1" max="${String(MAX_FILES_LIMIT)}" required class="wide"><div class="hint">1 to ${String(MAX_FILES_LIMIT)}. Images only (PNG, JPG, GIF, WebP), up to 10 MB each.</div></div>`
+        ? html`<div class="field"><label for="${id('max')}">Files members can attach</label><input type="number" id="${id('max')}" name="${k}.max" value="${String(s.maxFiles)}" min="1" max="${String(MAX_FILES_LIMIT)}" required class="wide"><div class="hint">1 to ${String(MAX_FILES_LIMIT)}. PNG or JPG only, 10 MB in total per ticket.</div></div>`
         : counterField({ id: id('placeholder'), name: `${k}.placeholder`, label: 'Placeholder', value: s.placeholder, max: LIMITS.placeholder, optional: true, hint: 'Example text inside the empty box.' })}
     </div>
     ${counterField({ id: id('hint'), name: `${k}.hint`, label: 'Hint', value: s.hint, max: LIMITS.hint, optional: true, hint: 'Shown under the question.' })}`;

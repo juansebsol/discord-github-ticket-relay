@@ -7,6 +7,7 @@
  * components; Label label max 45 / description max 100; text input placeholder max 100,
  * value max 4000; file uploads 1-10 files; embed title 256, description 4096.
  */
+import { DISCORD_FILE_TYPES } from '../domain/files.js';
 import { answerMax, defaultForm, filesId, questionId, type FormSection } from '../domain/forms.js';
 
 export { DEFAULT_GUIDANCE } from '../domain/forms.js';
@@ -263,7 +264,7 @@ export function buildTicketModal(app: { publicId: string; name: string; repoId: 
         case 'paragraph':
           return labelled(s, textInput(s, { custom_id: questionId(s.key), style: s.kind === 'short' ? 1 : 2, max_length: answerMax(s.kind), required: s.required }));
         case 'files':
-          return labelled(s, { type: ComponentType.FileUpload, custom_id: filesId(s.key), min_values: s.required ? 1 : 0, max_values: s.maxFiles, required: s.required });
+          return labelled(s, { type: ComponentType.FileUpload, custom_id: filesId(s.key), min_values: s.required ? 1 : 0, max_values: s.maxFiles, required: s.required, file_types: DISCORD_FILE_TYPES });
       }
     }),
   };
@@ -292,7 +293,7 @@ export function createdWithNoteMessage(s: { appName: string; ref: string; issueN
 export function createdMessage(s: { appName: string; ref: string; issueNumber: number; issueUrl: string; repoPrivate: boolean; files?: { stored: number; failed: number } }) {
   const files = s.files
     ? s.files.failed
-      ? `${s.files.stored ? `${s.files.stored} file${s.files.stored === 1 ? ' was' : 's were'} attached. ` : ''}${s.files.failed} file${s.files.failed === 1 ? '' : 's'} couldn’t be attached. Only images (PNG, JPG, GIF or WebP) up to 10 MB are accepted.`
+      ? `${s.files.stored ? `${s.files.stored} file${s.files.stored === 1 ? ' was' : 's were'} attached. ` : ''}${s.files.failed} file${s.files.failed === 1 ? '' : 's'} couldn’t be attached. Only PNG or JPG images, 10 MB in total, are accepted.`
       : `${s.files.stored} file${s.files.stored === 1 ? ' was' : 's were'} attached to the ticket.`
     : null;
   return reply(

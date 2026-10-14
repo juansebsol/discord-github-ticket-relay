@@ -417,7 +417,7 @@ export function filesCard(o: {
     ? html`<form method="post" action="${o.actionBase}/files" enctype="multipart/form-data" class="upload" data-upload>
         ${csrfField(o.csrf)}
         <input type="file" id="file-input" name="files" multiple accept="${ACCEPT_ATTR}" class="sr-only-input">
-        <label for="file-input" class="dropzone" data-dropzone>${icon('upload', 20, 'muted')}<span><span class="dz-title" data-dz-text>Drop screenshots here, or choose files</span><span class="sub">Up to 10 at a time, 10 MB each. PNG, JPG, GIF or WebP.</span></span></label>
+        <label for="file-input" class="dropzone" data-dropzone>${icon('upload', 20, 'muted')}<span><span class="dz-title" data-dz-text>Drop screenshots here, or choose files</span><span class="sub">PNG or JPG, up to 10 at a time, 10 MB each.</span></span></label>
         <div class="upload-f">${submitBtn('Add files', { size: 'sm', variant: 'primary', icon: 'upload', loading: 'Uploading…' })}</div>
       </form>`
     : '';

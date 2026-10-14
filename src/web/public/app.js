@@ -566,6 +566,16 @@
     });
     builder.addEventListener('input', function (e) {
       if (e.target.id && e.target.hasAttribute('maxlength')) syncField(e.target);
+      // "Up to 5 PNG or JPG images…" follows the number of files allowed.
+      if (/\.max$/.test(e.target.name || '') && Number(e.target.value) >= 1) {
+        var sec = e.target.closest('.fsec');
+        var hint = sec && field(sec, 'hint');
+        if (hint && /^Up to \d+ /.test(hint.value)) {
+          var n = Number(e.target.value);
+          hint.value = hint.value.replace(/^Up to \d+ (PNG or JPG )?images?/, 'Up to ' + n + ' $1' + (n === 1 ? 'image' : 'images'));
+          syncField(hint);
+        }
+      }
       refresh();
     });
     builder.addEventListener('change', refresh);
