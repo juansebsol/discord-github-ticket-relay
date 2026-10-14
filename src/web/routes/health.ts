@@ -5,6 +5,7 @@ import path from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { APP_ROOT } from '../../config.js';
 import { getFileSettings } from '../../domain/files.js';
+import { can } from '../../domain/permissions.js';
 import { healthView, samplesSince, type ProcessRole, type ProcessRow, type Sample } from '../../domain/health.js';
 import { indexStatus } from '../../domain/issue-index.js';
 import { listApps } from '../../domain/store.js';
@@ -122,6 +123,24 @@ function averaged(samples: Sample[], pick: (s: Sample) => number | null): Point[
 
 // ---- Gathering -------------------------------------------------------------------------------
 
+/** Which linked pages the viewer can open (moderators may see this page without them). */
+interface Links {
+  triage: boolean;
+  settings: boolean;
+  files: boolean;
+  issues: boolean;
+}
+
+function linksFor(ctx: WorkspaceRequestContext): Links {
+  const manage = can(ctx.membership, 'manage');
+  return { triage: manage, settings: manage, files: can(ctx.membership, 'files.manage'), issues: can(ctx.membership, 'issues.view') };
+}
+
+/** A row that links somewhere only if the viewer can open that page. */
+function line(href: string | null, inner: SafeHtml): SafeHtml {
+  return href ? html`<a class="line" href="${href}">${inner}</a>` : html`<div class="line">${inner}</div>`;
+}
+
 interface Alert {
   tone: 'warn' | 'danger';
   title: string;
@@ -164,7 +183,7 @@ async function gather(web: Web, ctx: WorkspaceRequestContext) {
 
 type Data = Awaited<ReturnType<typeof gather>>;
 
-function alertsFor(d: Data, base: string): Alert[] {
+function alertsFor(d: Data, base: string, links: Links): Alert[] {
   const out: Alert[] = [];
   const h = d.h;
   for (const m of h.missing) {
@@ -181,12 +200,12 @@ function alertsFor(d: Data, base: string): Alert[] {
   }
   if (h.host && (h.host.available < 300 * MB || h.host.available / h.host.total < 0.15)) out.push({ tone: 'warn', title: 'The server is low on memory', text: `${gb(h.host.available)} of ${gb(h.host.total)} available.` });
   // Space left matters, not the percentage: 27 GB free on a big disk is fine.
-  if (d.disk && (d.disk.free < 3 * GB || (d.disk.free < 10 * GB && d.disk.free / d.disk.total < 0.05))) out.push({ tone: d.disk.free < GB ? 'danger' : 'warn', title: 'The disk is almost full', text: `${gb(d.disk.free)} free of ${gb(d.disk.total)}. New attachments stop being saved below 1 GB.`, action: { href: `${base}/tickets/files`, label: 'Clean up files' } });
+  if (d.disk && (d.disk.free < 3 * GB || (d.disk.free < 10 * GB && d.disk.free / d.disk.total < 0.05))) out.push({ tone: d.disk.free < GB ? 'danger' : 'warn', title: 'The disk is almost full', text: `${gb(d.disk.free)} free of ${gb(d.disk.total)}. New attachments stop being saved below 1 GB.`, action: links.files ? { href: `${base}/tickets/files`, label: 'Clean up files' } : undefined });
   if (d.filing.failedDay) out.push({ tone: 'warn', title: `${plural(d.filing.failedDay, 'ticket')} couldn’t be filed in the last 24 hours`, text: 'They’re waiting in the inbox for someone to retry or close them.', action: { href: `${base}/tickets?status=attention`, label: 'Open inbox' } });
   if (d.filing.oldestQueued && Date.now() - d.filing.oldestQueued > 15 * 60_000) out.push({ tone: 'warn', title: 'Tickets are waiting to be filed', text: `The oldest has been queued since ${timeAgo(new Date(d.filing.oldestQueued))}. GitHub may be unavailable; they’re retried automatically.` });
-  if (d.triage.enabled && d.triage.paused) out.push({ tone: 'warn', title: 'AI triage is paused', text: 'Tickets are still filed. Fix the reason shown on the Triage tab, then resume.', action: { href: `${base}/tickets/triage`, label: 'Open Triage' } });
-  if (d.claude.state === 'rejected' || d.claude.state === 'credits') out.push({ tone: d.claude.state === 'rejected' ? 'danger' : 'warn', title: d.claude.state === 'rejected' ? 'Claude rejected the API key' : 'The Anthropic account is out of credits', text: 'Features that use Claude are paused. Tickets are still filed.', action: { href: `${base}/settings#claude`, label: 'Open Settings' } });
-  for (const r of d.repos) if (r.status === 'error') out.push({ tone: 'warn', title: `Issue sync problem for ${r.owner}/${r.name}`, text: r.last_error ?? 'GitHub couldn’t be reached.', action: { href: `${base}/tickets/issues`, label: 'Open Issues' } });
+  if (d.triage.enabled && d.triage.paused) out.push({ tone: 'warn', title: 'AI triage is paused', text: 'Tickets are still filed. Fix the reason shown on the Triage tab, then resume.', action: links.triage ? { href: `${base}/tickets/triage`, label: 'Open Triage' } : undefined });
+  if (d.claude.state === 'rejected' || d.claude.state === 'credits') out.push({ tone: d.claude.state === 'rejected' ? 'danger' : 'warn', title: d.claude.state === 'rejected' ? 'Claude rejected the API key' : 'The Anthropic account is out of credits', text: 'Features that use Claude are paused. Tickets are still filed.', action: links.settings ? { href: `${base}/settings#claude`, label: 'Open Settings' } : undefined });
+  for (const r of d.repos) if (r.status === 'error') out.push({ tone: 'warn', title: `Issue sync problem for ${r.owner}/${r.name}`, text: r.last_error ?? 'GitHub couldn’t be reached.', action: links.issues ? { href: `${base}/tickets/issues`, label: 'Open Issues' } : undefined });
   if (d.github && d.github.remaining / d.github.limit < 0.1) out.push({ tone: 'warn', title: 'GitHub API requests are running low', text: `${d.github.remaining} of ${d.github.limit} left until ${new Date(d.github.resetAt).toISOString().slice(11, 16)} UTC. Work slows down until then.` });
   return out;
 }
@@ -224,8 +243,8 @@ function processRows(d: Data): SafeHtml {
   return html`${rows}${stopped}`;
 }
 
-function liveBody(d: Data, base: string): SafeHtml {
-  const alerts = alertsFor(d, base);
+function liveBody(d: Data, base: string, links: Links): SafeHtml {
+  const alerts = alertsFor(d, base, links);
   const worst: Tone = alerts.some((a) => a.tone === 'danger') ? 'danger' : alerts.length ? 'warn' : 'ok';
   const h = d.h;
   const load = os.loadavg();
@@ -282,29 +301,30 @@ function liveBody(d: Data, base: string): SafeHtml {
         <div class="card-h"><div><h2>Background work</h2><div class="desc">This workspace.</div></div></div>
         <div class="line"><span class="tile">${icon('send')}</span><div class="grow"><div class="name">Filing</div><div class="sub">${plural(d.filing.filedDay, 'ticket')} filed in 24 h${queued ? ` · ${String(queued)} waiting` : ''}${d.filing.failed ? ` · ${String(d.filing.failed)} need attention` : ''}</div></div>
           ${d.filing.failed ? pill('Needs attention', 'warn') : queued ? pill('Working', 'neutral') : pill('Up to date', 'ok')}</div>
-        <a class="line" href="${base}/tickets/triage"><span class="tile">${icon('bot')}</span><div class="grow"><div class="name">AI triage</div><div class="sub">${plural(d.triageCounts.done ?? 0, 'ticket')} triaged in 24 h${d.triageCounts.pending ? ` · ${String(d.triageCounts.pending)} waiting` : ''}${d.triageCounts.failed ? ` · ${String(d.triageCounts.failed)} failed` : ''}</div></div>${triageState}</a>
-        <a class="line" href="${base}/tickets/issues"><span class="tile">${icon('database')}</span><div class="grow"><div class="name">Issue sync</div><div class="sub">${d.repos.length ? `${syncReady} of ${plural(d.repos.length, 'repository', 'repositories')} up to date${lastSync ? ` · oldest sync ${timeAgo(lastSync)}` : ''}` : 'No repositories yet'}</div></div>
-          ${d.repos.some((r) => r.status === 'error') ? pill('Problem', 'warn') : d.repos.some((r) => r.status === 'loading') ? pill('Loading', 'neutral') : d.repos.length ? pill('Up to date', 'ok') : ''}</a>
-        <a class="line" href="${base}/tickets/files#rules"><span class="tile">${icon('paperclip')}</span><div class="grow"><div class="name">File cleanup</div><div class="sub">${d.cleanup.auto_cleanup ? (d.cleanup.last_run_at ? `Last run ${timeAgo(d.cleanup.last_run_at)}` : 'Runs within a day') : 'Automatic cleanup is off'}</div></div>${d.cleanup.auto_cleanup ? pill('On', 'ok') : pill('Off', 'neutral')}</a>
+        ${line(links.triage ? `${base}/tickets/triage` : null, html`<span class="tile">${icon('bot')}</span><div class="grow"><div class="name">AI triage</div><div class="sub">${plural(d.triageCounts.done ?? 0, 'ticket')} triaged in 24 h${d.triageCounts.pending ? ` · ${String(d.triageCounts.pending)} waiting` : ''}${d.triageCounts.failed ? ` · ${String(d.triageCounts.failed)} failed` : ''}</div></div>${triageState}`)}
+        ${line(links.issues ? `${base}/tickets/issues` : null, html`<span class="tile">${icon('database')}</span><div class="grow"><div class="name">Issue sync</div><div class="sub">${d.repos.length ? `${syncReady} of ${plural(d.repos.length, 'repository', 'repositories')} up to date${lastSync ? ` · oldest sync ${timeAgo(lastSync)}` : ''}` : 'No repositories yet'}</div></div>
+          ${d.repos.some((r) => r.status === 'error') ? pill('Problem', 'warn') : d.repos.some((r) => r.status === 'loading') ? pill('Loading', 'neutral') : d.repos.length ? pill('Up to date', 'ok') : ''}`)}
+        ${line(links.files ? `${base}/tickets/files#rules` : null, html`<span class="tile">${icon('paperclip')}</span><div class="grow"><div class="name">File cleanup</div><div class="sub">${d.cleanup.auto_cleanup ? (d.cleanup.last_run_at ? `Last run ${timeAgo(d.cleanup.last_run_at)}` : 'Runs within a day') : 'Automatic cleanup is off'}</div></div>${d.cleanup.auto_cleanup ? pill('On', 'ok') : pill('Off', 'neutral')}`)}
       </div>
       <div class="card">
         <div class="card-h"><div><h2>Services and storage</h2><div class="desc">The whole server.</div></div></div>
         <div class="line"><span class="tile">${icon('github')}</span><div class="grow"><div class="name">GitHub API</div><div class="sub">${d.github ? `${d.github.remaining.toLocaleString('en-US')} of ${d.github.limit.toLocaleString('en-US')} requests left · resets ${timeAgo(new Date(d.github.resetAt))}` : 'No requests seen yet'}</div></div>
           ${d.github ? meter(d.github.limit - d.github.remaining, d.github.limit, { warnAt: 0.9, label: 'GitHub API requests used' }) : ''}</div>
-        <a class="line" href="${base}/settings#claude"><span class="tile">${icon('sparkles')}</span><div class="grow"><div class="name">Claude API</div><div class="sub">${d.claude.checkedAt ? `Checked ${timeAgo(d.claude.checkedAt)}` : d.claude.state === 'missing' ? 'No key yet' : 'Not checked yet'}</div></div>${keyPill(d.claude)}</a>
+        ${line(links.settings ? `${base}/settings#claude` : null, html`<span class="tile">${icon('sparkles')}</span><div class="grow"><div class="name">Claude API</div><div class="sub">${d.claude.checkedAt ? `Checked ${timeAgo(d.claude.checkedAt)}` : d.claude.state === 'missing' ? 'No key yet' : 'Not checked yet'}</div></div>${keyPill(d.claude)}`)}
         <div class="line"><span class="tile">${icon('database')}</span><div class="grow"><div class="name">Database</div><div class="sub">${gb(d.dbBytes)} · SQLite</div></div></div>
-        <a class="line" href="${base}/tickets/files"><span class="tile">${icon('paperclip')}</span><div class="grow"><div class="name">Attachments</div><div class="sub">${plural(d.files.n, 'file')} · ${gb(d.files.bytes)}</div></div></a>
+        ${line(links.files ? `${base}/tickets/files` : null, html`<span class="tile">${icon('paperclip')}</span><div class="grow"><div class="name">Attachments</div><div class="sub">${plural(d.files.n, 'file')} · ${gb(d.files.bytes)}</div></div>`)}
       </div>
     </div>`;
 }
 
 export function registerHealthRoutes(app: FastifyInstance, web: Web): void {
   app.get('/w/:wid/health', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply);
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'health.view' });
     if (!ctx) return reply;
     const d = await gather(web, ctx);
+    const links = linksFor(ctx);
     if ((req.query as { partial?: string }).partial === '1') {
-      return reply.header('x-health-partial', '1').header('Cache-Control', 'no-store').type('text/html').send(liveBody(d, ctx.base).toString());
+      return reply.header('x-health-partial', '1').header('Cache-Control', 'no-store').type('text/html').send(liveBody(d, ctx.base, links).toString());
     }
     const body = html`
       ${pageHeader({
@@ -312,7 +332,7 @@ export function registerHealthRoutes(app: FastifyInstance, web: Web): void {
         description: 'How the server and its processes are doing right now.',
         actions: html`<span class="live" data-live-status>${raw('<span class="pulse" aria-hidden="true"></span>')}<span class="t">Live · updates every 15 s</span></span>`,
       })}
-      <div class="stack" id="health-live" data-live="${String(LIVE_MS)}" data-live-src="${ctx.base}/health?partial=1">${liveBody(d, ctx.base)}</div>`;
+      <div class="stack" id="health-live" data-live="${String(LIVE_MS)}" data-live-src="${ctx.base}/health?partial=1">${liveBody(d, ctx.base, links)}</div>`;
     return web.render(reply, ctx, 'Server health', 'health', body);
   });
 }

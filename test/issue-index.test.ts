@@ -277,5 +277,20 @@ describe('server health', () => {
     expect(stopped.body).toContain('Triage and issue sync isn’t running');
     const mod = await joinAs('moderator', 'mod-health');
     expect((await env.server.inject({ method: 'GET', url: `${w()}/health`, ...get(mod) })).statusCode).toBe(403);
+    expect((await env.server.inject({ method: 'GET', url: `${w()}/tickets`, ...get(mod) })).body).not.toContain(`${w()}/health"`);
+
+    // An admin turns on "See server health" for the moderator.
+    const saved = await env.server.inject({ method: 'POST', url: `${w()}/members/${mod.user.id}/permissions`, ...form(ws.owner, { can_view_health: '1' }) });
+    expect(saved.statusCode).toBe(302);
+    const modPage = await env.server.inject({ method: 'GET', url: `${w()}/health`, ...get(mod) });
+    expect(modPage.statusCode).toBe(200);
+    expect(modPage.body).toContain(`href="${w()}/health"`);
+    // Links to pages the moderator can't open aren't shown.
+    expect(modPage.body).not.toContain(`href="${w()}/tickets/triage"`);
+    expect(modPage.body).not.toContain(`href="${w()}/settings#claude"`);
+    expect(modPage.body).not.toContain(`href="${w()}/tickets/files`);
+    expect((await env.server.inject({ method: 'GET', url: `${w()}/deployment`, ...get(mod) })).statusCode).toBe(403);
+    const members = await env.server.inject({ method: 'GET', url: `${w()}/members`, ...get(ws.owner) });
+    expect(members.body).toContain('See server health');
   });
 });

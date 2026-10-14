@@ -12,6 +12,7 @@ export type Permission =
   | 'contrib.view' // contributor verification history
   | 'issues.view' // the Issues tab: search every issue in the connected repositories
   | 'files.manage' // the Files tab: see stored files, scan and delete (cleanup rules stay with admins)
+  | 'health.view' // the Server health page
   | 'manage' // setup, apps, panels, ticket types, contributor roles, settings, moderator permissions
   | 'members'; // invite people, change roles, remove people
 
@@ -21,6 +22,7 @@ export interface MemberAccess {
   can_view_contributors: boolean;
   can_search_issues: boolean;
   can_manage_files: boolean;
+  can_view_health: boolean;
 }
 
 export function can(m: MemberAccess, p: Permission): boolean {
@@ -38,6 +40,8 @@ export function can(m: MemberAccess, p: Permission): boolean {
       return m.can_search_issues;
     case 'files.manage':
       return m.can_manage_files;
+    case 'health.view':
+      return m.can_view_health;
     default:
       return false;
   }

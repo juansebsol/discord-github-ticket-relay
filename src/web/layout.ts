@@ -112,7 +112,8 @@ export function layout(ctx: PageContext, opts: { title: string; active: string; 
           ${navItem(`${base}/members`, 'Members & permissions', 'users', a === 'members')}
           ${navItem(`${base}/settings`, 'Settings', 'settings', a === 'settings')}
           ${navItem(`${base}/deployment`, 'Deployment', 'server', a === 'deployment')}
-          ${navItem(`${base}/health`, 'Server health', 'activity', a === 'health')}` : ''}
+          ${navItem(`${base}/health`, 'Server health', 'activity', a === 'health')}`
+          : can(access, 'health.view') ? html`<div class="nav-label">Workspace</div>${navItem(`${base}/health`, 'Server health', 'activity', a === 'health')}` : ''}
       </nav>`
     : html``;
 
