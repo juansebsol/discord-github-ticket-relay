@@ -9,7 +9,8 @@ module.exports = {
       cwd: __dirname,
       exec_mode: 'fork',
       instances: 1,
-      env: { NODE_ENV: 'production', RUN_WORKER: 'false' },
+      // MEMORY_LIMIT_MB matches max_memory_restart, so Deployment › Server health can show it.
+      env: { NODE_ENV: 'production', RUN_WORKER: 'false', MEMORY_LIMIT_MB: '512' },
       kill_timeout: 10000,
       // Back off instead of restarting every second when misconfigured.
       exp_backoff_restart_delay: 1000,
@@ -23,7 +24,7 @@ module.exports = {
       cwd: __dirname,
       exec_mode: 'fork',
       instances: 2,
-      env: { NODE_ENV: 'production', WORKER_CONCURRENCY: '2' },
+      env: { NODE_ENV: 'production', WORKER_CONCURRENCY: '2', MEMORY_LIMIT_MB: '256' },
       kill_timeout: 10000,
       // Back off instead of restarting every second when misconfigured.
       exp_backoff_restart_delay: 1000,
@@ -38,7 +39,7 @@ module.exports = {
       cwd: __dirname,
       exec_mode: 'fork',
       instances: 1,
-      env: { NODE_ENV: 'production' },
+      env: { NODE_ENV: 'production', MEMORY_LIMIT_MB: '256' },
       kill_timeout: 10000,
       exp_backoff_restart_delay: 1000,
       max_memory_restart: '256M',

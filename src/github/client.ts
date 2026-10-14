@@ -52,6 +52,8 @@ export interface IssueDetail {
   /** When and why it was closed ("completed", "not_planned", "duplicate"). */
   closedAt: Date | null;
   stateReason: string | null;
+  createdAt: Date;
+  updatedAt: Date;
 }
 
 function toIssueDetail(data: any): IssueDetail {
@@ -64,6 +66,8 @@ function toIssueDetail(data: any): IssueDetail {
     labels: ((data.labels ?? []) as any[]).map((l) => (typeof l === 'string' ? l : String(l?.name ?? ''))).filter(Boolean),
     closedAt: typeof data.closed_at === 'string' ? new Date(data.closed_at) : null,
     stateReason: typeof data.state_reason === 'string' ? data.state_reason : null,
+    createdAt: new Date(typeof data.created_at === 'string' ? data.created_at : 0),
+    updatedAt: new Date(typeof data.updated_at === 'string' ? data.updated_at : typeof data.created_at === 'string' ? data.created_at : 0),
   };
 }
 
@@ -286,6 +290,34 @@ export class GitHubClient {
       await this.asInstallation(installationId),
     );
     return toIssueDetail(data);
+  }
+
+  /**
+   * One page (up to 100) of a repository's issues, open and closed, pull requests left out.
+   * `more` says whether another page may follow. Used to fill and refresh the issue index.
+   */
+  async listIssuesPage(
+    installationId: number,
+    owner: string,
+    repo: string,
+    o: { sort: 'created' | 'updated'; direction: 'asc' | 'desc'; page: number; since?: Date; perPage?: number },
+  ): Promise<{ issues: IssueDetail[]; more: boolean }> {
+    const perPage = o.perPage ?? 100;
+    const params = new URLSearchParams({ state: 'all', sort: o.sort, direction: o.direction, per_page: String(perPage), page: String(o.page) });
+    if (o.since) params.set('since', o.since.toISOString());
+    const { data } = await this.request('GET', `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues?${params}`, await this.asInstallation(installationId));
+    const items = data as any[];
+    return { issues: items.filter((i) => !i.pull_request).map(toIssueDetail), more: items.length >= perPage };
+  }
+
+  /** The first comments on an issue (to find "Duplicate of #N"). */
+  async listIssueComments(installationId: number, owner: string, repo: string, issueNumber: number, perPage = 30): Promise<string[]> {
+    const { data } = await this.request(
+      'GET',
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/${issueNumber}/comments?per_page=${perPage}`,
+      await this.asInstallation(installationId),
+    );
+    return ((data ?? []) as any[]).map((c) => (typeof c.body === 'string' ? c.body : ''));
   }
 
   /** Recently updated issues (not pull requests), newest first. */

@@ -50,7 +50,7 @@ import {
 
 const PAGE_SIZE = 25;
 
-export type TicketsTab = 'inbox' | 'panel' | 'types' | 'triage' | 'files' | 'settings';
+export type TicketsTab = 'inbox' | 'panel' | 'types' | 'triage' | 'issues' | 'files' | 'settings';
 
 const VIEW_ONLY_TICKETS = 'You can read tickets. Checking GitHub, retrying, linking and closing need the Act on tickets permission. Ask an admin or the owner.';
 
@@ -67,6 +67,16 @@ export async function ticketsHeader(web: Web, ctx: WorkspaceRequestContext, tab:
         : pill('Not published', 'neutral');
   const manage = can(ctx.membership, 'manage');
   const b = ctx.base;
+  // Moderators see the tabs they've been given (Inbox always).
+  const tabList = [
+    { href: `${b}/tickets`, label: 'Inbox', current: tab === 'inbox', count: ctx.progress?.attention },
+    manage && { href: `${b}/tickets/panel`, label: 'Panel', current: tab === 'panel' },
+    manage && { href: `${b}/tickets/types`, label: 'Ticket types', current: tab === 'types' },
+    manage && { href: `${b}/tickets/triage`, label: 'Triage', current: tab === 'triage' },
+    can(ctx.membership, 'issues.view') && { href: `${b}/tickets/issues`, label: 'Issues', current: tab === 'issues' },
+    can(ctx.membership, 'files.manage') && { href: `${b}/tickets/files`, label: 'Files', current: tab === 'files' },
+    manage && { href: `${b}/tickets/settings`, label: 'Settings', current: tab === 'settings' },
+  ].filter((t): t is { href: string; label: string; current: boolean; count?: number } => Boolean(t));
   return html`${pageHeader({
     title: 'Tickets',
     after: [status, !can(ctx.membership, 'tickets.act') ? viewOnlyTag(VIEW_ONLY_TICKETS) : ''],
@@ -75,16 +85,7 @@ export async function ticketsHeader(web: Web, ctx: WorkspaceRequestContext, tab:
       : 'Members open tickets from a panel in Discord. Each one becomes a GitHub issue.',
     actions: o.actions,
   })}
-  ${manage
-    ? tabs('Tickets', [
-        { href: `${b}/tickets`, label: 'Inbox', current: tab === 'inbox', count: ctx.progress?.attention },
-        { href: `${b}/tickets/panel`, label: 'Panel', current: tab === 'panel' },
-        { href: `${b}/tickets/types`, label: 'Ticket types', current: tab === 'types' },
-        { href: `${b}/tickets/triage`, label: 'Triage', current: tab === 'triage' },
-        { href: `${b}/tickets/files`, label: 'Files', current: tab === 'files' },
-        { href: `${b}/tickets/settings`, label: 'Settings', current: tab === 'settings' },
-      ])
-    : ''}`;
+  ${tabs('Tickets', tabList)}`;
 }
 
 // ---- Status explanations -------------------------------------------------------------------------
@@ -278,11 +279,27 @@ function triageActionText(a: TriageAction, s: SubmissionRow): SafeHtml {
   const what = a.kind === 'priority' && a.priority
     ? html`${priorityTag(a.priority)} priority`
     : a.kind === 'duplicate'
-      ? html`Duplicate of <a href="https://github.com/${s.repo_owner}/${s.repo_name}/issues/${String(a.duplicateOf)}" target="_blank" rel="noopener noreferrer">#${String(a.duplicateOf)}</a>`
+      ? html`Duplicate of <a href="https://github.com/${s.repo_owner}/${s.repo_name}/issues/${String(a.duplicateOf)}" target="_blank" rel="noopener noreferrer">#${String(a.duplicateOf)}</a>${a.originalClosed ? html`<span class="muted"> · the original is closed, so this is only suggested</span>` : ''}`
       : a.kind === 'needsInfo' && a.missing?.length
         ? html`Needs more info<span class="muted"> · ${a.missing.map((m) => MISSING_SHORT[m]).join(', ')}</span>`
         : html`${a.kind === 'spam' ? 'Spam' : a.kind === 'needsInfo' ? 'Needs more info' : a.kind === 'support' ? 'Not a development issue' : 'No action needed'}`;
   return html`<span class="grow">${what}${a.close ? html`<span class="muted"> · closes the issue</span>` : ''}</span><span class="xs muted num" title="Claude’s confidence">${String(a.confidence)}%</span>`;
+}
+
+function issueLink(s: SubmissionRow, n: number): SafeHtml {
+  return html`<a href="https://github.com/${s.repo_owner}/${s.repo_name}/issues/${String(n)}" target="_blank" rel="noopener noreferrer">#${String(n)}</a>`;
+}
+
+/** How the original was chosen among Claude's matches. */
+function duplicateNote(t: TriageResultRow, s: SubmissionRow): SafeHtml | string {
+  const v = t.verdict;
+  if (!v || !v.duplicate_of) return '';
+  const others = v.duplicate_others ?? [];
+  const parts = [
+    v.duplicate_via ? html`Claude matched ${issueLink(s, v.duplicate_via)}, which copies ${issueLink(s, v.duplicate_of)}, so the original is linked.` : '',
+    others.length ? html`Also similar: ${others.slice(0, 5).map((n, i) => html`${i ? ', ' : ''}${issueLink(s, n)}`)}.` : '',
+  ].filter(Boolean);
+  return parts.length ? html`<p class="small muted mt-8">${parts.map((p, i) => html`${i ? ' ' : ''}${p}`)}</p>` : '';
 }
 
 /** What triage decided for this ticket, with Apply and Dismiss for suggestions. */
@@ -300,6 +317,7 @@ function triageCard(t: TriageResultRow, s: SubmissionRow, o: { act: boolean; csr
         ? html`<span class="tri-actions">${postBtn(`${o.actionBase}/triage/apply`, 'Apply', o.csrf, { size: 'sm', fields: { kind: a.kind }, title: `Apply: ${describeAction(a)}` })}${postBtn(`${o.actionBase}/triage/dismiss`, 'Dismiss', o.csrf, { size: 'sm', variant: 'ghost', fields: { kind: a.kind } })}</span>`
         : ''}</div>`)}
       ${!applied.length && !suggestions.length ? html`<p class="small muted">Nothing to flag.</p>` : ''}
+      ${duplicateNote(t, s)}
       ${t.verdict?.reason ? html`<p class="small muted mt-8">“${t.verdict.reason}”</p>` : ''}
       ${t.error ? html`<p class="small mt-8">${icon('triangle-alert', 14, 'warn')} ${t.error}</p>` : ''}
       <p class="xs faint mt-8">${t.model ?? ''}${t.completed_at ? ` · ${timeAgo(t.completed_at)}` : ''}</p>`;

@@ -3,6 +3,7 @@ import { createApp } from './app.js';
 import { ConfigError, loadConfig, loadDotEnv } from './config.js';
 import { migrate } from './db/migrate.js';
 import { openDatabase } from './db/database.js';
+import { startHeartbeat } from './domain/health.js';
 import { loggerOptions } from './logging.js';
 
 /**
@@ -23,11 +24,13 @@ try {
 const log = pino(loggerOptions(config.nodeEnv));
 const db = openDatabase(config.databasePath);
 await migrate(db, (m) => log.info(m));
-const { triage } = await createApp({ config, db, log });
+const { triage, deps } = await createApp({ config, db, log });
 triage.start();
+const stopHeartbeat = startHeartbeat(db, { id: deps.instanceId, role: 'triage', log });
 log.info('triage worker started');
 
 async function shutdown() {
+  stopHeartbeat();
   await triage.stop();
   await db.end();
   process.exit(0);

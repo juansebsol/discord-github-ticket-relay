@@ -14,7 +14,7 @@ export interface FakeRepo {
   has_issues: boolean;
   archived: boolean;
   labels: string[];
-  issues: { number: number; title: string; body: string; labels: string[]; created_at: string; user: string; state?: 'open' | 'closed'; state_reason?: string | null; closed_at?: string | null; comments?: string[]; bodyEdits?: number }[];
+  issues: { number: number; title: string; body: string; labels: string[]; created_at: string; updated_at?: string; user: string; state?: 'open' | 'closed'; state_reason?: string | null; closed_at?: string | null; comments?: string[]; bodyEdits?: number }[];
 }
 
 /** How the next create-issue call behaves. */
@@ -56,6 +56,8 @@ export class FakeGitHub {
   invalidToken: string | null = null;
   /** Artificial latency for create-issue calls (to make workers overlap in tests). */
   createDelayMs = 0;
+  /** GET /repos/:o/:r/issues calls (the issue index syncs with these). */
+  listCalls = 0;
   /** Simulates a wrong/rotated private key: every app-JWT call is rejected. */
   rejectAppJwt = false;
   /** GitHub account returned for the user access token from code `good-code`. */
@@ -97,7 +99,7 @@ export class FakeGitHub {
   searchCalls = 0;
 
   issueJson(r: FakeRepo, i: FakeRepo['issues'][number]) {
-    return { number: i.number, title: i.title, body: i.body, state: i.state ?? 'open', state_reason: i.state_reason ?? null, closed_at: i.closed_at ?? null, labels: i.labels.map((name) => ({ name })), html_url: `https://github.com/${r.owner}/${r.name}/issues/${i.number}` };
+    return { number: i.number, title: i.title, body: i.body, state: i.state ?? 'open', state_reason: i.state_reason ?? null, closed_at: i.closed_at ?? null, created_at: i.created_at, updated_at: i.updated_at ?? i.created_at, labels: i.labels.map((name) => ({ name })), html_url: `https://github.com/${r.owner}/${r.name}/issues/${i.number}` };
   }
 
   private repoJson(r: FakeRepo) {
@@ -187,6 +189,8 @@ export class FakeGitHub {
       const r = this.repoByName(decodeURIComponent(m[1]!), decodeURIComponent(m[2]!));
       const issue = r?.issues.find((i) => i.number === Number(m![3]));
       if (!accessible(r) || !issue) return json(404, { message: 'Not Found' });
+      if (method !== 'GET') issue.updated_at = new Date(Math.max(Date.now(), Date.parse(issue.updated_at ?? issue.created_at) + 1)).toISOString();
+      if (m[4] === '/comments' && method === 'GET') return json(200, (issue.comments ?? []).map((c, n) => ({ id: n + 1, body: c })));
       if (m[4] === '/labels' && method === 'POST') {
         for (const l of body.labels as string[]) {
           if (!r!.labels.includes(l)) r!.labels.push(l);
@@ -216,8 +220,22 @@ export class FakeGitHub {
       if (!accessible(r)) return json(404, { message: 'Not Found' });
       const repo = r!;
       if (method === 'GET') {
-        const state = url.searchParams.get('state') ?? 'open';
-        const items = [...repo.issues].reverse().filter((i) => state === 'all' || (i.state ?? 'open') === state).map((i) => this.issueJson(repo, i));
+        this.listCalls++;
+        const p = url.searchParams;
+        const state = p.get('state') ?? 'open';
+        const sort = p.get('sort') ?? 'created';
+        const asc = p.get('direction') === 'asc';
+        const since = p.get('since');
+        const perPage = Number(p.get('per_page') ?? 30);
+        const page = Number(p.get('page') ?? 1);
+        const time = (v: string | undefined) => Date.parse(v ?? '') || Date.now();
+        const key = (i: FakeRepo['issues'][number]) => time(sort === 'updated' ? i.updated_at ?? i.created_at : i.created_at) * 100000 + i.number;
+        const items = [...repo.issues]
+          .filter((i) => state === 'all' || (i.state ?? 'open') === state)
+          .filter((i) => !since || time(i.updated_at ?? i.created_at) >= Date.parse(since))
+          .sort((a, b) => (asc ? key(a) - key(b) : key(b) - key(a)))
+          .slice((page - 1) * perPage, page * perPage)
+          .map((i) => this.issueJson(repo, i));
         return json(200, items);
       }
       this.createCalls++;
@@ -394,7 +412,7 @@ export type ClaudeBehavior = Json | { status: number; type: string; message?: st
 /** In-memory Claude API: GET /v1/models and POST /v1/messages (structured output). */
 export class FakeAnthropic {
   validKeys = new Set(['sk-ant-test-key-0123456789abcdef', 'sk-ant-other-key-0123456789abcdef']);
-  verdict: Json = { priority: 'medium', priority_confidence: 80, duplicate_of: null, duplicate_confidence: 0, spam: false, spam_confidence: 5, needs_info: false, needs_info_confidence: 10, no_action: false, no_action_confidence: 5, not_dev_issue: false, not_dev_issue_confidence: 5, missing: [], reason: 'A genuine bug report.' };
+  verdict: Json = { priority: 'medium', priority_confidence: 80, duplicates: [], spam: false, spam_confidence: 5, needs_info: false, needs_info_confidence: 10, no_action: false, no_action_confidence: 5, not_dev_issue: false, not_dev_issue_confidence: 5, missing: [], reason: 'A genuine bug report.' };
   queue: ClaudeBehavior[] = [];
   requests: { key: string; body: Json }[] = [];
   models = [

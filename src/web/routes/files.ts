@@ -21,13 +21,14 @@ import {
   type DeleteSummary,
   type TicketFile,
 } from '../../domain/files.js';
+import { can } from '../../domain/permissions.js';
 import { addEvent, decryptPayload, getSubmission } from '../../domain/submissions.js';
 import { safeEqual } from '../../lib/crypto.js';
 import { html, raw, type SafeHtml } from '../../lib/html.js';
 import { simplePage } from '../layout.js';
 import { setFlash } from '../session.js';
 import type { Web } from '../server.js';
-import { csrfField, empty, icon, linkBtn, notice, pill, plural, postBtn, segLinks, setting, statusPill, submitBtn, switchInput, timeAgo, when } from '../ui.js';
+import { csrfField, empty, icon, linkBtn, notice, pill, plural, postBtn, segLinks, setting, statusPill, submitBtn, switchInput, timeAgo, viewOnlyTag, when } from '../ui.js';
 import { ticketsHeader } from './tickets.js';
 
 /** The ticket page's upload form (multipart). Its CSRF token is checked by the route itself. */
@@ -184,10 +185,11 @@ export function registerFileRoutes(app: FastifyInstance, web: Web): void {
   // ---- Files tab ---------------------------------------------------------------------------------
 
   app.get('/w/:wid/tickets/files', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply);
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'files.manage' });
     if (!ctx) return reply;
     const wid = ctx.workspace.id;
     const b = ctx.base;
+    const admin = can(ctx.membership, 'manage');
     const q = req.query as { view?: string; q?: string; page?: string };
     const [settings, usage] = await Promise.all([getFileSettings(deps.db, wid), storageUsage(deps.db, wid)]);
     const all = await ticketsWithFiles(deps.db, wid, settings);
@@ -309,7 +311,8 @@ export function registerFileRoutes(app: FastifyInstance, web: Web): void {
 
       <form method="post" action="${b}/tickets/files/settings" class="card" id="rules" data-dirty>
         ${csrfField(ctx.csrf)}
-        <div class="card-h"><div><h2>Cleanup rules</h2><div class="desc">Used by Scan for cleanup, and every day by automatic cleanup when it’s on.</div></div></div>
+        <div class="card-h"><div><h2>Cleanup rules</h2><div class="desc">Used by Scan for cleanup, and every day by automatic cleanup when it’s on.</div></div>${admin ? '' : viewOnlyTag('Only owners and admins can change the cleanup rules and the storage limit.')}</div>
+        <fieldset class="plain" ${admin ? '' : raw('disabled')}>
         ${setting('Automatic cleanup', html`Once a day, delete the files of tickets that match the rules below. ${lastRun}`, switchInput({ name: 'auto_cleanup', checked: settings.auto_cleanup, label: 'Automatic cleanup' }), { switchRow: true })}
         ${setting('Closed tickets', 'Files of tickets whose GitHub issue was closed or deleted, or that were closed without filing.',
           html`<label class="check"><input type="checkbox" name="closed_enabled" value="1" ${settings.closed_enabled ? raw('checked') : ''}> Delete</label>${num('closed_days', settings.closed_days, 0, 3650, 'Days after closing')}<span class="connector">days after closing</span>`)}
@@ -319,10 +322,13 @@ export function registerFileRoutes(app: FastifyInstance, web: Web): void {
           html`<label class="check"><input type="checkbox" name="age_enabled" value="1" ${settings.age_enabled ? raw('checked') : ''}> Delete after</label>${num('age_days', settings.age_days, 1, 3650, 'Days')}<span class="connector">days</span>`)}
         ${setting('Storage limit', 'New files aren’t saved once this much is used. Tickets are still filed, with a note that the file couldn’t be attached.',
           html`${num('storage_limit_gb', Math.round((settings.storage_limit_mb / GB) * 10) / 10, 0.1, 1024, 'Storage limit in GB', '0.1')}<span class="connector">GB</span>`)}
-        <div class="card-f"><div class="end">
-          <button type="button" class="btn" data-discard data-dirty-enable>Cancel</button>
-          ${submitBtn('Save rules', { variant: 'primary', loading: 'Saving…', attrs: raw('data-dirty-enable') })}
-        </div></div>
+        </fieldset>
+        ${admin
+          ? html`<div class="card-f"><div class="end">
+              <button type="button" class="btn" data-discard data-dirty-enable>Cancel</button>
+              ${submitBtn('Save rules', { variant: 'primary', loading: 'Saving…', attrs: raw('data-dirty-enable') })}
+            </div></div>`
+          : html`<div class="card-note">Only owners and admins can change these.</div>`}
       </form>`;
     return web.render(reply, ctx, 'Files', 'tickets', body);
   });
@@ -350,7 +356,7 @@ export function registerFileRoutes(app: FastifyInstance, web: Web): void {
   });
 
   app.post('/w/:wid/tickets/files/scan', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply);
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'files.manage' });
     if (!ctx) return reply;
     const wid = ctx.workspace.id;
     const r = await refreshIssueStates(deps, wid);
@@ -368,7 +374,7 @@ export function registerFileRoutes(app: FastifyInstance, web: Web): void {
   });
 
   app.post('/w/:wid/tickets/files/delete', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply);
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'files.manage' });
     if (!ctx) return reply;
     const body = (req.body ?? {}) as { all?: string; ticket?: string | string[] };
     const tickets = Array.isArray(body.ticket) ? body.ticket : body.ticket ? [body.ticket] : [];

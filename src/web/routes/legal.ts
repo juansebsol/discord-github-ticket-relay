@@ -128,6 +128,11 @@ export function registerLegalRoutes(app: FastifyInstance, web: Web): void {
         <li>The model’s assessment of each ticket: its priority, possible duplicates, spam, a short reason and the tokens used.</li>
         <li>The server’s triage settings and its Claude API key, stored encrypted and never shown again after it’s saved.</li>
       </ul>
+      <h3>To find duplicate tickets</h3>
+      <ul>
+        <li>A copy of the issues in the GitHub repositories the server connected, including issues opened directly on GitHub: their number, title, the start of their description (up to about 1,500 characters), whether they’re open or closed, labels, dates, and which issue they duplicate. It’s searched on our own server; no other company receives it for this.</li>
+        <li>A record of the server’s running processes and their memory use, to keep the service healthy. It contains no personal information.</li>
+      </ul>
       <h3>What we don’t collect</h3>
       <p>The bot doesn’t read messages in your server. It only receives the panel interactions you start. We don’t use analytics, advertising or tracking cookies. The only cookies are the ones needed to sign in and keep forms secure.</p>
 
@@ -146,7 +151,7 @@ export function registerLegalRoutes(app: FastifyInstance, web: Web): void {
         <li><strong>GitHub.</strong> The issue contains your ticket’s title, description and answers, links to the files you attached, the app and type, your Discord display name and username, your Discord user ID, the server’s name and ID, the channel ID, the submission time and a reference number. <strong>If the repository is public, the issue is public.</strong> The form tells you which before you submit.</li>
         <li><strong>Discord.</strong> To show panels, send your confirmation and add or remove roles.</li>
         <li><strong>The server’s administrators and moderators</strong> can see the tickets and contributor verifications for their server in the console.</li>
-        <li><strong>Anthropic</strong>, only if the server’s administrators turn on AI triage. The ticket’s app, type, title and description, plus the titles and short excerpts of open issues in the same repository, are sent to Anthropic’s Claude API to assess the ticket. Anthropic processes them under its commercial terms and <a href="https://www.anthropic.com/legal/privacy" rel="noopener noreferrer">privacy policy</a>.</li>
+        <li><strong>Anthropic</strong>, only if the server’s administrators turn on AI triage. The ticket’s app, type, title, description and answers, plus the titles and short excerpts of the most similar existing issues in the same repository, are sent to Anthropic’s Claude API to assess the ticket. Anthropic processes them under its commercial terms and <a href="https://www.anthropic.com/legal/privacy" rel="noopener noreferrer">privacy policy</a>.</li>
         <li><strong>Our hosting provider</strong> stores the data on our behalf.</li>
         <li><strong>Authorities</strong>, if the law requires it.</li>
       </ul>
@@ -159,7 +164,8 @@ export function registerLegalRoutes(app: FastifyInstance, web: Web): void {
         <li><strong>Ticket records</strong> (reporter, status, issue link and reference) are kept as the server’s ticket history until the workspace is deleted, or until you ask us to delete them.</li>
         <li><strong>Confirmation tokens</strong> from Discord expire after 15 minutes. <strong>Console sessions</strong> expire after 7 days.</li>
         <li><strong>Contributor verifications</strong> and the link to your GitHub account are kept until an administrator revokes them or the workspace is deleted.</li>
-        <li><strong>Triage results</strong> are kept with the ticket record. We don’t store the ticket text for triage; it’s read from the GitHub issue when the ticket is assessed.</li>
+        <li><strong>Triage results</strong> are kept with the ticket record.</li>
+        <li><strong>The copy of repository issues</strong> used to find duplicates is kept up to date with GitHub every few minutes. An issue’s copy is deleted when the issue is deleted or moved on GitHub (we check weekly, and whenever it comes up as a possible duplicate), and a repository’s copies are deleted when no app uses it any more.</li>
         <li><strong>Server logs</strong> record technical events such as request paths and errors, but not cookies, tokens, OAuth codes or what you submit. Our web server may keep standard access logs, including IP addresses, for a limited time for security.</li>
       </ul>
       <p>Deleting data here doesn’t delete GitHub issues or Discord messages. Those are controlled by the repository owners and by Discord.</p>

@@ -51,7 +51,7 @@ export function testDb(): Db {
 }
 
 export async function resetDb(db: Db = testDb()): Promise<void> {
-  db.exec('DELETE FROM sessions; DELETE FROM oauth_states; DELETE FROM workspaces; DELETE FROM users;');
+  db.exec('DELETE FROM sessions; DELETE FROM oauth_states; DELETE FROM workspaces; DELETE FROM users; DELETE FROM issue_index; DELETE FROM issue_index_repos; DELETE FROM process_status;');
 }
 
 export interface TestEnv extends AppInstance {

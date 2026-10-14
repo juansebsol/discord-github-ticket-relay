@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyReply } from 'fastify';
 import { can, ROLE_LABELS, type MemberAccess } from '../../domain/permissions.js';
 import { UserFacingError, type Role } from '../../domain/types.js';
 import { createInvite, listInvites, listMembers, removeMember, revokeInvite, setMemberRole, setModeratorPermissions } from '../../domain/workspaces.js';
-import { html, raw, type SafeHtml } from '../../lib/html.js';
+import { html, type SafeHtml } from '../../lib/html.js';
 import { setFlash } from '../session.js';
 import type { Web, WorkspaceRequestContext } from '../server.js';
 import {
@@ -31,16 +31,30 @@ import {
 
 const PERMS = [
   { key: 'view', label: 'See tickets', desc: 'Inbox, ticket text, reporter and GitHub link.' },
-  { key: 'act', label: 'Act on tickets', desc: 'Check GitHub, retry, link an issue, close.' },
+  { key: 'act', label: 'Act on tickets', desc: 'Check GitHub, retry, link, close, add or delete a ticket’s files.' },
   { key: 'contrib', label: 'See verifications', desc: 'Who verified, their GitHub account and role.' },
+  { key: 'issues', label: 'Search all issues', desc: 'The Issues tab: every issue in the connected repositories.' },
+  { key: 'files', label: 'Clean up files', desc: 'The Files tab: scan and delete stored screenshots.' },
   { key: 'revoke', label: 'Revoke roles', desc: 'Remove contributor roles from members.' },
 ] as const;
 
+/** The switches an admin can turn on for a moderator, in table order. */
+const MOD_SWITCHES = [
+  { field: 'can_act_tickets', perm: PERMS[1] },
+  { field: 'can_view_contributors', perm: PERMS[2] },
+  { field: 'can_search_issues', perm: PERMS[3] },
+  { field: 'can_manage_files', perm: PERMS[4] },
+] as const;
+type ModField = (typeof MOD_SWITCHES)[number]['field'];
+
 const CAPABILITIES: [string, string, string, string][] = [
   ['Setup, panels and settings', 'yes', 'yes', 'no'],
+  ['Ticket forms, triage settings and file rules', 'yes', 'yes', 'no'],
   ['Tickets inbox', 'yes', 'yes', 'yes'],
   ['Act on tickets', 'yes', 'yes', 'maybe'],
   ['Contributor verifications', 'yes', 'yes', 'maybe'],
+  ['Search all issues', 'yes', 'yes', 'maybe'],
+  ['Clean up files', 'yes', 'yes', 'maybe'],
   ['Revoke contributor roles', 'yes', 'yes', 'no'],
   ['Invite people and change roles', 'yes', 'no', 'no'],
 ];
@@ -48,7 +62,7 @@ const CAPABILITIES: [string, string, string, string][] = [
 function accessTags(m: MemberAccess): SafeHtml {
   if (m.role === 'owner') return html`${tag('Full access')}${tag('Invites & roles')}`;
   if (m.role === 'admin') return tag('Full access');
-  return html`${tag(m.can_act_tickets ? 'Act on tickets' : 'View tickets')}${m.can_view_contributors ? tag('Verifications') : ''}`;
+  return html`${tag(m.can_act_tickets ? 'Act on tickets' : 'View tickets')}${m.can_view_contributors ? tag('Verifications') : ''}${m.can_search_issues ? tag('Issue search') : ''}${m.can_manage_files ? tag('Files') : ''}`;
 }
 
 export function registerMemberRoutes(app: FastifyInstance, web: Web): void {
@@ -110,8 +124,8 @@ export function registerMemberRoutes(app: FastifyInstance, web: Web): void {
       : '';
 
     const permForm = (m: (typeof members)[number], suffix: string) => html`<form id="perm-${suffix}${m.id}" method="post" action="${b}/members/${m.id}/permissions" data-async hidden>${csrfField(ctx.csrf)}</form>`;
-    const permSwitch = (m: (typeof members)[number], suffix: string, field: 'can_act_tickets' | 'can_view_contributors', label: string) =>
-      switchInput({ name: field, checked: field === 'can_act_tickets' ? m.can_act_tickets : m.can_view_contributors, label: `${nameOf(m)}: ${label}`, attrs: html`form="perm-${suffix}${m.id}"` });
+    const permSwitch = (m: (typeof members)[number], suffix: string, field: ModField, label: string) =>
+      switchInput({ name: field, checked: m[field], label: `${nameOf(m)}: ${label}`, attrs: html`form="perm-${suffix}${m.id}"` });
 
     const modAccess = html`<div class="card" id="moderator-access">
       <div class="card-h"><div><h2>Moderator access</h2><div class="desc">New moderators start view-only. Moderators never see setup, panels or settings.</div></div></div>
@@ -122,15 +136,13 @@ export function registerMemberRoutes(app: FastifyInstance, web: Web): void {
               <tbody>${mods.map((m) => html`<tr id="mod-${m.id}" data-flash>
                 <td class="perm"><span class="who-cell">${avatar(nameOf(m), 24, { src: discordAvatar(m) })}<span class="name">${nameOf(m)}</span></span></td>
                 <td class="perm">${locked('Always')}</td>
-                <td class="perm">${permSwitch(m, '', 'can_act_tickets', 'Act on tickets')}</td>
-                <td class="perm">${permSwitch(m, '', 'can_view_contributors', 'See verifications')}</td>
+                ${MOD_SWITCHES.map((x) => html`<td class="perm">${permSwitch(m, '', x.field, x.perm.label)}</td>`)}
                 <td class="perm"><span class="row">${locked('Admins only')}<button type="submit" class="btn sm nojs" form="perm-${m.id}">Save</button></span></td></tr>`)}</tbody></table></div>
             <div class="only-mobile">${mods.map((m) => html`<div class="mod-block">
               <div class="line"><span class="who-cell">${avatar(nameOf(m), 24, { src: discordAvatar(m) })}<span class="name">${nameOf(m)}</span></span></div>
               ${setting(PERMS[0].label, PERMS[0].desc, locked('Always'), { switchRow: true })}
-              ${setting(PERMS[1].label, PERMS[1].desc, permSwitch(m, 'm-', 'can_act_tickets', 'Act on tickets'), { switchRow: true })}
-              ${setting(PERMS[2].label, PERMS[2].desc, permSwitch(m, 'm-', 'can_view_contributors', 'See verifications'), { switchRow: true })}
-              ${setting(PERMS[3].label, PERMS[3].desc, locked('Admins only'), { switchRow: true })}
+              ${MOD_SWITCHES.map((x) => setting(x.perm.label, x.perm.desc, permSwitch(m, 'm-', x.field, x.perm.label), { switchRow: true }))}
+              ${setting(PERMS[5].label, PERMS[5].desc, locked('Admins only'), { switchRow: true })}
               <div class="nojs card-b tight"><button type="submit" class="btn sm" form="perm-m-${m.id}">Save</button></div></div>`)}</div>
             <div class="card-note">Changes apply right away.</div>`
         : empty('users', 'No moderators yet', 'Moderators can read the tickets inbox. Invite someone as a moderator, then choose what else they can do here.', owner ? linkBtn(`${b}/members?invite=1#invite`, 'Invite', { icon: 'user-plus' }) : null)}
@@ -211,16 +223,19 @@ export function registerMemberRoutes(app: FastifyInstance, web: Web): void {
     const ctx = await web.requireWorkspace(req, reply, { permission: 'manage' });
     if (!ctx) return reply;
     const userId = (req.params as { userId: string }).userId;
-    const body = req.body as { can_act_tickets?: string; can_view_contributors?: string };
-    const next = { canActTickets: body.can_act_tickets !== undefined, canViewContributors: body.can_view_contributors !== undefined };
+    const body = req.body as Partial<Record<ModField, string>>;
+    const next = {
+      canActTickets: body.can_act_tickets !== undefined,
+      canViewContributors: body.can_view_contributors !== undefined,
+      canSearchIssues: body.can_search_issues !== undefined,
+      canManageFiles: body.can_manage_files !== undefined,
+    };
     try {
       const before = (await listMembers(deps.db, ctx.workspace.id)).find((m) => m.id === userId);
       await setModeratorPermissions(deps.db, ctx.workspace.id, userId, next);
       const name = before ? before.display_name ?? before.username : 'Moderator';
-      const changes = [
-        before && before.can_act_tickets !== next.canActTickets ? `Act on tickets ${next.canActTickets ? 'on' : 'off'}` : null,
-        before && before.can_view_contributors !== next.canViewContributors ? `See verifications ${next.canViewContributors ? 'on' : 'off'}` : null,
-      ].filter(Boolean);
+      const values: Record<ModField, boolean> = { can_act_tickets: next.canActTickets, can_view_contributors: next.canViewContributors, can_search_issues: next.canSearchIssues, can_manage_files: next.canManageFiles };
+      const changes = MOD_SWITCHES.filter((x) => before && before[x.field] !== values[x.field]).map((x) => `${x.perm.label} ${values[x.field] ? 'on' : 'off'}`);
       const message = `${name}: ${changes.length ? changes.join(', ') : 'access saved'}`;
       if (web.wantsJson(req)) return reply.send({ ok: true, message });
       setFlash(reply, 'success', message);

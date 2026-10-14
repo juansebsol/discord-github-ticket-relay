@@ -16,7 +16,21 @@ import { labelColor } from '../domain/ticket-types.js';
 import { UserFacingError, type Deps, type SubmissionRow } from '../domain/types.js';
 import { GitHubApiError, type IssueDetail } from '../github/client.js';
 import { normalizeVerdict, TriageAiError, type TriageAi, type Verdict } from './ai.js';
-import { buildSystemPrompt, buildUserPrompt, extractDescription, searchTerms } from './prompt.js';
+import { buildSystemPrompt, buildUserPrompt, extractDescription, searchTerms, type Candidate } from './prompt.js';
+import {
+  appOf,
+  chooseOriginal,
+  excerptOf,
+  ftsQuery,
+  getIndexed,
+  IssueIndexer,
+  learnOriginals,
+  markGone,
+  searchIndex,
+  setDuplicateOf,
+  upsertIssues,
+  type IndexedIssue,
+} from '../domain/issue-index.js';
 import { listTicketTypes } from '../domain/ticket-types.js';
 import {
   ACTION_KINDS,
@@ -46,6 +60,8 @@ export interface TriageAction {
   confidence: number;
   priority?: Priority;
   duplicateOf?: number;
+  /** The original is closed (for example fixed): only ever suggested, never applied automatically. */
+  originalClosed?: boolean;
   missing?: MissingItem[];
   /** Comment for the GitHub issue, rendered from the workspace's template when the call was made. */
   comment?: string | null;
@@ -108,7 +124,19 @@ export interface TriageResultRow {
 const LEASE_SECONDS = 180;
 /** Waits between attempts after rate limits and outages (seconds); then the ticket is left untriaged. */
 const RETRY_DELAYS = [60, 300, 900, 3600, 10800];
+/** Best matches from the issue index shown to Claude; more only while the index is still loading. */
+const INDEX_CANDIDATES = 20;
 const MAX_CANDIDATES = 40;
+
+function fromIndexed(i: IndexedIssue): Candidate {
+  return { number: i.number, state: i.state, stateReason: i.state_reason, createdAt: i.created_at, app: i.app_name, title: i.title, text: i.excerpt };
+}
+
+function fromIssue(i: IssueDetail): Candidate {
+  return { number: i.number, state: i.state, stateReason: i.stateReason, createdAt: i.createdAt, app: appOf(i.title, i.body), title: i.title, text: excerptOf(i.body) };
+}
+
+type RepoRef = { repo_id: number; owner: string; name: string; installation_id: number };
 
 /** Turns Claude's verdict into the actions the workspace allows, split into automatic and suggested. */
 export function planActions(v: Verdict, c: TriageConfig, ctx?: TemplateContext): { auto: TriageAction[]; suggested: TriageAction[] } {
@@ -136,14 +164,15 @@ export function planActions(v: Verdict, c: TriageConfig, ctx?: TemplateContext):
   else if (noAction) add('noAction', v.no_action_confidence);
   else if (notDev) add('support', v.not_dev_issue_confidence);
   if (!junk) {
-    if (v.duplicate_of !== null) add('duplicate', v.duplicate_confidence, { duplicateOf: v.duplicate_of });
+    if (v.duplicate_of !== null) add('duplicate', v.duplicate_confidence, { duplicateOf: v.duplicate_of, ...(v.duplicate_closed ? { originalClosed: true } : {}) });
     else if (v.needs_info && !notDev) add('needsInfo', v.needs_info_confidence, { missing: v.missing ?? [] });
     if (c.priority.mode !== 'off') {
       planned.push({ mode: c.priority.mode, action: { kind: 'priority', label: c.priority.labels[v.priority], close: false, confidence: v.priority_confidence, priority: v.priority } });
     }
   }
-  const auto = planned.filter((p) => p.mode === 'auto' && p.action.confidence >= c.threshold).map((p) => p.action);
-  const suggested = planned.filter((p) => !(p.mode === 'auto' && p.action.confidence >= c.threshold)).map((p) => p.action);
+  const isAuto = (p: (typeof planned)[number]) => p.mode === 'auto' && p.action.confidence >= c.threshold && !p.action.originalClosed;
+  const auto = planned.filter(isAuto).map((p) => p.action);
+  const suggested = planned.filter((p) => !isAuto(p)).map((p) => p.action);
   return { auto, suggested };
 }
 
@@ -173,6 +202,8 @@ export async function applyToGitHub(deps: Deps, sub: SubmissionRow, actions: Tri
   }
   if (parts.length) await gh.createComment(inst, owner, repo, n, parts.join('\n\n'));
   if (closing) await gh.closeIssue(inst, owner, repo, n);
+  // Later duplicates of this ticket then lead to its original.
+  for (const a of actions) if (a.kind === 'duplicate' && a.duplicateOf) await setDuplicateOf(deps.db, sub.repo_id, n, a.duplicateOf).catch(() => {});
   if (actions.some((a) => a.kind === 'spam' && a.close)) {
     // Spam files aren't kept around when the cleanup rules say so.
     await cleanUpSpam(deps, sub).catch((err) => deps.log.warn({ submission: sub.ref, err: (err as Error).message }, 'could not delete spam files'));
@@ -217,10 +248,14 @@ function githubMessage(err: unknown): string {
 }
 
 export class TriageEngine {
+  readonly indexer: IssueIndexer;
+
   constructor(
     readonly deps: Deps,
     readonly ai: TriageAi,
-  ) {}
+  ) {
+    this.indexer = new IssueIndexer(deps);
+  }
 
   /** Queues newly filed tickets in workspaces where triage is on (only those filed after it was switched on). */
   async enqueueNew(): Promise<number> {
@@ -317,21 +352,39 @@ export class TriageEngine {
     }
     if (issue.state === 'closed') return this.skip(row, 'The issue was already closed on GitHub');
 
-    // Duplicate candidates: recent open issues plus a keyword search. Best effort.
-    const candidates = new Map<number, IssueDetail>();
+    // Duplicate candidates: the best matches from our copy of every issue in the repository.
+    const repoRef: RepoRef = { repo_id: sub.repo_id, owner: sub.repo_owner, name: sub.repo_name, installation_id: inst };
+    await upsertIssues(deps.db, sub.repo_id, [issue]).catch(() => {});
+    const candidates = new Map<number, Candidate>();
     if (c.duplicate.mode !== 'off') {
-      try {
-        for (const i of await deps.github.listRecentIssues(inst, sub.repo_owner, sub.repo_name, 'open', 30)) candidates.set(i.number, i);
-      } catch {
-        // Triage continues without these.
-      }
-      const terms = searchTerms(issue.title);
-      if (terms) {
+      const index = await this.indexer.refresh(repoRef).catch(() => null);
+      const query = ftsQuery(issue.title, extractDescription(issue.body));
+      if (query) {
         try {
-          for (const i of await deps.github.searchIssues(inst, sub.repo_owner, sub.repo_name, terms, 10)) if (!candidates.has(i.number)) candidates.set(i.number, i);
+          const hits = await searchIndex(deps.db, { repoIds: [sub.repo_id], query, limit: INDEX_CANDIDATES, exclude: { repoId: sub.repo_id, number: issue.number } });
+          for (const h of hits) candidates.set(h.number, fromIndexed(h));
         } catch {
-          // Search is rate limited separately; skip it this time.
+          // Triage continues without these.
         }
+      }
+      // While the first load is still running, also use GitHub's recent issues and search.
+      if (index?.status !== 'ready') {
+        const extra: IssueDetail[] = [];
+        try {
+          extra.push(...(await deps.github.listRecentIssues(inst, sub.repo_owner, sub.repo_name, 'open', 30)));
+        } catch {
+          // Best effort.
+        }
+        const terms = searchTerms(issue.title);
+        if (terms) {
+          try {
+            extra.push(...(await deps.github.searchIssues(inst, sub.repo_owner, sub.repo_name, terms, 10)));
+          } catch {
+            // Search is rate limited separately; skip it this time.
+          }
+        }
+        for (const i of extra) if (!candidates.has(i.number)) candidates.set(i.number, fromIssue(i));
+        await upsertIssues(deps.db, sub.repo_id, extra).catch(() => {});
       }
       candidates.delete(issue.number);
     }
@@ -358,6 +411,7 @@ export class TriageEngine {
     }
 
     const verdict = normalizeVerdict(result.verdict, new Set(shown.map((i) => i.number)));
+    if (verdict.duplicates.length && c.duplicate.mode !== 'off') await this.pickOriginal(verdict, repoRef);
     const dc = await getDiscordConnection(deps.db, row.workspace_id);
     const { auto, suggested } = planActions(verdict, c, { app: sub.app_name, repoUrl: `https://github.com/${sub.repo_owner}/${sub.repo_name}`, guildId: dc?.guild_id ?? null, helpChannel: c.helpChannel });
     const applied: TriageAction[] = [];
@@ -393,6 +447,45 @@ export class TriageEngine {
     });
     await addEvent(deps.db, sub.id, 'triage_done', { applied: applied.map(describeAction), suggested: suggested.map(describeAction), told_member: toldMember });
     deps.log.info({ submission: sub.ref, applied: applied.length, suggested: suggested.length }, 'ticket triaged');
+  }
+
+  /**
+   * Turns Claude's matches into the issue to link: follows "duplicate of" chains to the
+   * original, prefers the oldest one still open, and checks it live on GitHub (it may have been
+   * closed, moved or deleted since the last sync). If GitHub can't be reached, our copy is used.
+   */
+  private async pickOriginal(v: Verdict, repo: RepoRef): Promise<void> {
+    const { deps } = this;
+    const numbers = v.duplicates.map((d) => d.number);
+    const known = await getIndexed(deps.db, repo.repo_id, numbers);
+    await learnOriginals(deps, repo, known, numbers);
+    for (let depth = 0; depth < 4; depth++) {
+      const missing = [...new Set([...known.values()].map((i) => i.duplicate_of).filter((n): n is number => Boolean(n) && !known.has(n!)))];
+      if (!missing.length) break;
+      for (const [n, row] of await getIndexed(deps.db, repo.repo_id, missing)) known.set(n, row);
+    }
+    let choice = chooseOriginal(v.duplicates, known);
+    const checked = new Set<number>();
+    while (choice && !checked.has(choice.number) && checked.size < 3 && deps.github) {
+      const n = choice.number;
+      checked.add(n);
+      try {
+        const live = await deps.github.getIssueDetail(repo.installation_id, repo.owner, repo.name, n);
+        if (!live.url.toLowerCase().includes(`/${repo.owner}/${repo.name}/issues/`.toLowerCase())) throw new GitHubApiError(404, 'moved', null, false, null);
+        await upsertIssues(deps.db, repo.repo_id, [live]);
+        known.set(n, { ...known.get(n)!, state: live.state, state_reason: live.stateReason, closed_at: live.closedAt, gone: 0 });
+      } catch (err) {
+        if (!(err instanceof GitHubApiError) || err.isRateLimit || ![404, 410].includes(err.status)) break;
+        await markGone(deps.db, repo.repo_id, n);
+        known.set(n, { ...known.get(n)!, gone: 1 });
+      }
+      choice = chooseOriginal(v.duplicates, known);
+    }
+    v.duplicate_of = choice?.number ?? null;
+    v.duplicate_confidence = choice?.confidence ?? 0;
+    v.duplicate_via = choice?.via ?? null;
+    v.duplicate_closed = choice?.closed ?? false;
+    v.duplicate_others = choice?.others ?? [];
   }
 
   async getResult(workspaceId: string, submissionId: string): Promise<TriageResultRow | null> {

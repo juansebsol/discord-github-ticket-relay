@@ -7,23 +7,48 @@ import type { TriageEngine } from './engine.js';
 export class TriageWorker {
   private running = false;
   private loop: Promise<void> | null = null;
+  private indexLoop: Promise<void> | null = null;
   private wake: (() => void) | null = null;
+  private wakeIndex: (() => void) | null = null;
 
   constructor(
     readonly engine: TriageEngine,
-    private readonly opts: { pollMs?: number } = {},
+    private readonly opts: { pollMs?: number; indexMs?: number } = {},
   ) {}
 
   start(): void {
     if (this.running) return;
     this.running = true;
     this.loop = this.run();
+    this.indexLoop = this.runIndex();
   }
 
   async stop(): Promise<void> {
     this.running = false;
     this.wake?.();
-    await this.loop;
+    this.wakeIndex?.();
+    await Promise.all([this.loop, this.indexLoop]);
+  }
+
+  /**
+   * Keeps the issue index (used for duplicate search) current in its own loop, so a long first
+   * load of a big repository never holds up triage.
+   */
+  private async runIndex(): Promise<void> {
+    while (this.running) {
+      try {
+        await this.engine.indexer.tick();
+      } catch (err) {
+        this.engine.deps.log.error({ err: (err as Error).message }, 'issue index loop error');
+      }
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, this.opts.indexMs ?? 15_000);
+        this.wakeIndex = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+      });
+    }
   }
 
   /** Queues newly filed tickets and triages everything due. Exposed for tests. */

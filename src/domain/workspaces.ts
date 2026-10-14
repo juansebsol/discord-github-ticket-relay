@@ -25,15 +25,17 @@ export interface Membership extends MemberAccess {
   workspace: WorkspaceRow;
 }
 
-const MEMBER_COLUMNS = 'm.role, m.can_act_tickets, m.can_view_contributors';
+const MEMBER_COLUMNS = 'm.role, m.can_act_tickets, m.can_view_contributors, m.can_search_issues, m.can_manage_files';
 
 function toMembership(row: Record<string, unknown>): Membership {
-  const { role, can_act_tickets, can_view_contributors, ...workspace } = row;
+  const { role, can_act_tickets, can_view_contributors, can_search_issues, can_manage_files, ...workspace } = row;
   return {
     workspace: workspace as unknown as WorkspaceRow,
     role: role as Role,
     can_act_tickets: Boolean(can_act_tickets),
     can_view_contributors: Boolean(can_view_contributors),
+    can_search_issues: Boolean(can_search_issues),
+    can_manage_files: Boolean(can_manage_files),
   };
 }
 
@@ -208,12 +210,13 @@ export async function setModeratorPermissions(
   q: Queryable,
   workspaceId: string,
   userId: string,
-  p: { canActTickets: boolean; canViewContributors: boolean },
+  p: { canActTickets: boolean; canViewContributors: boolean; canSearchIssues?: boolean; canManageFiles?: boolean },
 ): Promise<void> {
   const res = await q.query(
-    `UPDATE workspace_members SET can_act_tickets = $3, can_view_contributors = $4
+    `UPDATE workspace_members SET can_act_tickets = $3, can_view_contributors = $4,
+       can_search_issues = coalesce($5, can_search_issues), can_manage_files = coalesce($6, can_manage_files)
      WHERE workspace_id = $1 AND user_id = $2 AND role = 'moderator'`,
-    [workspaceId, userId, p.canActTickets, p.canViewContributors],
+    [workspaceId, userId, p.canActTickets, p.canViewContributors, p.canSearchIssues ?? null, p.canManageFiles ?? null],
   );
   if (!res.rowCount) throw new UserFacingError('Only moderators have adjustable permissions.', 404);
 }

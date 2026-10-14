@@ -13,8 +13,8 @@ import { MISSING_ITEMS, PRIORITIES, type PauseReason } from './settings.js';
 export const VerdictSchema = z.object({
   priority: z.enum(PRIORITIES),
   priority_confidence: z.number().int(),
-  duplicate_of: z.number().int().nullable(),
-  duplicate_confidence: z.number().int(),
+  /** Every candidate that is the same problem, with a confidence for each. */
+  duplicates: z.array(z.object({ number: z.number().int(), confidence: z.number().int() })),
   spam: z.boolean(),
   spam_confidence: z.number().int(),
   needs_info: z.boolean(),
@@ -27,7 +27,22 @@ export const VerdictSchema = z.object({
   missing: z.array(z.enum(MISSING_ITEMS)),
   reason: z.string(),
 });
-export type Verdict = z.infer<typeof VerdictSchema>;
+export type AiVerdict = z.infer<typeof VerdictSchema>;
+
+/**
+ * The verdict as stored: Claude's answer plus the original the code chose among its matches
+ * (duplicate_of), so older results and the rest of triage keep working with one number.
+ */
+export interface Verdict extends AiVerdict {
+  duplicate_of: number | null;
+  duplicate_confidence: number;
+  /** The newer copy that led to the original, when a chain was followed. */
+  duplicate_via?: number | null;
+  /** The original is closed: never closed automatically, only suggested. */
+  duplicate_closed?: boolean;
+  /** Other matches. */
+  duplicate_others?: number[];
+}
 
 export interface ModelOption {
   id: string;
@@ -36,7 +51,7 @@ export interface ModelOption {
 }
 
 export interface Classification {
-  verdict: Verdict;
+  verdict: AiVerdict;
   inputTokens: number;
   outputTokens: number;
 }
@@ -115,15 +130,24 @@ export class TriageAi {
   }
 }
 
-/** Clamps confidences to 0–100 and drops a duplicate that isn't one of the candidates Claude was shown. */
-export function normalizeVerdict(v: Verdict, candidateNumbers: Set<number>): Verdict {
+/**
+ * Clamps confidences to 0–100 and keeps only matches that are among the candidates Claude was
+ * shown (once each, most confident first). The original is chosen afterwards (see chooseOriginal).
+ */
+export function normalizeVerdict(v: AiVerdict, candidateNumbers: Set<number>): Verdict {
   const c = (n: number) => Math.max(0, Math.min(100, Math.round(n)));
-  const dup = v.duplicate_of !== null && candidateNumbers.has(v.duplicate_of) ? v.duplicate_of : null;
+  const seen = new Set<number>();
+  const duplicates = (v.duplicates ?? [])
+    .map((d) => ({ number: d.number, confidence: c(d.confidence) }))
+    .filter((d) => candidateNumbers.has(d.number) && !seen.has(d.number) && seen.add(d.number))
+    .sort((a, b) => b.confidence - a.confidence)
+    .slice(0, 10);
   return {
     ...v,
     priority_confidence: c(v.priority_confidence),
-    duplicate_of: dup,
-    duplicate_confidence: dup === null ? 0 : c(v.duplicate_confidence),
+    duplicates,
+    duplicate_of: duplicates[0]?.number ?? null,
+    duplicate_confidence: duplicates[0]?.confidence ?? 0,
     spam_confidence: c(v.spam_confidence),
     needs_info_confidence: c(v.needs_info_confidence),
     no_action_confidence: c(v.no_action_confidence),

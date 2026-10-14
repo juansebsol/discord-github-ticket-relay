@@ -30,6 +30,7 @@ import { registerTriageRoutes } from './routes/triage.js';
 import { registerContributorRoutes } from './routes/contributors.js';
 import { registerTicketTypeRoutes } from './routes/ticket-types.js';
 import { registerFileRoutes, UPLOAD_ROUTE } from './routes/files.js';
+import { registerIssueRoutes } from './routes/issues.js';
 import { MAX_FILE_BYTES } from '../domain/files.js';
 
 declare module 'fastify' {
@@ -235,6 +236,7 @@ export async function buildServer(deps: Deps, processor: Processor, opts: { logg
   registerContributorRoutes(app, web);
   registerTicketTypeRoutes(app, web);
   registerFileRoutes(app, web);
+  registerIssueRoutes(app, web);
 
   return app;
 }

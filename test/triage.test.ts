@@ -177,8 +177,8 @@ describe('triage actions', () => {
     const original = await file('Export crashes the app');
     await enable({ duplicate: { mode: 'auto' } });
     env.anthropic.queue.push(
-      { ...env.anthropic.verdict, duplicate_of: original.issue_number, duplicate_confidence: 97 },
-      { ...env.anthropic.verdict, duplicate_of: 9999, duplicate_confidence: 99 },
+      { ...env.anthropic.verdict, duplicates: [{ number: original.issue_number, confidence: 97 }] },
+      { ...env.anthropic.verdict, duplicates: [{ number: 9999, confidence: 99 }] },
     );
     const dup = await file('Export crashes the app again');
     const other = await file('Something else entirely');
@@ -296,7 +296,7 @@ describe('rules by ticket type', () => {
     await types();
     const original = await file('Add a dark mode');
     await enable({ support: { mode: 'auto' }, duplicate: { mode: 'auto' } });
-    env.anthropic.queue.push({ ...env.anthropic.verdict, not_dev_issue: true, not_dev_issue_confidence: 95, duplicate_of: original.issue_number, duplicate_confidence: 95 });
+    env.anthropic.queue.push({ ...env.anthropic.verdict, not_dev_issue: true, not_dev_issue_confidence: 95, duplicates: [{ number: original.issue_number, confidence: 95 }] });
     const t = await file('Dark mode please', 'Would love a dark theme.', null, FEATURE);
     await env.triage.drain();
     expect(issue(t.issue_number).labels).toEqual(['duplicate']);

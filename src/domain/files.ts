@@ -82,7 +82,6 @@ const IMAGE_BRANDS = new Set(['heic', 'heix', 'hevc', 'hevx', 'heim', 'heis', 'm
 
 /** Recognises a file by its first bytes. Anything else is refused. */
 export function sniff(b: Buffer): FileType | null {
-  const ascii = (start: number, end: number) => b.toString('latin1', start, end);
   if (b.length >= 8 && b.subarray(0, 8).equals(PNG_SIG)) return { kind: 'image', contentType: 'image/png', ext: 'png' };
   if (b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return { kind: 'image', contentType: 'image/jpeg', ext: 'jpg' };
   return null;
