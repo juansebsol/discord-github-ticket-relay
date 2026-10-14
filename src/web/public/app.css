@@ -825,3 +825,7 @@ th.th-perm:first-child { padding-left: 20px; }
 .tri-row + .tri-row { border-top: 1px solid var(--border); }
 .tri-row > .ic:first-child { align-self: center; }
 .mt-8 { margin-top: 8px; }
+.tri-suggest { flex-wrap: wrap; }
+.tri-suggest .tri-actions { flex-basis: 100%; display: flex; gap: 4px; padding: 0 0 4px 22px; }
+.rule-check { accent-color: var(--accent); width: 16px; height: 16px; margin: 0; cursor: pointer; vertical-align: middle; }
+#rules th.th-perm .d { max-width: none; }

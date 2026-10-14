@@ -40,7 +40,7 @@ export function registerLegalRoutes(app: FastifyInstance, web: Web): void {
         <li><strong>Tickets.</strong> Members of a Discord server pick an app and fill in a short form. The Service files the ticket as an issue in the GitHub repository the server’s administrators chose for that app, and sends the member a private confirmation.</li>
         <li><strong>Contributor roles.</strong> Members can sign in with GitHub so the Service can count their merged pull requests or commits in the server’s repositories and give them a matching Discord role.</li>
         <li><strong>Console.</strong> Server owners, admins and moderators manage setup and tickets in the web console after signing in with Discord.</li>
-        <li><strong>AI triage (optional).</strong> If a server’s administrators turn it on, an AI model reviews filed tickets and may label them, or close them as duplicates or spam, as the administrators configured. Its calls can be wrong; administrators can review and undo them on GitHub.</li>
+        <li><strong>AI triage (optional).</strong> If a server’s administrators turn it on, an AI model reviews filed tickets and may label them, comment on them, update the member’s private confirmation in Discord, or close them as duplicates, spam or questions for the community, as the administrators configured. Its calls can be wrong; administrators can review and undo them on GitHub.</li>
       </ul>
 
       <h2>3. Who can use it</h2>

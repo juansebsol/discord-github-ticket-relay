@@ -7,7 +7,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod';
 import { z } from 'zod';
 import type { FetchLike } from '../lib/http.js';
-import { PRIORITIES, type PauseReason } from './settings.js';
+import { MISSING_ITEMS, PRIORITIES, type PauseReason } from './settings.js';
 
 /** The answer Claude must return. Ranges are checked after parsing (see normalizeVerdict). */
 export const VerdictSchema = z.object({
@@ -21,6 +21,10 @@ export const VerdictSchema = z.object({
   needs_info_confidence: z.number().int(),
   no_action: z.boolean(),
   no_action_confidence: z.number().int(),
+  not_dev_issue: z.boolean(),
+  not_dev_issue_confidence: z.number().int(),
+  /** For needs_info: what's missing, chosen from a fixed list. */
+  missing: z.array(z.enum(MISSING_ITEMS)),
   reason: z.string(),
 });
 export type Verdict = z.infer<typeof VerdictSchema>;
@@ -123,6 +127,8 @@ export function normalizeVerdict(v: Verdict, candidateNumbers: Set<number>): Ver
     spam_confidence: c(v.spam_confidence),
     needs_info_confidence: c(v.needs_info_confidence),
     no_action_confidence: c(v.no_action_confidence),
+    not_dev_issue_confidence: c(v.not_dev_issue_confidence),
+    missing: v.needs_info ? [...new Set(v.missing)] : [],
     reason: v.reason.replace(/\s+/g, ' ').trim().slice(0, 300),
   };
 }

@@ -208,11 +208,12 @@ export async function getSubmission(q: Queryable, workspaceId: string, id: strin
 
 export type SubmissionFilter = SubmissionStatus | 'attention' | 'open';
 
-export type TriageFilter = 'review' | 'duplicate' | 'spam' | 'high';
+export type TriageFilter = 'review' | 'duplicate' | 'spam' | 'support' | 'high';
 const TRIAGE_FILTERS: Record<TriageFilter, string> = {
   review: 't.suggestion_count > 0',
   duplicate: 't.is_duplicate = 1',
   spam: 't.is_spam = 1',
+  support: 't.is_support = 1',
   high: "t.priority IN ('critical', 'high')",
 };
 

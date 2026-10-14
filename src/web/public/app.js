@@ -352,7 +352,7 @@
     b.getAttribute('data-reset-fields').split(/\s+/).forEach(function (id) {
       var el = document.getElementById(id);
       if (!el) return;
-      el.value = el.getAttribute('placeholder') || '';
+      el.value = el.getAttribute('data-default') !== null ? el.getAttribute('data-default') : el.getAttribute('placeholder') || '';
       el.dispatchEvent(new Event('input', { bubbles: true }));
     });
   });

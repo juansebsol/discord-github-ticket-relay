@@ -22,6 +22,7 @@ import { setFlash } from '../session.js';
 import type { Web, WorkspaceRequestContext } from '../server.js';
 import { csrfField, empty, icon, iconBtn, labelTag, linkBtn, menu, notice, pageHeader, postBtn, submitBtn, switchInput, typeIcon } from '../ui.js';
 import { textField } from './panel.js';
+import { ACTION_KINDS, ACTION_NAMES, actionsOffFor, getTriageSettings } from '../../triage/settings.js';
 import { ticketsHeader } from './tickets.js';
 
 const typeSchema = z.object({
@@ -57,6 +58,13 @@ export function registerTicketTypeRoutes(app: FastifyInstance, web: Web): void {
     if (!ctx) return reply;
     const b = ctx.base;
     const types = await listTicketTypes(deps.db, ctx.workspace.id);
+    const triage = await getTriageSettings(deps.db, ctx.workspace.id);
+    /** What triage does for a type, linking to the rules table. */
+    const triageRule = (t: TicketType) => {
+      const off = actionsOffFor(triage.config, t);
+      const text = off.size === 0 ? 'All actions' : off.size === ACTION_KINDS.length ? 'Not triaged' : `All except ${ACTION_KINDS.filter((k) => off.has(k)).map((k) => ACTION_NAMES[k]).join(', ')}`;
+      return html`<a class="small" href="${b}/tickets/triage#rules">${text}</a>`;
+    };
     let gaps: Awaited<ReturnType<typeof findMissingTypeLabels>> = [];
     let gapError = '';
     const gh = await getGitHubConnection(deps.db, ctx.workspace.id);
@@ -80,11 +88,12 @@ export function registerTicketTypeRoutes(app: FastifyInstance, web: Web): void {
         ${types.length
           ? html`<div class="card-h"><div class="desc">Members pick a type after choosing an app. The label and title prefix are added to the GitHub issue, for example <code>[Bug] [Mobile App] Export fails</code>.</div></div>
               <div class="card-b flush"><div class="table-wrap"><table>
-                <thead><tr><th>Type</th><th>GitHub label</th><th>Title prefix</th><th class="center">Enabled</th><th class="actions"><span class="sr-only">Actions</span></th></tr></thead>
+                <thead><tr><th>Type</th><th>GitHub label</th><th>Title prefix</th>${triage.enabled ? html`<th>Triage</th>` : ''}<th class="center">Enabled</th><th class="actions"><span class="sr-only">Actions</span></th></tr></thead>
                 <tbody>${types.map((t, i) => html`<tr class="${t.enabled ? '' : 'off'}">
                   <td><div class="who-cell">${icon(typeIcon(t), 16, 'muted')}<div><div class="cell-title">${t.name}</div>${t.description ? html`<div class="sub">${t.description}</div>` : ''}</div></div></td>
                   <td>${t.label ? labelTag(t.label) : html`<span class="em">—</span>`}</td>
                   <td><code>[${t.title_prefix || t.name}]</code></td>
+                  ${triage.enabled ? html`<td>${triageRule(t)}</td>` : ''}
                   <td class="center"><form method="post" action="${b}/tickets/types/${t.id}/toggle" data-async class="inline-form">${csrfField(ctx.csrf)}<input type="hidden" name="set" value="1">
                     ${switchInput({ name: 'enabled', checked: t.enabled, label: `${t.name} enabled` })}<button type="submit" class="btn sm nojs">Save</button></form></td>
                   <td class="actions"><div class="row">

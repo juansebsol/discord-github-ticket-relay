@@ -278,6 +278,12 @@ function reply(embed: Embed, components: unknown[] = []) {
   return { content: '', embeds: [embed], components, flags: EPHEMERAL, allowed_mentions: NO_MENTIONS };
 }
 
+/** The "Ticket submitted" reply with a note from triage underneath (for example "ask in #help"). */
+export function createdWithNoteMessage(s: { appName: string; ref: string; issueNumber: number; issueUrl: string; repoPrivate: boolean }, note: string) {
+  const base = createdMessage(s);
+  return { ...base, embeds: [...base.embeds, { title: 'A note about your ticket', description: truncate(note, 4000), color: COLORS.brand }] };
+}
+
 export function createdMessage(s: { appName: string; ref: string; issueNumber: number; issueUrl: string; repoPrivate: boolean }) {
   return reply(
     {

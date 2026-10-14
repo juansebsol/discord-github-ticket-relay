@@ -1,6 +1,7 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { acceptSubmission } from '../src/domain/submissions.js';
 import { createInvite } from '../src/domain/workspaces.js';
+import { createTicketType, listTicketTypes } from '../src/domain/ticket-types.js';
 import { getTriageSettings, parseTriageConfig, saveTriageConfig, setApiKey, setTriageEnabled } from '../src/triage/settings.js';
 import { form, get, makeAdmin, makeApp, makeWorkspace, resetDb, testDb, type Admin, type ConfiguredWorkspace, type TestEnv } from './helpers.js';
 
@@ -23,12 +24,12 @@ afterAll(async () => {
 });
 
 /** Submits a ticket from Discord and runs the filing worker. */
-async function file(title = 'Export crashes the app', description = 'Click export and the app closes right away.') {
+async function file(title = 'Export crashes the app', description = 'Click export and the app closes right away.', interactionToken: string | null = null, ticketType: { name: string; label: string | null; titlePrefix: string } | null = null) {
   n++;
   const r = await acceptSubmission(env.deps, {
-    workspace: ws.workspace, app: ws.apps[0]!, installationId: ws.installationId, source: 'discord', interactionId: `int-t${n}`, interactionToken: null,
+    workspace: ws.workspace, app: ws.apps[0]!, installationId: ws.installationId, source: 'discord', interactionId: `int-t${n}`, interactionToken,
     guildId: ws.guildId, guildName: 'G', channelId: ws.channelId, reporter: { id: `r${n}`, displayName: `Member ${n}`, username: `member${n}` },
-    title, description: `${description} (${n})`,
+    title, description: `${description} (${n})`, ticketType,
   });
   if (r.kind !== 'accepted') throw new Error(r.kind);
   await env.worker.drain();
@@ -217,6 +218,137 @@ describe('triage actions', () => {
   });
 });
 
+describe('replies', () => {
+  const help = () => ({ id: ws.channelId, name: 'help' });
+
+  it('redirects support questions to the help channel on GitHub and in the member’s Discord reply', async () => {
+    await enable({ support: { mode: 'auto' }, needsInfo: { mode: 'auto' }, helpChannel: help() });
+    env.anthropic.queue.push({ ...env.anthropic.verdict, not_dev_issue: true, not_dev_issue_confidence: 95, needs_info: true, needs_info_confidence: 90, missing: ['platform'] });
+    const t = await file('How do I install this', 'I don’t understand how to install this', 'tok-support');
+    await env.triage.drain();
+
+    const i = issue(t.issue_number);
+    expect(i.labels).toEqual(['support']); // not "needs info": support questions never get it
+    expect(i.state).toBe('closed');
+    expect(i.comments).toHaveLength(1);
+    expect(i.comments![0]).toContain(`ask in [#help on Discord](https://discord.com/channels/${ws.guildId}/${ws.channelId})`);
+    expect(i.comments![0]).toContain('Closed by Ticket Relay triage');
+    const edit = env.discord.interactionEdits.at(-1)!;
+    expect(edit.token).toBe('tok-support');
+    expect(edit.payload.embeds[0].title).toBe('Ticket submitted');
+    expect(edit.payload.embeds[1].description).toContain(`ask in <#${ws.channelId}>`);
+    expect((await env.db.query("SELECT detail FROM submission_events WHERE submission_id = $1 AND kind = 'triage_done'", [t.id])).rows[0].detail.told_member).toBe(true);
+  });
+
+  it('asks for exactly what’s missing, and only posts what the templates say', async () => {
+    await enable({ needsInfo: { mode: 'auto' }, spam: { mode: 'auto', close: false }, duplicate: { mode: 'auto', comment: '' } });
+    env.anthropic.queue.push(
+      { ...env.anthropic.verdict, needs_info: true, needs_info_confidence: 95, missing: ['version', 'steps', 'version'] },
+      { ...env.anthropic.verdict, spam: true, spam_confidence: 99 },
+    );
+    const a = await file('Export is broken');
+    const b = await file('Buy followers');
+    await env.triage.drain();
+    expect(issue(a.issue_number).labels).toEqual(['needs info']);
+    expect(issue(a.issue_number).comments).toEqual(['Thanks for the report! To look into this, we need the app version and the steps to reproduce it. Please add them in a comment here, or open a new ticket with the details.']);
+    // Spam that doesn't close posts nothing, as before.
+    expect(issue(b.issue_number).labels).toEqual(['spam']);
+    expect(issue(b.issue_number).comments ?? []).toEqual([]);
+  });
+
+  it('still comments on GitHub when a suggestion is applied after Discord’s 15 minutes', async () => {
+    await enable({ support: { mode: 'suggest', close: false }, helpChannel: help() });
+    env.anthropic.queue.push({ ...env.anthropic.verdict, not_dev_issue: true, not_dev_issue_confidence: 80 });
+    const t = await file('Where do I download it', 'Where is the download?', 'tok-late');
+    await env.triage.drain();
+    expect(issue(t.issue_number).comments ?? []).toEqual([]);
+    await env.db.query('UPDATE submissions SET interaction_token_expires_at = now_ms() - 1000 WHERE id = $1', [t.id]);
+    const edits = env.discord.interactionEdits.length;
+    await env.server.inject({ method: 'POST', url: `${w()}/tickets/${t.id}/triage/apply`, ...form(ws.owner, { kind: 'support' }) });
+    expect(issue(t.issue_number).labels).toEqual(['support']);
+    expect(issue(t.issue_number).comments).toHaveLength(1);
+    expect(issue(t.issue_number).state ?? 'open').toBe('open');
+    expect(env.discord.interactionEdits).toHaveLength(edits);
+  });
+
+  it('tells Claude how to tell support questions from bug reports', async () => {
+    await enable({ support: { mode: 'suggest' } });
+    await file();
+    await env.triage.drain();
+    const system = env.anthropic.requests[0]!.body.system[0].text as string;
+    expect(system).toContain('not_dev_issue');
+    expect(system).toContain('The ticket type was chosen by the member and is often wrong');
+    expect(system).toContain('Never set it for not_dev_issue tickets');
+  });
+});
+
+describe('rules by ticket type', () => {
+  const FEATURE = { name: 'Feature request', label: 'enhancement', titlePrefix: 'Feature Request' };
+  const BUG = { name: 'Bug report', label: 'bug', titlePrefix: 'Bug' };
+  async function types() {
+    for (const t of [BUG, FEATURE]) {
+      await createTicketType(env.db, wid(), { name: t.name, description: null, label: t.label, title_prefix: t.titlePrefix, guidance: null, placeholder: null, enabled: true });
+    }
+    return listTicketTypes(env.db, wid());
+  }
+
+  it('never calls a feature request “not a development issue”, and still checks it for duplicates', async () => {
+    await types();
+    const original = await file('Add a dark mode');
+    await enable({ support: { mode: 'auto' }, duplicate: { mode: 'auto' } });
+    env.anthropic.queue.push({ ...env.anthropic.verdict, not_dev_issue: true, not_dev_issue_confidence: 95, duplicate_of: original.issue_number, duplicate_confidence: 95 });
+    const t = await file('Dark mode please', 'Would love a dark theme.', null, FEATURE);
+    await env.triage.drain();
+    expect(issue(t.issue_number).labels).toEqual(['duplicate']);
+    expect(issue(t.issue_number).state ?? 'open').toBe('open');
+    expect(env.anthropic.requests[0]!.body.messages[0].content).toContain('Checks turned off for this ticket type (answer false or null for them and evaluate the rest normally): not_dev_issue.');
+  });
+
+  it('saves the rules table and applies it', async () => {
+    const [bug, feature] = await types();
+    await setApiKey(env.db, env.deps.box, wid(), KEY, ws.owner.user.id);
+    const allBut = (...off: string[]) => ['priority', 'support', 'duplicate', 'needsInfo', 'spam', 'noAction'].filter((k) => !off.includes(k));
+    await env.server.inject({
+      method: 'POST', url: `${w()}/tickets/triage`,
+      ...form(ws.owner, {
+        model: 'claude-haiku-5-5', threshold: '90', monthly_limit: '500', app_ids: ws.apps[0]!.id, rules: '1',
+        [`rule_${bug!.id}`]: allBut('spam'), [`rule_${feature!.id}`]: [],
+        priority_mode: 'auto', priority_label_critical: 'p0', priority_label_high: 'p1', priority_label_medium: 'p2', priority_label_low: 'p3',
+        spam_mode: 'auto', spam_label: 'spam', spam_close: '1',
+      }),
+    });
+    const c = (await getTriageSettings(env.db, wid())).config;
+    expect(c.typeRules[bug!.id]!.off).toEqual(['spam']);
+    expect(c.typeRules[feature!.id]!.off).toHaveLength(6);
+    await setTriageEnabled(env.db, wid(), true);
+    await new Promise((r) => setTimeout(r, 2));
+
+    env.anthropic.queue.push({ ...env.anthropic.verdict, spam: true, spam_confidence: 99, priority: 'high', priority_confidence: 95 });
+    const b = await file('Login fails', 'It just spins.', null, BUG);
+    const f = await file('Add export to PDF', 'Please add it.', null, FEATURE);
+    await env.triage.drain();
+    expect(issue(b.issue_number).labels).toEqual(['bug', 'p1']); // spam is off for bug reports, priority still runs
+    expect(await result(f.id)).toMatchObject({ status: 'skipped', skip_reason: 'Not in scope (ticket type)' });
+    expect(env.anthropic.requests).toHaveLength(1);
+
+    const typesPage = await env.server.inject({ method: 'GET', url: `${w()}/tickets/types`, ...get(ws.owner) });
+    expect(typesPage.body).toContain('All except Spam');
+    expect(typesPage.body).toContain('Not triaged');
+    const triagePage = await env.server.inject({ method: 'GET', url: `${w()}/tickets/triage`, ...get(ws.owner) });
+    expect(triagePage.body).toContain('Rules by ticket type');
+    expect(triagePage.body).toContain(`aria-label="Bug report: Spam"`);
+  });
+
+  it('asks feature requests for the use case', async () => {
+    await types();
+    await enable({ needsInfo: { mode: 'auto' } });
+    env.anthropic.queue.push({ ...env.anthropic.verdict, needs_info: true, needs_info_confidence: 95, missing: ['use_case'] });
+    const t = await file('Add sync', 'Sync pls', null, FEATURE);
+    await env.triage.drain();
+    expect(issue(t.issue_number).comments?.[0]).toContain('we need what problem this would solve for you and how you’d use it');
+  });
+});
+
 describe('triage settings and the API key', () => {
   it('never shows the key, checks it with Claude, and lets any admin replace or remove it', async () => {
     const url = `${w()}/tickets/triage/key`;
@@ -264,7 +396,8 @@ describe('triage settings and the API key', () => {
     const c = (await getTriageSettings(env.db, wid())).config;
     expect(c).toMatchObject({ model: 'claude-sonnet-5-5', threshold: 85, monthlyLimit: 200, appIds: null, instructions: 'Payments are always high.' });
     expect(c.priority).toMatchObject({ mode: 'auto', labels: { critical: 'P0', high: 'P1', medium: 'P2', low: 'P3' } });
-    expect(c.spam).toEqual({ mode: 'auto', label: 'spam', close: true });
+    expect(c.spam).toMatchObject({ mode: 'auto', label: 'spam', close: true });
+    expect(c.support.comment).toContain('{help_channel}'); // fields left out of the form keep their text
     expect(c.noAction.close).toBe(false);
   });
 });

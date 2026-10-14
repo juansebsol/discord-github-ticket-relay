@@ -15,9 +15,20 @@ export const MODES = ['off', 'suggest', 'auto'] as const;
 export type Mode = (typeof MODES)[number];
 export const PRIORITIES = ['critical', 'high', 'medium', 'low'] as const;
 export type Priority = (typeof PRIORITIES)[number];
-export const FLAGS = ['duplicate', 'spam', 'needsInfo', 'noAction'] as const;
+/** Display order on the Triage tab. */
+export const FLAGS = ['support', 'duplicate', 'needsInfo', 'spam', 'noAction'] as const;
 export type Flag = (typeof FLAGS)[number];
 export type ActionKind = 'priority' | Flag;
+/** Every action, in the column order of the "Rules by ticket type" table. */
+export const ACTION_KINDS = ['priority', 'support', 'duplicate', 'needsInfo', 'spam', 'noAction'] as const satisfies readonly ActionKind[];
+export const ACTION_NAMES: Record<ActionKind, string> = {
+  priority: 'Priority',
+  support: 'Not a dev issue',
+  duplicate: 'Duplicates',
+  needsInfo: 'Needs info',
+  spam: 'Spam',
+  noAction: 'No action',
+};
 
 export const DEFAULT_PRIORITY_LABELS: Record<Priority, string> = {
   critical: 'priority: critical',
@@ -25,25 +36,70 @@ export const DEFAULT_PRIORITY_LABELS: Record<Priority, string> = {
   medium: 'priority: medium',
   low: 'priority: low',
 };
-const FLAG_DEFAULTS: Record<Flag, { label: string; close: boolean }> = {
-  duplicate: { label: 'duplicate', close: false },
-  spam: { label: 'spam', close: false },
-  needsInfo: { label: 'needs info', close: false },
-  noAction: { label: 'no action needed', close: true },
+/** These only comment when they close the issue; the others comment whenever they're applied. */
+export const CLOSE_ONLY_COMMENT: ReadonlySet<Flag> = new Set(['spam', 'noAction']);
+/** Actions that can also update the member's private confirmation in Discord. */
+export const NOTIFIABLE: ReadonlySet<Flag> = new Set(['support', 'duplicate', 'needsInfo']);
+
+export const FLAG_DEFAULTS: Record<Flag, { label: string; close: boolean; comment: string; notifyMember: boolean }> = {
+  support: {
+    label: 'support',
+    close: true,
+    comment: 'Thanks for reaching out! This looks like a question about using {app} rather than a bug, so the quickest way to get help is to ask in {help_channel}. If it is a bug after all, open a new ticket with the steps to reproduce it.',
+    notifyMember: true,
+  },
+  duplicate: { label: 'duplicate', close: false, comment: 'Possible duplicate of {duplicate}.', notifyMember: false },
+  needsInfo: {
+    label: 'needs info',
+    close: false,
+    comment: 'Thanks for the report! To look into this, we need {missing}. Please add them in a comment here, or open a new ticket with the details.',
+    notifyMember: false,
+  },
+  spam: { label: 'spam', close: false, comment: 'Closed automatically by Ticket Relay triage as spam. If that’s wrong, reopen this issue.', notifyMember: false },
+  noAction: { label: 'no action needed', close: true, comment: 'Closed automatically by Ticket Relay triage as not needing any action. If that’s wrong, reopen this issue.', notifyMember: false },
+};
+
+/** What "needs more info" can ask for. Claude picks from this list; it never writes the text. */
+export const MISSING_ITEMS = ['steps', 'expected', 'version', 'platform', 'screenshots', 'use_case'] as const;
+export type MissingItem = (typeof MISSING_ITEMS)[number];
+/** Short names for the console. */
+export const MISSING_SHORT: Record<MissingItem, string> = {
+  steps: 'steps to reproduce',
+  expected: 'expected vs. actual',
+  version: 'app version',
+  platform: 'OS or device',
+  screenshots: 'screenshot or error',
+  use_case: 'use case',
+};
+export const MISSING_TEXT: Record<MissingItem, string> = {
+  steps: 'the steps to reproduce it',
+  expected: 'what you expected to happen and what happened instead',
+  version: 'the app version',
+  platform: 'your operating system or device',
+  screenshots: 'a screenshot or the exact error message',
+  use_case: 'what problem this would solve for you and how you’d use it',
 };
 
 const mode = z.enum(MODES).catch('off');
 const labelName = (fallback: string) => z.string().trim().min(1).max(50).catch(fallback);
 const flag = (f: Flag) =>
-  z.object({ mode, label: labelName(FLAG_DEFAULTS[f].label), close: z.boolean().catch(FLAG_DEFAULTS[f].close) })
-    .catch({ mode: 'off', ...FLAG_DEFAULTS[f] });
+  z.object({
+    mode,
+    label: labelName(FLAG_DEFAULTS[f].label),
+    close: z.boolean().catch(FLAG_DEFAULTS[f].close),
+    /** Comment template posted on the issue; empty = no comment. */
+    comment: z.string().max(1500).catch(FLAG_DEFAULTS[f].comment),
+    notifyMember: z.boolean().catch(FLAG_DEFAULTS[f].notifyMember),
+  }).catch({ mode: 'off', ...FLAG_DEFAULTS[f] });
 
 export const TriageConfigSchema = z.object({
   model: z.string().trim().min(1).max(100).catch(DEFAULT_MODEL),
   /** null = every app, including apps added later. */
   appIds: z.array(z.string()).nullable().catch(null),
-  /** null = every ticket type. */
+  /** Before per-type rules: the ticket types triaged at all (null = every type). Still honoured for old settings. */
   typeNames: z.array(z.string()).nullable().catch(null),
+  /** Per ticket type (by id): actions that never run for that type. Types without an entry use the defaults. */
+  typeRules: z.record(z.string(), z.object({ off: z.array(z.enum(ACTION_KINDS)) })).catch({}),
   /** Automatic actions only happen at or above this confidence (percent). */
   threshold: z.number().int().min(50).max(100).catch(90),
   instructions: z.string().max(2000).catch(''),
@@ -58,15 +114,42 @@ export const TriageConfigSchema = z.object({
     }).catch(DEFAULT_PRIORITY_LABELS),
     guide: z.string().max(1500).catch(''),
   }).catch({ mode: 'off', labels: DEFAULT_PRIORITY_LABELS, guide: '' }),
+  support: flag('support'),
   duplicate: flag('duplicate'),
-  spam: flag('spam'),
   needsInfo: flag('needsInfo'),
+  spam: flag('spam'),
   noAction: flag('noAction'),
+  /** Discord channel for {help_channel} in comments and member notes. */
+  helpChannel: z.object({ id: z.string().regex(/^\d{5,25}$/), name: z.string().max(100) }).nullable().catch(null),
 });
 export type TriageConfig = z.infer<typeof TriageConfigSchema>;
 
 export function parseTriageConfig(raw: unknown): TriageConfig {
   return TriageConfigSchema.parse(raw && typeof raw === 'object' ? raw : {});
+}
+
+/** Feature requests and ideas aren't support questions, so "Not a development issue" starts off for them. */
+export function isFeatureLike(t: { name: string; label?: string | null }): boolean {
+  return /feature|enhancement|idea|improvement|suggestion/i.test(`${t.name} ${t.label ?? ''}`);
+}
+
+/** Actions that never run for tickets of this type (explicit rule, legacy scope, or the default). */
+export function actionsOffFor(c: TriageConfig, type: { id: string; name: string; label?: string | null } | null): Set<ActionKind> {
+  if (!type) return new Set();
+  const rule = c.typeRules[type.id];
+  if (rule) return new Set(rule.off);
+  if (c.typeNames && !c.typeNames.includes(type.name)) return new Set(ACTION_KINDS);
+  return new Set<ActionKind>(isFeatureLike(type) ? ['support'] : []);
+}
+
+/** The settings with the type's switched-off actions forced to Off. */
+export function withActionsOff(c: TriageConfig, off: Set<ActionKind>): TriageConfig {
+  const out = structuredClone(c);
+  for (const k of off) {
+    if (k === 'priority') out.priority.mode = 'off';
+    else out[k].mode = 'off';
+  }
+  return out;
 }
 
 export function anyActionOn(c: TriageConfig): boolean {

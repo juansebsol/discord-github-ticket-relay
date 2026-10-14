@@ -370,7 +370,7 @@ export type ClaudeBehavior = Json | { status: number; type: string; message?: st
 /** In-memory Claude API: GET /v1/models and POST /v1/messages (structured output). */
 export class FakeAnthropic {
   validKeys = new Set(['sk-ant-test-key-0123456789abcdef', 'sk-ant-other-key-0123456789abcdef']);
-  verdict: Json = { priority: 'medium', priority_confidence: 80, duplicate_of: null, duplicate_confidence: 0, spam: false, spam_confidence: 5, needs_info: false, needs_info_confidence: 10, no_action: false, no_action_confidence: 5, reason: 'A genuine bug report.' };
+  verdict: Json = { priority: 'medium', priority_confidence: 80, duplicate_of: null, duplicate_confidence: 0, spam: false, spam_confidence: 5, needs_info: false, needs_info_confidence: 10, no_action: false, no_action_confidence: 5, not_dev_issue: false, not_dev_issue_confidence: 5, missing: [], reason: 'A genuine bug report.' };
   queue: ClaudeBehavior[] = [];
   requests: { key: string; body: Json }[] = [];
   models = [

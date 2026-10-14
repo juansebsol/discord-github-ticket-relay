@@ -5,7 +5,7 @@ import { can } from '../../domain/permissions.js';
 import { getDiscordConnection, listApps } from '../../domain/store.js';
 import { countByStatus, decryptPayload, getSubmission, listEvents, listSubmissions, type SubmissionFilter, type TriageFilter } from '../../domain/submissions.js';
 import { describeAction, triageSummaries, type TriageAction, type TriageResultRow } from '../../triage/engine.js';
-import { getTriageSettings, type Priority } from '../../triage/settings.js';
+import { getTriageSettings, MISSING_SHORT, type Priority } from '../../triage/settings.js';
 import { listTicketTypes } from '../../domain/ticket-types.js';
 import { UserFacingError, type SubmissionRow, type SubmissionStatus } from '../../domain/types.js';
 import { updateTicketLimits, userNames } from '../../domain/workspaces.js';
@@ -156,7 +156,7 @@ export function ticketList(base: string, rows: SubmissionRow[], titleOf: (s: Sub
       <span class="l2">${o.triage ? triageCell(o.triage.get(v.s.id), true) : ''}${[appLine(v.s), v.s.reporter_display_name, timeAgo(v.s.updated_at)].filter(Boolean).join(' · ')}</span></a></li>`)}</ul>`;
 }
 
-export type TriageSummary = { status: string; priority: Priority | null; is_duplicate: number; is_spam: number; suggestion_count: number };
+export type TriageSummary = { status: string; priority: Priority | null; is_duplicate: number; is_spam: number; is_support: number; suggestion_count: number };
 
 const PRIORITY_NAMES: Record<Priority, string> = { critical: 'Critical', high: 'High', medium: 'Medium', low: 'Low' };
 
@@ -170,6 +170,7 @@ function triageCell(t: TriageSummary | undefined, compact = false): SafeHtml | s
   const parts = [
     t.priority ? priorityTag(t.priority) : '',
     t.is_spam ? tag('Spam') : '',
+    t.is_support ? tag('Not a dev issue') : '',
     t.is_duplicate ? tag('Duplicate') : '',
     t.suggestion_count ? tag('To review', { icon: 'eye' }) : '',
   ].filter(Boolean);
@@ -190,6 +191,7 @@ const TRIAGE_OPTIONS: { value: TriageFilter; label: string }[] = [
   { value: 'review', label: 'To review' },
   { value: 'high', label: 'High priority' },
   { value: 'duplicate', label: 'Duplicates' },
+  { value: 'support', label: 'Not a development issue' },
   { value: 'spam', label: 'Spam' },
 ];
 
@@ -241,10 +243,10 @@ function eventView(e: EventRow, s: SubmissionRow, names: Map<string, string>): {
       const applied = Array.isArray(d.applied) ? (d.applied as string[]) : [];
       const suggested = Array.isArray(d.suggested) ? (d.suggested as string[]) : [];
       const text = [applied.length ? `applied ${applied.join(', ')}` : '', suggested.length ? `suggested ${suggested.join(', ')}` : ''].filter(Boolean).join(' · ');
-      return { icon: 'bot', tone: 'muted', text: html`Triage ${text || 'found nothing to flag'}` };
+      return { icon: 'bot', tone: 'muted', text: html`Triage ${text || 'found nothing to flag'}${d.told_member ? ' · told the member in Discord' : ''}` };
     }
     case 'triage_applied':
-      return { actor: by, text: html`<span class="actor">${by}</span> applied the triage suggestion: ${(d.actions as string[] | undefined)?.join(', ') ?? ''}` };
+      return { actor: by, text: html`<span class="actor">${by}</span> applied the triage suggestion: ${(d.actions as string[] | undefined)?.join(', ') ?? ''}${d.told_member ? ' · told the member in Discord' : ''}` };
     case 'triage_dismissed':
       return { actor: by, text: html`<span class="actor">${by}</span> dismissed the triage suggestion: ${(d.actions as string[] | undefined)?.join(', ') ?? ''}` };
     default:
@@ -259,7 +261,9 @@ function triageActionText(a: TriageAction, s: SubmissionRow): SafeHtml {
     ? html`${priorityTag(a.priority)} priority`
     : a.kind === 'duplicate'
       ? html`Duplicate of <a href="https://github.com/${s.repo_owner}/${s.repo_name}/issues/${String(a.duplicateOf)}" target="_blank" rel="noopener noreferrer">#${String(a.duplicateOf)}</a>`
-      : html`${a.kind === 'spam' ? 'Spam' : a.kind === 'needsInfo' ? 'Needs more info' : 'No action needed'}`;
+      : a.kind === 'needsInfo' && a.missing?.length
+        ? html`Needs more info<span class="muted"> · ${a.missing.map((m) => MISSING_SHORT[m]).join(', ')}</span>`
+        : html`${a.kind === 'spam' ? 'Spam' : a.kind === 'needsInfo' ? 'Needs more info' : a.kind === 'support' ? 'Not a development issue' : 'No action needed'}`;
   return html`<span class="grow">${what}${a.close ? html`<span class="muted"> · closes the issue</span>` : ''}</span><span class="xs muted num" title="Claude’s confidence">${String(a.confidence)}%</span>`;
 }
 
@@ -274,8 +278,8 @@ function triageCard(t: TriageResultRow, s: SubmissionRow, o: { act: boolean; csr
     const suggestions = t.suggestions ?? [];
     content = html`
       ${applied.map((a) => html`<div class="tri-row">${icon('circle-check', 14, 'ok')}${triageActionText(a, s)}</div>`)}
-      ${suggestions.map((a) => html`<div class="tri-row">${icon('circle-help', 14, 'warn')}${triageActionText(a, s)}${o.act
-        ? html`<span class="row gap-4">${postBtn(`${o.actionBase}/triage/apply`, 'Apply', o.csrf, { size: 'sm', fields: { kind: a.kind }, title: `Apply: ${describeAction(a)}` })}${postBtn(`${o.actionBase}/triage/dismiss`, 'Dismiss', o.csrf, { size: 'sm', variant: 'ghost', fields: { kind: a.kind } })}</span>`
+      ${suggestions.map((a) => html`<div class="tri-row tri-suggest">${icon('circle-help', 14, 'warn')}${triageActionText(a, s)}${o.act
+        ? html`<span class="tri-actions">${postBtn(`${o.actionBase}/triage/apply`, 'Apply', o.csrf, { size: 'sm', fields: { kind: a.kind }, title: `Apply: ${describeAction(a)}` })}${postBtn(`${o.actionBase}/triage/dismiss`, 'Dismiss', o.csrf, { size: 'sm', variant: 'ghost', fields: { kind: a.kind } })}</span>`
         : ''}</div>`)}
       ${!applied.length && !suggestions.length ? html`<p class="small muted">Nothing to flag.</p>` : ''}
       ${t.verdict?.reason ? html`<p class="small muted mt-8">“${t.verdict.reason}”</p>` : ''}

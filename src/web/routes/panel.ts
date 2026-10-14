@@ -28,8 +28,8 @@ export function checklist(checks: { status: Check['status']; title: string; deta
 }
 
 /** A labelled text field with a live character counter. */
-export function textField(o: { id: string; name?: string; label: string; value: string; max: number; rows?: number; placeholder?: string; preview?: string; md?: boolean; hint?: string }): SafeHtml {
-  const attrs = html`id="${o.id}" name="${o.name ?? o.id}" maxlength="${String(o.max)}" ${o.placeholder ? html`placeholder="${o.placeholder}"` : ''} ${o.preview ? html`data-preview="${o.preview}"` : ''} ${o.md ? raw('data-preview-md') : ''}`;
+export function textField(o: { id: string; name?: string; label: string; value: string; max: number; rows?: number; placeholder?: string; preview?: string; md?: boolean; hint?: SafeHtml | string; defaultValue?: string }): SafeHtml {
+  const attrs = html`id="${o.id}" name="${o.name ?? o.id}" maxlength="${String(o.max)}" ${o.placeholder ? html`placeholder="${o.placeholder}"` : ''} ${o.defaultValue !== undefined ? html`data-default="${o.defaultValue}"` : ''} ${o.preview ? html`data-preview="${o.preview}"` : ''} ${o.md ? raw('data-preview-md') : ''}`;
   return html`<div class="field"><div class="field-head"><label for="${o.id}">${o.label}</label><span class="counter" data-counter-for="${o.id}">${String(o.value.length)} / ${String(o.max)}</span></div>
     ${o.rows ? html`<textarea ${attrs} rows="${String(o.rows)}">${o.value}</textarea>` : html`<input type="text" class="full" ${attrs} value="${o.value}">`}
     ${o.hint ? html`<div class="hint">${o.hint}</div>` : ''}</div>`;

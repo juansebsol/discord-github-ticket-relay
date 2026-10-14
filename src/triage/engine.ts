@@ -7,14 +7,24 @@
  * own and tickets keep being filed exactly as before.
  */
 import type { Queryable } from '../db/database.js';
+import { createdWithNoteMessage } from '../discord/messages.js';
 import { decryptPayload, getSubmission, addEvent } from '../domain/submissions.js';
-import { getGitHubConnection } from '../domain/store.js';
+import { getDiscordConnection, getGitHubConnection } from '../domain/store.js';
+import { neutralizeGitHubMentions } from '../github/issue-content.js';
 import { labelColor } from '../domain/ticket-types.js';
 import { UserFacingError, type Deps, type SubmissionRow } from '../domain/types.js';
 import { GitHubApiError, type IssueDetail } from '../github/client.js';
 import { normalizeVerdict, TriageAiError, type TriageAi, type Verdict } from './ai.js';
 import { buildSystemPrompt, buildUserPrompt, extractDescription, searchTerms } from './prompt.js';
+import { listTicketTypes } from '../domain/ticket-types.js';
 import {
+  ACTION_KINDS,
+  actionsOffFor,
+  withActionsOff,
+  CLOSE_ONLY_COMMENT,
+  FLAG_DEFAULTS,
+  MISSING_TEXT,
+  NOTIFIABLE,
   anyActionOn,
   getTriageSettings,
   monthlyUsage,
@@ -22,6 +32,7 @@ import {
   resolveApiKey,
   type ActionKind,
   type Flag,
+  type MissingItem,
   type Mode,
   type Priority,
   type TriageConfig,
@@ -34,6 +45,37 @@ export interface TriageAction {
   confidence: number;
   priority?: Priority;
   duplicateOf?: number;
+  missing?: MissingItem[];
+  /** Comment for the GitHub issue, rendered from the workspace's template when the call was made. */
+  comment?: string | null;
+  /** Note for the member's Discord confirmation, when that's switched on for the action. */
+  memberNote?: string | null;
+}
+
+/** Values for {app}, {duplicate}, {missing} and {help_channel} in comment templates. */
+export interface TemplateContext {
+  app: string;
+  repoUrl: string;
+  guildId: string | null;
+  helpChannel: { id: string; name: string } | null;
+}
+
+function humanList(items: string[]): string {
+  return items.length <= 1 ? (items[0] ?? '') : `${items.slice(0, -1).join(', ')} and ${items.at(-1)}`;
+}
+
+/** Fills a template written by the workspace admins. Claude's own text is never inserted. */
+export function renderTemplate(template: string, ctx: TemplateContext, a: Pick<TriageAction, 'duplicateOf' | 'missing'>, target: 'github' | 'discord'): string {
+  const channel = ctx.helpChannel;
+  const vars: Record<string, string> = {
+    app: target === 'github' ? neutralizeGitHubMentions(ctx.app) : ctx.app,
+    duplicate: a.duplicateOf ? (target === 'github' ? `#${a.duplicateOf}` : `[#${a.duplicateOf}](${ctx.repoUrl}/issues/${a.duplicateOf})`) : 'another issue',
+    missing: humanList((a.missing ?? []).map((m) => MISSING_TEXT[m])) || 'a few more details',
+    help_channel: channel && ctx.guildId
+      ? target === 'github' ? `[#${channel.name} on Discord](https://discord.com/channels/${ctx.guildId}/${channel.id})` : `<#${channel.id}>`
+      : 'our Discord server',
+  };
+  return template.replace(/\{(app|duplicate|missing|help_channel)\}/g, (_m, k: string) => vars[k]!).trim();
 }
 
 export interface TriageResultRow {
@@ -51,6 +93,7 @@ export interface TriageResultRow {
   priority: Priority | null;
   is_duplicate: number;
   is_spam: number;
+  is_support: number;
   suggestion_count: number;
   skip_reason: string | null;
   error: string | null;
@@ -67,18 +110,33 @@ const RETRY_DELAYS = [60, 300, 900, 3600, 10800];
 const MAX_CANDIDATES = 40;
 
 /** Turns Claude's verdict into the actions the workspace allows, split into automatic and suggested. */
-export function planActions(v: Verdict, c: TriageConfig): { auto: TriageAction[]; suggested: TriageAction[] } {
+export function planActions(v: Verdict, c: TriageConfig, ctx?: TemplateContext): { auto: TriageAction[]; suggested: TriageAction[] } {
   const planned: { mode: Mode; action: TriageAction }[] = [];
   const add = (kind: Flag, confidence: number, extra: Partial<TriageAction> = {}) => {
-    if (c[kind].mode !== 'off') planned.push({ mode: c[kind].mode, action: { kind, label: c[kind].label, close: c[kind].close, confidence, ...extra } });
+    const f = c[kind];
+    if (f.mode === 'off') return;
+    const action: TriageAction = { kind, label: f.label, close: f.close, confidence, ...extra };
+    if (ctx) {
+      // Spam and "no action needed" only comment when they close the issue.
+      const comment = f.comment && (!CLOSE_ONLY_COMMENT.has(kind) || f.close) ? renderTemplate(f.comment, ctx, action, 'github') : '';
+      action.comment = comment || null;
+      action.memberNote = NOTIFIABLE.has(kind) && f.notifyMember && f.comment ? renderTemplate(f.comment, ctx, action, 'discord') : null;
+    }
+    planned.push({ mode: f.mode, action });
   };
-  // Confident spam or "no action needed" make the other labels pointless.
-  const junk = (v.spam && v.spam_confidence >= c.threshold) || (v.no_action && v.no_action_confidence >= c.threshold);
-  if (v.spam) add('spam', v.spam_confidence);
-  else if (v.no_action) add('noAction', v.no_action_confidence);
+  // Only checks that are switched on count (globally or for this ticket type). A confident spam,
+  // "no action needed" or "not a development issue" call makes the other labels pointless.
+  const on = (kind: Flag) => c[kind].mode !== 'off';
+  const spam = v.spam && on('spam');
+  const noAction = v.no_action && on('noAction');
+  const notDev = (v.not_dev_issue ?? false) && on('support');
+  const junk = (spam && v.spam_confidence >= c.threshold) || (noAction && v.no_action_confidence >= c.threshold) || (notDev && v.not_dev_issue_confidence >= c.threshold);
+  if (spam) add('spam', v.spam_confidence);
+  else if (noAction) add('noAction', v.no_action_confidence);
+  else if (notDev) add('support', v.not_dev_issue_confidence);
   if (!junk) {
     if (v.duplicate_of !== null) add('duplicate', v.duplicate_confidence, { duplicateOf: v.duplicate_of });
-    else if (v.needs_info) add('needsInfo', v.needs_info_confidence);
+    else if (v.needs_info && !notDev) add('needsInfo', v.needs_info_confidence, { missing: v.missing ?? [] });
     if (c.priority.mode !== 'off') {
       planned.push({ mode: c.priority.mode, action: { kind: 'priority', label: c.priority.labels[v.priority], close: false, confidence: v.priority_confidence, priority: v.priority } });
     }
@@ -90,24 +148,11 @@ export function planActions(v: Verdict, c: TriageConfig): { auto: TriageAction[]
 
 /** Short, human description of an action for the activity log. */
 export function describeAction(a: TriageAction): string {
-  const what = a.kind === 'priority' ? a.label : a.kind === 'duplicate' ? `duplicate of #${a.duplicateOf}` : a.kind === 'spam' ? 'spam' : a.kind === 'needsInfo' ? 'needs info' : 'no action needed';
+  const what = a.kind === 'priority' ? a.label : a.kind === 'duplicate' ? `duplicate of #${a.duplicateOf}` : a.kind === 'spam' ? 'spam' : a.kind === 'needsInfo' ? 'needs info' : a.kind === 'support' ? 'not a development issue' : 'no action needed';
   return a.close ? `${what} (closed)` : what;
 }
 
-function closeReason(a: TriageAction): string {
-  switch (a.kind) {
-    case 'duplicate':
-      return `as a possible duplicate of #${a.duplicateOf}`;
-    case 'spam':
-      return 'as spam';
-    case 'needsInfo':
-      return 'because it needs more information';
-    default:
-      return 'as not needing any action';
-  }
-}
-
-/** Adds the actions' labels (creating missing ones), comments where useful, and closes if asked. Fixed comment text only. */
+/** Adds the actions' labels (creating missing ones), posts one comment from the admins' templates, and closes if asked. */
 export async function applyToGitHub(deps: Deps, sub: SubmissionRow, actions: TriageAction[]): Promise<void> {
   if (!actions.length) return;
   if (!deps.github || !sub.issue_number) throw new Error('GitHub is not configured');
@@ -119,13 +164,46 @@ export async function applyToGitHub(deps: Deps, sub: SubmissionRow, actions: Tri
   const existing = new Set((await gh.listLabels(inst, owner, repo)).map((l) => l.toLowerCase()));
   for (const name of labels) if (!existing.has(name.toLowerCase())) await gh.createLabel(inst, owner, repo, name, labelColor(name));
   await gh.addLabels(inst, owner, repo, n, labels);
-  const closing = actions.find((a) => a.close);
-  const duplicate = actions.find((a) => a.kind === 'duplicate');
-  if (closing) {
-    await gh.createComment(inst, owner, repo, n, `Closed automatically by Ticket Relay triage ${closeReason(closing)}. If that’s wrong, reopen this issue.`);
-    await gh.closeIssue(inst, owner, repo, n);
-  } else if (duplicate) {
-    await gh.createComment(inst, owner, repo, n, `Possible duplicate of #${duplicate.duplicateOf}.\n\n<sub>Flagged automatically by Ticket Relay triage.</sub>`);
+  const closing = actions.some((a) => a.close);
+  const parts = actions.map((a) => (a.comment === undefined ? legacyComment(a) : a.comment)).filter((c): c is string => Boolean(c));
+  // Spam and "no action needed" templates already say the issue was closed.
+  if (closing && !actions.some((a) => a.close && CLOSE_ONLY_COMMENT.has(a.kind as Flag) && (a.comment ?? legacyComment(a)))) {
+    parts.push('Closed by Ticket Relay triage. If that’s wrong, reopen this issue.');
+  }
+  if (parts.length) await gh.createComment(inst, owner, repo, n, parts.join('\n\n'));
+  if (closing) await gh.closeIssue(inst, owner, repo, n);
+}
+
+/** Suggestions saved before comment templates existed keep their original fixed text. */
+function legacyComment(a: TriageAction): string | null {
+  if (a.kind === 'duplicate') return `Possible duplicate of #${a.duplicateOf}.`;
+  if (a.close && (a.kind === 'spam' || a.kind === 'noAction')) return FLAG_DEFAULTS[a.kind].comment;
+  return null;
+}
+
+/**
+ * Adds the actions' member notes to the member's private Discord confirmation. Only possible
+ * while Discord's interaction token is valid (15 minutes); returns whether the member was told.
+ */
+export async function tellMember(deps: Deps, sub: SubmissionRow, actions: TriageAction[]): Promise<boolean> {
+  const note = actions.map((a) => a.memberNote).filter(Boolean).join('\n\n');
+  if (!note || !deps.discord || !sub.issue_number || !sub.issue_url) return false;
+  const { rows } = await deps.db.query<{ interaction_token_enc: string | null; interaction_token_expires_at: Date | null }>(
+    'SELECT interaction_token_enc, interaction_token_expires_at FROM submissions WHERE id = $1',
+    [sub.id],
+  );
+  const t = rows[0];
+  if (!t?.interaction_token_enc || !t.interaction_token_expires_at || t.interaction_token_expires_at.getTime() < Date.now()) return false;
+  const { flags: _ephemeralIsFixedAtCreation, ...edit } = createdWithNoteMessage(
+    { appName: sub.app_name, ref: sub.ref, issueNumber: sub.issue_number, issueUrl: sub.issue_url, repoPrivate: sub.repo_private },
+    note,
+  );
+  try {
+    await deps.discord.editOriginalResponse(deps.box.decrypt(t.interaction_token_enc), edit);
+    return true;
+  } catch (err) {
+    deps.log.warn({ submission: sub.ref, err: (err as Error).message }, 'could not add the triage note to the member reply');
+    return false;
   }
 }
 
@@ -204,13 +282,15 @@ export class TriageEngine {
   private async run(row: TriageResultRow): Promise<void> {
     const { deps } = this;
     const settings = await getTriageSettings(deps.db, row.workspace_id);
-    const c = settings.config;
     if (!settings.enabled) return this.skip(row, 'Triage was turned off');
     const sub = await getSubmission(deps.db, row.workspace_id, row.submission_id);
     if (!sub || sub.status !== 'created' || !sub.issue_number) return this.skip(row, 'The ticket is no longer filed');
-    if (c.appIds && !c.appIds.includes(sub.app_id ?? '')) return this.skip(row, 'Not in scope (app)');
-    if (c.typeNames && !c.typeNames.includes(sub.ticket_type_name ?? '')) return this.skip(row, 'Not in scope (ticket type)');
-    if (!anyActionOn(c)) return this.skip(row, 'No triage actions are turned on');
+    if (settings.config.appIds && !settings.config.appIds.includes(sub.app_id ?? '')) return this.skip(row, 'Not in scope (app)');
+    // The ticket type's rules switch actions off for this ticket; Claude is told which.
+    const type = sub.ticket_type_name ? (await listTicketTypes(deps.db, row.workspace_id)).find((t) => t.name === sub.ticket_type_name) ?? null : null;
+    const off = actionsOffFor(settings.config, type);
+    const c = withActionsOff(settings.config, off);
+    if (!anyActionOn(c)) return this.skip(row, off.size === ACTION_KINDS.length ? 'Not in scope (ticket type)' : 'No triage actions are turned on');
     const usage = await monthlyUsage(deps.db, row.workspace_id);
     if (usage.triaged >= c.monthlyLimit) return this.skip(row, 'Monthly limit reached');
     const key = await resolveApiKey(deps, row.workspace_id);
@@ -259,7 +339,7 @@ export class TriageEngine {
         key.key,
         c.model,
         buildSystemPrompt(c),
-        buildUserPrompt({ app: sub.app_name, type: sub.ticket_type_name, title, description: extractDescription(issue.body) }, shown),
+        buildUserPrompt({ app: sub.app_name, type: sub.ticket_type_name, title, description: extractDescription(issue.body) }, shown, [...off]),
       );
     } catch (err) {
       const e = err instanceof TriageAiError ? err : new TriageAiError('retry', (err as Error).message);
@@ -273,13 +353,16 @@ export class TriageEngine {
     }
 
     const verdict = normalizeVerdict(result.verdict, new Set(shown.map((i) => i.number)));
-    const { auto, suggested } = planActions(verdict, c);
+    const dc = await getDiscordConnection(deps.db, row.workspace_id);
+    const { auto, suggested } = planActions(verdict, c, { app: sub.app_name, repoUrl: `https://github.com/${sub.repo_owner}/${sub.repo_name}`, guildId: dc?.guild_id ?? null, helpChannel: c.helpChannel });
     const applied: TriageAction[] = [];
+    let toldMember = false;
     let error: string | null = null;
     if (auto.length) {
       try {
         await applyToGitHub(deps, sub, auto);
         applied.push(...auto);
+        toldMember = await tellMember(deps, sub, auto);
       } catch (err) {
         // Nothing is lost: the actions become suggestions an admin can apply later.
         error = `Couldn’t update the GitHub issue: ${githubMessage(err)}`;
@@ -292,16 +375,18 @@ export class TriageEngine {
       verdict,
       applied_actions: applied,
       suggestions: suggested,
-      priority: c.priority.mode !== 'off' ? verdict.priority : null,
+      // Only a priority that was applied or suggested shows in the inbox.
+      priority: [...applied, ...suggested].some((a) => a.kind === 'priority') ? verdict.priority : null,
       is_duplicate: verdict.duplicate_of !== null && c.duplicate.mode !== 'off' ? 1 : 0,
       is_spam: verdict.spam && c.spam.mode !== 'off' ? 1 : 0,
+      is_support: verdict.not_dev_issue && c.support.mode !== 'off' ? 1 : 0,
       suggestion_count: suggested.length,
       error,
       input_tokens: result.inputTokens,
       output_tokens: result.outputTokens,
       completed_at: new Date(),
     });
-    await addEvent(deps.db, sub.id, 'triage_done', { applied: applied.map(describeAction), suggested: suggested.map(describeAction) });
+    await addEvent(deps.db, sub.id, 'triage_done', { applied: applied.map(describeAction), suggested: suggested.map(describeAction), told_member: toldMember });
     deps.log.info({ submission: sub.ref, applied: applied.length, suggested: suggested.length }, 'ticket triaged');
   }
 
@@ -328,7 +413,8 @@ export class TriageEngine {
       throw new UserFacingError(`GitHub didn’t accept the change (${githubMessage(err)}). Try again in a moment.`, 502);
     }
     await this.saveReview(row, rest, [...(row.applied_actions ?? []), action]);
-    await addEvent(this.deps.db, submissionId, 'triage_applied', { by: userId, actions: [describeAction(action)] });
+    const told = await tellMember(this.deps, sub, [action]);
+    await addEvent(this.deps.db, submissionId, 'triage_applied', { by: userId, actions: [describeAction(action)], told_member: told });
     return action;
   }
 
@@ -348,10 +434,10 @@ export class TriageEngine {
 }
 
 /** Triage summaries for a page of tickets (inbox priority column). */
-export async function triageSummaries(q: Queryable, workspaceId: string, ids: string[]): Promise<Map<string, Pick<TriageResultRow, 'status' | 'priority' | 'is_duplicate' | 'is_spam' | 'suggestion_count'>>> {
+export async function triageSummaries(q: Queryable, workspaceId: string, ids: string[]): Promise<Map<string, Pick<TriageResultRow, 'status' | 'priority' | 'is_duplicate' | 'is_spam' | 'is_support' | 'suggestion_count'>>> {
   if (!ids.length) return new Map();
   const { rows } = await q.query<TriageResultRow>(
-    'SELECT submission_id, status, priority, is_duplicate, is_spam, suggestion_count FROM triage_results WHERE workspace_id = $1 AND submission_id IN (SELECT value FROM json_each($2))',
+    'SELECT submission_id, status, priority, is_duplicate, is_spam, is_support, suggestion_count FROM triage_results WHERE workspace_id = $1 AND submission_id IN (SELECT value FROM json_each($2))',
     [workspaceId, ids],
   );
   return new Map(rows.map((r) => [r.submission_id, r]));
