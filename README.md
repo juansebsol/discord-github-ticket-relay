@@ -22,7 +22,7 @@ and filed by a GitHub App. Reporters never need a GitHub account.
 - **Admin console:** guided setup, map apps to repos and labels, a tickets inbox with retry, link and close.
 - **Moderators:** view-only by default; admins choose per person who can act on tickets or see verifications.
 - **Ticket types:** members pick a type (e.g. Bug report, Feature request); each adds its GitHub label and a `[Bug]` title prefix.
-- **AI triage (optional):** Claude flags priority, duplicates and spam on filed tickets, as suggestions or automatically. It runs in its own worker, so filing never depends on it.
+- **AI triage (optional):** Claude flags priority, duplicates, regressions, spam and more on filed tickets, and sorts them with your own label groups, as suggestions or automatically. Every suggestion shows exactly what applying it does. Re-run triage on older tickets to compare settings before applying anything. It runs in its own worker, so filing never depends on it.
 - **Contributor roles:** a second panel where members sign in with GitHub and get a role based on their merged PRs or commits across all your apps, e.g. Junior Contributor at 1, Contributor at 10.
 - **Reliable:** duplicate and rate-limit protection; never files the same issue twice.
 - **Secure:** credentials stay on the server; stored tokens and ticket text are encrypted.

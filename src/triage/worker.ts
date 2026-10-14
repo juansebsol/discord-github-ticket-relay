@@ -51,15 +51,26 @@ export class TriageWorker {
     }
   }
 
-  /** Queues newly filed tickets and triages everything due. Exposed for tests. */
+  /**
+   * Queues newly filed tickets and triages everything due. Re-runs only use the time left over:
+   * a new ticket always goes first. Exposed for tests.
+   */
   async drain(): Promise<number> {
     await this.engine.enqueueNew();
     let processed = 0;
     for (;;) {
       const row = await this.engine.claim();
-      if (!row) return processed;
-      await this.engine.process(row);
+      if (row) {
+        await this.engine.process(row);
+        processed++;
+        continue;
+      }
+      const item = await this.engine.claimRunItem();
+      if (!item) return processed;
+      await this.engine.processRunItem(item);
       processed++;
+      // New tickets filed meanwhile come first.
+      await this.engine.enqueueNew();
     }
   }
 

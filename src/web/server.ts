@@ -27,6 +27,8 @@ import { registerTicketRoutes } from './routes/tickets.js';
 import { registerMemberRoutes } from './routes/members.js';
 import { registerLegalRoutes } from './routes/legal.js';
 import { registerTriageRoutes } from './routes/triage.js';
+import { registerTriageConfigRoutes } from './routes/triage-config.js';
+import { registerTriageRunRoutes } from './routes/triage-runs.js';
 import { registerContributorRoutes } from './routes/contributors.js';
 import { registerTicketTypeRoutes } from './routes/ticket-types.js';
 import { registerFileRoutes, UPLOAD_ROUTE } from './routes/files.js';
@@ -234,6 +236,8 @@ export async function buildServer(deps: Deps, processor: Processor, opts: { logg
   registerPanelRoutes(app, web);
   registerTicketRoutes(app, web);
   registerTriageRoutes(app, web);
+  registerTriageConfigRoutes(app, web);
+  registerTriageRunRoutes(app, web);
   registerMemberRoutes(app, web);
   registerContributorRoutes(app, web);
   registerTicketTypeRoutes(app, web);

@@ -19,19 +19,28 @@ export type Mode = (typeof MODES)[number];
 export const PRIORITIES = ['critical', 'high', 'medium', 'low'] as const;
 export type Priority = (typeof PRIORITIES)[number];
 /** Display order on the Triage tab. */
-export const FLAGS = ['support', 'duplicate', 'needsInfo', 'spam', 'noAction'] as const;
+export const FLAGS = ['support', 'duplicate', 'regression', 'needsInfo', 'multiple', 'related', 'shared', 'wrongRepo', 'spam', 'noAction'] as const;
 export type Flag = (typeof FLAGS)[number];
+/** A label group's action: "group:<id>". */
+export type GroupKind = `group:${string}`;
 export type ActionKind = 'priority' | Flag;
-/** Every action, in the column order of the "Rules by ticket type" table. */
-export const ACTION_KINDS = ['priority', 'support', 'duplicate', 'needsInfo', 'spam', 'noAction'] as const satisfies readonly ActionKind[];
+/** Every built-in action, in the column order of the "Rules by ticket type" table (label groups follow). */
+export const ACTION_KINDS = ['priority', 'support', 'duplicate', 'regression', 'needsInfo', 'multiple', 'related', 'shared', 'wrongRepo', 'spam', 'noAction'] as const satisfies readonly ActionKind[];
 export const ACTION_NAMES: Record<ActionKind, string> = {
   priority: 'Priority',
   support: 'Not a dev issue',
   duplicate: 'Duplicates',
+  regression: 'Regression',
   needsInfo: 'Needs info',
+  multiple: 'Several problems',
+  related: 'Related',
+  shared: 'Shared',
+  wrongRepo: 'Wrong repo',
   spam: 'Spam',
   noAction: 'No action',
 };
+/** These never close the issue, so the option isn't offered. */
+export const NO_CLOSE: ReadonlySet<Flag> = new Set(['regression', 'related', 'shared', 'wrongRepo']);
 
 export const DEFAULT_PRIORITY_LABELS: Record<Priority, string> = {
   critical: 'priority: critical',
@@ -42,7 +51,7 @@ export const DEFAULT_PRIORITY_LABELS: Record<Priority, string> = {
 /** These only comment when they close the issue; the others comment whenever they're applied. */
 export const CLOSE_ONLY_COMMENT: ReadonlySet<Flag> = new Set(['spam', 'noAction']);
 /** Actions that can also update the member's private confirmation in Discord. */
-export const NOTIFIABLE: ReadonlySet<Flag> = new Set(['support', 'duplicate', 'needsInfo']);
+export const NOTIFIABLE: ReadonlySet<Flag> = new Set(['support', 'duplicate', 'needsInfo', 'multiple']);
 
 export const FLAG_DEFAULTS: Record<Flag, { label: string; close: boolean; comment: string; notifyMember: boolean }> = {
   support: {
@@ -52,6 +61,26 @@ export const FLAG_DEFAULTS: Record<Flag, { label: string; close: boolean; commen
     notifyMember: true,
   },
   duplicate: { label: 'duplicate', close: false, comment: 'Possible duplicate of {duplicate}.', notifyMember: false },
+  regression: {
+    label: 'regression',
+    close: false,
+    comment: 'This looks like {regression} coming back: that issue was closed as fixed, but this report says it still happens.',
+    notifyMember: false,
+  },
+  multiple: {
+    label: 'multiple issues',
+    close: false,
+    comment: 'Thanks! This ticket describes several separate problems:\n\n{parts}\n\nIt helps a lot if each one has its own ticket, so they can be tracked and fixed separately.',
+    notifyMember: false,
+  },
+  related: { label: '', close: false, comment: 'Possibly related: {related}.', notifyMember: false },
+  shared: { label: 'shared', close: false, comment: 'This looks like a problem shared by several apps: {shared_apps}.', notifyMember: false },
+  wrongRepo: {
+    label: '',
+    close: false,
+    comment: 'Thanks! This looks like it belongs to {right_app}, so it should be tracked in {right_repo}. A maintainer will move it there.',
+    notifyMember: false,
+  },
   needsInfo: {
     label: 'needs info',
     close: false,
@@ -63,7 +92,7 @@ export const FLAG_DEFAULTS: Record<Flag, { label: string; close: boolean; commen
 };
 
 /** What "needs more info" can ask for. Claude picks from this list; it never writes the text. */
-export const MISSING_ITEMS = ['steps', 'expected', 'version', 'platform', 'screenshots', 'use_case'] as const;
+export const MISSING_ITEMS = ['steps', 'expected', 'version', 'platform', 'screenshots', 'file', 'use_case'] as const;
 export type MissingItem = (typeof MISSING_ITEMS)[number];
 /** Short names for the console. */
 export const MISSING_SHORT: Record<MissingItem, string> = {
@@ -72,6 +101,7 @@ export const MISSING_SHORT: Record<MissingItem, string> = {
   version: 'app version',
   platform: 'OS or device',
   screenshots: 'screenshot or error',
+  file: 'sample file',
   use_case: 'use case',
 };
 export const MISSING_TEXT: Record<MissingItem, string> = {
@@ -80,20 +110,95 @@ export const MISSING_TEXT: Record<MissingItem, string> = {
   version: 'the app version',
   platform: 'your operating system or device',
   screenshots: 'a screenshot or the exact error message',
+  file: 'a sample file that shows the problem',
   use_case: 'what problem this would solve for you and how you’d use it',
 };
 
 const mode = z.enum(MODES).catch('off');
 const labelName = (fallback: string) => z.string().trim().min(1).max(50).catch(fallback);
+/** Flag labels may be empty: the action then only comments. */
+const optionalLabel = (fallback: string) => z.string().trim().max(50).catch(fallback);
 const flag = (f: Flag) =>
   z.object({
     mode,
-    label: labelName(FLAG_DEFAULTS[f].label),
+    label: optionalLabel(FLAG_DEFAULTS[f].label),
     close: z.boolean().catch(FLAG_DEFAULTS[f].close),
     /** Comment template posted on the issue; empty = no comment. */
     comment: z.string().max(1500).catch(FLAG_DEFAULTS[f].comment),
     notifyMember: z.boolean().catch(FLAG_DEFAULTS[f].notifyMember),
   }).catch({ mode: 'off', ...FLAG_DEFAULTS[f] });
+
+// ---- Label groups -------------------------------------------------------------------------
+
+/** A set of labels Claude picks from (for example Type, Area or Platform). It can never invent one. */
+export interface LabelGroup {
+  id: string;
+  name: string;
+  instruction: string;
+  pick: 'one' | 'two' | 'any';
+  mode: Mode;
+  options: { label: string; description: string }[];
+}
+
+export const MAX_LABEL_GROUPS = 6;
+export const MAX_GROUP_OPTIONS = 20;
+
+const LabelGroupSchema = z.object({
+  id: z.string().regex(/^[a-z0-9]{4,12}$/),
+  name: z.string().trim().min(1).max(40),
+  instruction: z.string().max(600).catch(''),
+  pick: z.enum(['one', 'two', 'any']).catch('one'),
+  mode,
+  options: z.array(z.object({ label: z.string().trim().min(1).max(50), description: z.string().max(200).catch('') })).min(1).max(MAX_GROUP_OPTIONS),
+});
+
+export const groupKind = (id: string): GroupKind => `group:${id}`;
+
+/** Ready-made groups to start from; every option is editable. */
+export const LABEL_GROUP_PRESETS: Record<'type' | 'area' | 'platform', Omit<LabelGroup, 'id' | 'mode'>> = {
+  type: {
+    name: 'Type',
+    instruction: 'What kind of problem or request this is, judged by the text (not the ticket type the member picked).',
+    pick: 'one',
+    options: [
+      { label: 'crash', description: 'The app crashes, freezes or hangs, loses work, or corrupts a file.' },
+      { label: 'bug', description: 'Wrong behaviour.' },
+      { label: 'perf', description: 'Too slow, or uses too much memory.' },
+      { label: 'feature', description: 'A new feature, or behaviour the member expects from a comparable product.' },
+      { label: 'question', description: 'A how-to question, or a feature that already exists.' },
+      { label: 'i18n', description: 'Translations, language support, right-to-left or non-Latin text in the interface.' },
+      { label: 'docs', description: 'Documentation.' },
+    ],
+  },
+  area: {
+    name: 'Area',
+    instruction: 'The part of the app the ticket is about.',
+    pick: 'two',
+    options: [
+      { label: 'document', description: 'Pages, layers, objects, undo, saving and recovery.' },
+      { label: 'tools', description: 'Canvas tools and direct manipulation.' },
+      { label: 'text', description: 'Type, fonts, text layout, tables, input methods.' },
+      { label: 'color', description: 'Colour management, swatches, CMYK, profiles.' },
+      { label: 'render', description: 'Display, GPU, drawing on screen, zoom and scrolling.' },
+      { label: 'file', description: 'Import, export, file formats, PDF output and printing.' },
+      { label: 'ui', description: 'Panels, dialogs, menus, shortcuts, preferences, themes.' },
+      { label: 'a11y', description: 'Accessibility.' },
+      { label: 'automation', description: 'Scripting, command line, plug-ins, control interfaces.' },
+      { label: 'install', description: 'Installing, updating, launching, packaging.' },
+    ],
+  },
+  platform: {
+    name: 'Platform',
+    instruction: 'The platforms the problem is limited to. Pick none when it isn’t limited to one or the ticket doesn’t say. An operating system named only in a form answer doesn’t limit the problem unless the text says other systems are fine, or the symptom is clearly specific to it (a macOS menu bar, a Windows installer).',
+    pick: 'any',
+    options: [
+      { label: 'macos', description: 'macOS only.' },
+      { label: 'windows', description: 'Windows only.' },
+      { label: 'linux', description: 'Linux only.' },
+      { label: 'web', description: 'The web version only.' },
+    ],
+  },
+};
 
 export const TriageConfigSchema = z.object({
   model: z.string().trim().min(1).max(100).catch(DEFAULT_MODEL),
@@ -102,7 +207,7 @@ export const TriageConfigSchema = z.object({
   /** Before per-type rules: the ticket types triaged at all (null = every type). Still honoured for old settings. */
   typeNames: z.array(z.string()).nullable().catch(null),
   /** Per ticket type (by id): actions that never run for that type. Types without an entry use the defaults. */
-  typeRules: z.record(z.string(), z.object({ off: z.array(z.enum(ACTION_KINDS)) })).catch({}),
+  typeRules: z.record(z.string(), z.object({ off: z.array(z.string()) })).catch({}),
   /** Automatic actions only happen at or above this confidence (percent). */
   threshold: z.number().int().min(50).max(100).catch(90),
   instructions: z.string().max(2000).catch(''),
@@ -122,8 +227,20 @@ export const TriageConfigSchema = z.object({
   needsInfo: flag('needsInfo'),
   spam: flag('spam'),
   noAction: flag('noAction'),
+  regression: flag('regression'),
+  multiple: flag('multiple'),
+  related: flag('related'),
+  shared: flag('shared'),
+  wrongRepo: flag('wrongRepo'),
   /** Discord channel for {help_channel} in comments and member notes. */
   helpChannel: z.object({ id: z.string().regex(/^\d{5,25}$/), name: z.string().max(100) }).nullable().catch(null),
+  labelGroups: z.array(LabelGroupSchema.nullable().catch(null)).max(MAX_LABEL_GROUPS).catch([]).transform((a) => a.filter((g): g is LabelGroup => g !== null)),
+  /** About the products, added to the prompt after the list of apps. */
+  products: z.string().max(6000).catch(''),
+  /** Admins' wording for a check's definition, replacing the built-in one (by check key). */
+  checkRules: z.record(z.string(), z.string().max(2000)).catch({}),
+  /** Worked examples for the prompt; null uses the built-in ones, '' none. */
+  examples: z.string().max(6000).nullable().catch(null),
 });
 export type TriageConfig = z.infer<typeof TriageConfigSchema>;
 
@@ -136,27 +253,68 @@ export function isFeatureLike(t: { name: string; label?: string | null }): boole
   return /feature|enhancement|idea|improvement|suggestion/i.test(`${t.name} ${t.label ?? ''}`);
 }
 
+/** Every action key, built-in then label groups (the "Rules by ticket type" columns). */
+export function allActionKeys(c: TriageConfig): string[] {
+  return [...ACTION_KINDS, ...c.labelGroups.map((g) => groupKind(g.id))];
+}
+
 /** Actions that never run for tickets of this type (explicit rule, legacy scope, or the default). */
-export function actionsOffFor(c: TriageConfig, type: { id: string; name: string; label?: string | null } | null): Set<ActionKind> {
+export function actionsOffFor(c: TriageConfig, type: { id: string; name: string; label?: string | null } | null): Set<string> {
   if (!type) return new Set();
   const rule = c.typeRules[type.id];
   if (rule) return new Set(rule.off);
-  if (c.typeNames && !c.typeNames.includes(type.name)) return new Set(ACTION_KINDS);
-  return new Set<ActionKind>(isFeatureLike(type) ? ['support'] : []);
+  if (c.typeNames && !c.typeNames.includes(type.name)) return new Set(allActionKeys(c));
+  return new Set<string>(isFeatureLike(type) ? ['support'] : []);
 }
 
 /** The settings with the type's switched-off actions forced to Off. */
-export function withActionsOff(c: TriageConfig, off: Set<ActionKind>): TriageConfig {
+export function withActionsOff(c: TriageConfig, off: Set<string>): TriageConfig {
   const out = structuredClone(c);
   for (const k of off) {
     if (k === 'priority') out.priority.mode = 'off';
-    else out[k].mode = 'off';
+    else if (k.startsWith('group:')) {
+      const g = out.labelGroups.find((x) => groupKind(x.id) === k);
+      if (g) g.mode = 'off';
+    } else if ((FLAGS as readonly string[]).includes(k)) out[k as Flag].mode = 'off';
   }
   return out;
 }
 
 export function anyActionOn(c: TriageConfig): boolean {
-  return c.priority.mode !== 'off' || FLAGS.some((f) => c[f].mode !== 'off');
+  return c.priority.mode !== 'off' || FLAGS.some((f) => c[f].mode !== 'off') || c.labelGroups.some((g) => g.mode !== 'off');
+}
+
+/** The mode of any action, built-in or label group. */
+export function actionMode(c: TriageConfig, key: string): Mode {
+  if (key === 'priority') return c.priority.mode;
+  if (key.startsWith('group:')) return c.labelGroups.find((g) => groupKind(g.id) === key)?.mode ?? 'off';
+  return (FLAGS as readonly string[]).includes(key) ? c[key as Flag].mode : 'off';
+}
+
+/** Approximate list prices (USD per million tokens, input and output) for cost estimates. */
+export const MODEL_PRICES: Record<string, [number, number]> = {
+  'claude-haiku-5-5': [0.1, 0.5],
+  'claude-sonnet-5-5': [2, 10],
+  'claude-opus-5-5': [4, 20],
+  'claude-opus-5': [5, 25],
+  'claude-fable-5-1': [10, 50],
+};
+
+/** What tokens cost with a model, in USD; null for models without a known price. */
+export function tokenCost(model: string, input: number, output: number): number | null {
+  const p = MODEL_PRICES[model];
+  return p ? (input * p[0] + output * p[1]) / 1_000_000 : null;
+}
+
+/** "about $0.12", or "under $0.01". */
+export function formatCost(usd: number): string {
+  return usd < 0.01 ? 'under $0.01' : `about $${usd.toFixed(2)}`;
+}
+
+/** The name of any action, built-in or label group. */
+export function actionName(c: TriageConfig, key: string): string {
+  if (key.startsWith('group:')) return c.labelGroups.find((g) => groupKind(g.id) === key)?.name ?? 'Label group';
+  return ACTION_NAMES[key as ActionKind] ?? key;
 }
 
 /** Why triage stopped until an admin acts. Filing is never affected. */
@@ -265,9 +423,14 @@ export async function resolveApiKey(deps: Pick<Deps, 'db' | 'box' | 'config'>, w
 /** Tickets triaged this calendar month (UTC) and the tokens used, for the limit and the usage line. */
 export async function monthlyUsage(q: Queryable, workspaceId: string, now = new Date()): Promise<{ triaged: number; inputTokens: number; outputTokens: number; since: Date }> {
   const since = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  // Re-runs (previews included) call Claude too, so they count toward the limit.
   const { rows } = await q.query<{ n: number; input: number | null; output: number | null }>(
-    `SELECT count(*) AS n, sum(input_tokens) AS input, sum(output_tokens) AS output FROM triage_results
-     WHERE workspace_id = $1 AND input_tokens IS NOT NULL AND completed_at >= $2`,
+    `SELECT count(*) AS n, sum(input_tokens) AS input, sum(output_tokens) AS output FROM (
+       SELECT input_tokens, output_tokens FROM triage_results WHERE workspace_id = $1 AND input_tokens IS NOT NULL AND completed_at >= $2
+       UNION ALL
+       SELECT i.input_tokens, i.output_tokens FROM triage_run_items i JOIN triage_runs r ON r.id = i.run_id
+       WHERE r.workspace_id = $1 AND i.input_tokens IS NOT NULL AND i.completed_at >= $2
+     )`,
     [workspaceId, since],
   );
   return { triaged: rows[0]?.n ?? 0, inputTokens: rows[0]?.input ?? 0, outputTokens: rows[0]?.output ?? 0, since };

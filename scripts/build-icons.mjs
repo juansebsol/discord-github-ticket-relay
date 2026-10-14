@@ -17,6 +17,8 @@ const NAMES = [
   'text-cursor-input', 'upload',
   // Server health and Claude
   'activity', 'cpu', 'database', 'gauge', 'hard-drive', 'memory-stick', 'sparkles', 'timer',
+  // Triage
+  'bell', 'file-text', 'flask-conical', 'git-compare-arrows', 'history', 'message-square', 'play', 'split', 'tags',
 ];
 
 const require = createRequire(import.meta.url);

@@ -595,7 +595,7 @@
       all.indeterminate = n > 0 && n < boxes.length;
     });
     $$('[data-selected-text="' + formId + '"]').forEach(function (t) {
-      t.textContent = n ? n + (n === 1 ? ' ticket selected' : ' tickets selected') : 'Select tickets to delete their files.';
+      t.textContent = n ? n + (n === 1 ? ' ticket selected' : ' tickets selected') : t.getAttribute('data-empty-text') || 'Select tickets to delete their files.';
     });
     $$('[data-needs-selection="' + formId + '"]').forEach(function (b) { b.disabled = n === 0; });
   }
@@ -639,7 +639,7 @@
     });
     show();
   });
-  // ---- Live sections (Server health) ----------------------------------------------------------
+  // ---- Live sections (Server health, triage re-runs) ------------------------------------------
 
   $$('[data-live]').forEach(function (box) {
     var ms = Number(box.getAttribute('data-live')) || 15000;
@@ -661,10 +661,16 @@
       fetch(src, { credentials: 'same-origin', headers: { accept: 'text/html' } })
         .then(function (res) {
           // A signed-out session redirects to the sign-in page: never paste that in.
-          if (!res.ok || res.headers.get('x-health-partial') !== '1') throw new Error('not live');
+          if (!res.ok || (res.headers.get('x-health-partial') !== '1' && res.headers.get('x-live-partial') !== '1')) throw new Error('not live');
           return res.text();
         })
-        .then(function (markup) { box.innerHTML = markup; last = Date.now(); failed = false; })
+        .then(function (markup) {
+          box.innerHTML = markup;
+          last = Date.now();
+          failed = false;
+          // Finished (a re-run): reload once for the full page and its buttons.
+          if (box.querySelector('[data-live-reload]')) location.reload();
+        })
         .catch(function () { failed = true; })
         .then(function () { busy = false; label(); });
     }

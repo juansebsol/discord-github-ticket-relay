@@ -23,7 +23,7 @@ import { formPreview, previewCaption } from '../discord-preview.js';
 import { setFlash } from '../session.js';
 import type { Web, WorkspaceRequestContext } from '../server.js';
 import { btn, csrfField, empty, icon, iconBtn, labelTag, linkBtn, locked, menu, notice, pageHeader, postBtn, submitBtn, switchInput, tag, typeIcon, type IconName } from '../ui.js';
-import { ACTION_KINDS, ACTION_NAMES, actionsOffFor, getTriageSettings } from '../../triage/settings.js';
+import { actionMode, actionName, actionsOffFor, allActionKeys, getTriageSettings } from '../../triage/settings.js';
 import { ticketsHeader } from './tickets.js';
 
 const typeSchema = z.object({
@@ -158,8 +158,12 @@ export function registerTicketTypeRoutes(app: FastifyInstance, web: Web): void {
     const triage = await getTriageSettings(deps.db, ctx.workspace.id);
     /** What triage does for a type, linking to the rules table. */
     const triageRule = (t: TicketType) => {
-      const off = actionsOffFor(triage.config, t);
-      const text = off.size === 0 ? 'All actions' : off.size === ACTION_KINDS.length ? 'Not triaged' : `All except ${ACTION_KINDS.filter((k) => off.has(k)).map((k) => ACTION_NAMES[k]).join(', ')}`;
+      // Only actions that are on count; an action that's Off doesn't run for any type.
+      const c = triage.config;
+      const on = allActionKeys(c).filter((k) => actionMode(c, k) !== 'off');
+      const off = actionsOffFor(c, t);
+      const skipped = on.filter((k) => off.has(k));
+      const text = !on.length ? 'No actions on' : !skipped.length ? 'All actions' : skipped.length === on.length ? 'Not triaged' : `All except ${skipped.map((k) => actionName(c, k)).join(', ')}`;
       return html`<a class="small" href="${b}/tickets/triage#rules">${text}</a>`;
     };
     let gaps: Awaited<ReturnType<typeof findMissingTypeLabels>> = [];

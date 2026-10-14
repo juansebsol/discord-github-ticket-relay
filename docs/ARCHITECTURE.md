@@ -23,11 +23,17 @@ Discord endpoint, OAuth), one or more queue workers, and an optional triage work
 - **AI triage, isolated from filing.** `src/triage/` runs in its own process. It picks up
   tickets that are already filed (`status = 'created'`, filed after triage was switched on),
   reads the ticket text from the GitHub issue, asks Claude (official SDK, structured JSON
-  output) for priority, duplicate, spam, needs-info and no-action calls, and applies the
-  actions each workspace allows. Results live in `triage_results`; the filing queue is never
-  written. Bad keys, missing credits or an unavailable model pause triage for that workspace;
-  rate limits and outages retry with backoff. Ticket text is passed as JSON data and Claude can
-  only answer with fixed fields; labels, comments and closing come from the workspace settings.
+  output) for priority, duplicate, regression, needs-info, several-problems, related,
+  shared-across-apps, wrong-repository, spam and no-action calls plus the workspace's own label
+  groups, and applies the actions each workspace allows. Results live in `triage_results`; the
+  filing queue is never written. Bad keys, missing credits or an unavailable model pause triage
+  for that workspace; rate limits and outages retry with backoff. Ticket text is passed as JSON
+  data and Claude can only answer with fixed fields; every issue it names is checked against
+  what it was shown, and labels, comments and closing come from the workspace settings.
+  Re-runs (`triage_runs`, `triage_run_items`) evaluate already-filed tickets with a saved copy
+  of the settings: a preview never touches GitHub; applying it later (or an "apply" run) writes
+  `triage_results` the way normal triage does. The worker only takes re-run items when no new
+  ticket is waiting.
 - **No Discord gateway.** The bot is driven entirely by Discord's HTTP interactions endpoint and
   REST API. It needs no privileged intents and no slash-command registration.
 - **GitHub App auth.** Short-lived installation tokens are minted from the app's private key

@@ -962,3 +962,41 @@ td.num svg.spark { margin-left: auto; margin-top: 2px; width: 72px; height: 20px
 .spark.empty { display: block; width: 120px; height: 1px; background: var(--border); margin: 13px 0; }
 tr.off-row td { background: var(--danger-soft); }
 @media (max-width: 900px) { .stats.four { grid-template-columns: repeat(2, minmax(0, 1fr)); } .stats.four .stat:nth-child(3) { border-left: 0; } .stats.four .stat:nth-child(n+3) { border-top: 1px solid var(--border); } .charts { grid-template-columns: minmax(0, 1fr); } }
+
+/* ---- Triage: what Apply does, settings pages, re-runs ---------------------------------------- */
+.tri-summary { margin: 4px 0 8px; }
+.tri-more { flex-basis: 100%; padding: 0 0 4px 22px; font-size: 13px; line-height: 20px; }
+.tri-more > summary { list-style: none; display: block; cursor: pointer; color: var(--text); font-weight: 500; border-radius: var(--r-xs); }
+.tri-more > summary .chev { vertical-align: -2px; margin-right: 4px; }
+.tri-more > summary::-webkit-details-marker { display: none; }
+.tri-more > summary .chev { color: var(--muted); transition: transform var(--t) var(--ease); }
+.tri-more[open] > summary .chev { transform: rotate(90deg); }
+.tri-more > summary .muted { font-weight: 400; }
+.tri-effects { list-style: none; margin: 6px 0 4px; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.tri-effects li { display: flex; gap: 8px; align-items: flex-start; }
+.tri-effects li > .ic { color: var(--muted); margin-top: 3px; flex: none; }
+.tri-effects li > span { min-width: 0; }
+.tri-effects .tags { display: inline-flex; vertical-align: middle; }
+.tri-comment { display: block; margin-top: 6px; padding: 8px 12px; background: var(--surface-2); border-left: 2px solid var(--border-strong); border-radius: 0 var(--r-sm) var(--r-sm) 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); }
+.subnav { display: flex; align-items: center; justify-content: space-between; gap: 8px 12px; flex-wrap: wrap; margin-bottom: 16px; }
+.act-more { margin-top: 12px; }
+.act-more > summary { list-style: none; display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px; line-height: 20px; color: var(--muted); border-radius: var(--r-xs); }
+.act-more > summary::-webkit-details-marker { display: none; }
+.act-more > summary .chev { transition: transform var(--t) var(--ease); flex: none; }
+.act-more[open] > summary .chev { transform: rotate(90deg); }
+.act-more > summary .what { color: var(--text); font-weight: 500; flex: none; }
+.act-more > summary .truncate { min-width: 0; }
+.act-more > .fields { margin-top: 16px; }
+.prompt-pre { margin: 0; padding: 16px 20px; font: 12px/18px var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); background: var(--surface-2); max-height: 70vh; overflow: auto; }
+.opt-list { font-family: var(--mono); font-size: 12px; line-height: 18px; }
+.run-cell { display: flex; flex-direction: column; gap: 4px; min-width: 180px; font-size: 13px; line-height: 20px; }
+.run-cell .tri-line { display: flex; gap: 6px; align-items: flex-start; }
+.run-cell .tri-line > .ic { margin-top: 3px; flex: none; }
+.run-cell details > summary { list-style: none; cursor: pointer; color: var(--accent-text); font-size: 12px; }
+.run-cell details > summary::-webkit-details-marker { display: none; }
+.run-cell details[open] > summary { margin-bottom: 4px; }
+tr.changed > td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
+.diff-tag { white-space: nowrap; }
+.tri-line .tags, .tri-row .tags { display: inline-flex; vertical-align: middle; }
+th.half { width: 38%; }
+.run-cell .tags { display: inline-flex; vertical-align: middle; }

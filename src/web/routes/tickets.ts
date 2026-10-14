@@ -7,7 +7,8 @@ import { GitHubApiError } from '../../github/client.js';
 import { parseIssueBody, type IssueText } from '../../github/issue-content.js';
 import { countByStatus, decryptPayload, getSubmission, listEvents, listSubmissions, type SubmissionFilter, type TriageFilter } from '../../domain/submissions.js';
 import { describeAction, triageSummaries, type TriageAction, type TriageResultRow } from '../../triage/engine.js';
-import { getTriageSettings, MISSING_SHORT, type Priority } from '../../triage/settings.js';
+import { actionEffects, actionEffectsShort, actionTitle, priorityTag } from '../triage-view.js';
+import { getTriageSettings, type Priority } from '../../triage/settings.js';
 import { listTicketTypes } from '../../domain/ticket-types.js';
 import { listTicketFiles } from '../../domain/files.js';
 import { filesCard } from './files.js';
@@ -162,13 +163,9 @@ export function ticketList(base: string, rows: SubmissionRow[], titleOf: (s: Sub
       <span class="l2">${o.triage ? triageCell(o.triage.get(v.s.id), true) : ''}${[appLine(v.s), v.s.reporter_display_name, timeAgo(v.s.updated_at)].filter(Boolean).join(' · ')}</span></a></li>`)}</ul>`;
 }
 
-export type TriageSummary = { status: string; priority: Priority | null; is_duplicate: number; is_spam: number; is_support: number; suggestion_count: number };
+export type TriageSummary = { status: string; priority: Priority | null; is_duplicate: number; is_spam: number; is_support: number; suggestion_count: number; suggestions?: TriageAction[] | null };
 
-const PRIORITY_NAMES: Record<Priority, string> = { critical: 'Critical', high: 'High', medium: 'Medium', low: 'Low' };
-
-export function priorityTag(p: Priority): SafeHtml {
-  return html`<span class="tag"><span class="dot p-${p}" aria-hidden="true"></span>${PRIORITY_NAMES[p]}</span>`;
-}
+export { priorityTag };
 
 /** Priority and flags from triage, for the inbox. */
 function triageCell(t: TriageSummary | undefined, compact = false): SafeHtml | string {
@@ -178,7 +175,7 @@ function triageCell(t: TriageSummary | undefined, compact = false): SafeHtml | s
     t.is_spam ? tag('Spam') : '',
     t.is_support ? tag('Not a dev issue') : '',
     t.is_duplicate ? tag('Duplicate') : '',
-    t.suggestion_count ? tag('To review', { icon: 'eye' }) : '',
+    t.suggestion_count ? tag('To review', { icon: 'eye', title: (t.suggestions ?? []).map((a) => `Suggested: ${describeAction(a)} (${actionEffectsShort(a)})`).join('\n') || undefined }) : '',
   ].filter(Boolean);
   if (!parts.length) return compact ? '' : html`<span class="em">—</span>`;
   return html`<span class="tags">${parts}</span>`;
@@ -266,6 +263,12 @@ function eventView(e: EventRow, s: SubmissionRow, names: Map<string, string>): {
     }
     case 'triage_applied':
       return { actor: by, text: html`<span class="actor">${by}</span> applied the triage suggestion: ${(d.actions as string[] | undefined)?.join(', ') ?? ''}${d.told_member ? ' · told the member in Discord' : ''}` };
+    case 'triage_rerun': {
+      const applied = Array.isArray(d.applied) ? (d.applied as string[]) : [];
+      const suggested = Array.isArray(d.suggested) ? (d.suggested as string[]) : [];
+      const text = [applied.length ? `applied ${applied.join(', ')}` : '', suggested.length ? `suggested ${suggested.join(', ')}` : ''].filter(Boolean).join(' · ');
+      return { icon: 'history', tone: 'muted', text: html`Triage re-run ${text || 'found nothing to flag'}${typeof d.by === 'string' ? html` · by <span class="actor">${by}</span>` : ''}` };
+    }
     case 'triage_dismissed':
       return { actor: by, text: html`<span class="actor">${by}</span> dismissed the triage suggestion: ${(d.actions as string[] | undefined)?.join(', ') ?? ''}` };
     default:
@@ -276,14 +279,7 @@ function eventView(e: EventRow, s: SubmissionRow, names: Map<string, string>): {
 // ---- Triage card ------------------------------------------------------------------------------------
 
 function triageActionText(a: TriageAction, s: SubmissionRow): SafeHtml {
-  const what = a.kind === 'priority' && a.priority
-    ? html`${priorityTag(a.priority)} priority`
-    : a.kind === 'duplicate'
-      ? html`Duplicate of <a href="https://github.com/${s.repo_owner}/${s.repo_name}/issues/${String(a.duplicateOf)}" target="_blank" rel="noopener noreferrer">#${String(a.duplicateOf)}</a>${a.originalClosed ? html`<span class="muted"> · the original is closed, so this is only suggested</span>` : ''}`
-      : a.kind === 'needsInfo' && a.missing?.length
-        ? html`Needs more info<span class="muted"> · ${a.missing.map((m) => MISSING_SHORT[m]).join(', ')}</span>`
-        : html`${a.kind === 'spam' ? 'Spam' : a.kind === 'needsInfo' ? 'Needs more info' : a.kind === 'support' ? 'Not a development issue' : 'No action needed'}`;
-  return html`<span class="grow">${what}${a.close ? html`<span class="muted"> · closes the issue</span>` : ''}</span><span class="xs muted num" title="Claude’s confidence">${String(a.confidence)}%</span>`;
+  return html`<span class="grow">${actionTitle(a, { owner: s.repo_owner, name: s.repo_name })}</span><span class="xs muted num" title="Claude’s confidence">${String(a.confidence)}%</span>`;
 }
 
 function issueLink(s: SubmissionRow, n: number): SafeHtml {
@@ -312,8 +308,12 @@ function triageCard(t: TriageResultRow, s: SubmissionRow, o: { act: boolean; csr
     const applied = t.applied_actions ?? [];
     const suggestions = t.suggestions ?? [];
     content = html`
-      ${applied.map((a) => html`<div class="tri-row">${icon('circle-check', 14, 'ok')}${triageActionText(a, s)}</div>`)}
-      ${suggestions.map((a) => html`<div class="tri-row tri-suggest">${icon('circle-help', 14, 'warn')}${triageActionText(a, s)}${o.act
+      ${t.verdict?.summary ? html`<p class="small tri-summary">${t.verdict.summary}${t.verdict.version ? html`<span class="muted"> · version ${t.verdict.version}</span>` : ''}</p>` : ''}
+      ${applied.map((a) => html`<div class="tri-row tri-suggest">${icon('circle-check', 14, 'ok')}${triageActionText(a, s)}
+        <details class="tri-more"><summary>${icon('chevron-right', 14, 'chev')}What was done<span class="muted"> · ${actionEffectsShort(a)}</span></summary>${actionEffects(a, { done: true })}</details></div>`)}
+      ${suggestions.map((a) => html`<div class="tri-row tri-suggest">${icon('circle-help', 14, 'warn')}${triageActionText(a, s)}
+        <details class="tri-more" ${suggestions.length <= 2 ? raw('open') : ''}><summary>${icon('chevron-right', 14, 'chev')}What Apply does<span class="muted"> · ${actionEffectsShort(a)}</span></summary>${actionEffects(a)}</details>
+        ${o.act
         ? html`<span class="tri-actions">${postBtn(`${o.actionBase}/triage/apply`, 'Apply', o.csrf, { size: 'sm', fields: { kind: a.kind }, title: `Apply: ${describeAction(a)}` })}${postBtn(`${o.actionBase}/triage/dismiss`, 'Dismiss', o.csrf, { size: 'sm', variant: 'ghost', fields: { kind: a.kind } })}</span>`
         : ''}</div>`)}
       ${!applied.length && !suggestions.length ? html`<p class="small muted">Nothing to flag.</p>` : ''}

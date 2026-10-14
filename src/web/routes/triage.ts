@@ -4,13 +4,17 @@ import { inspectGuild } from '../../domain/discord-checks.js';
 import { getDiscordConnection, listApps } from '../../domain/store.js';
 import { listTicketTypes } from '../../domain/ticket-types.js';
 import { UserFacingError } from '../../domain/types.js';
-import { html, raw } from '../../lib/html.js';
+import { html, raw, type SafeHtml } from '../../lib/html.js';
 import { classifyAiError, type ModelOption } from '../../triage/ai.js';
 import {
-  ACTION_KINDS,
-  ACTION_NAMES,
+  actionMode,
+  actionName,
   actionsOffFor,
+  allActionKeys,
   CLOSE_ONLY_COMMENT,
+  formatCost,
+  NO_CLOSE,
+  tokenCost,
   DEFAULT_MODEL,
   FLAG_DEFAULTS,
   FLAGS,
@@ -33,32 +37,55 @@ import {
 import { keyPill, keyStatus, keySummary } from './claude.js';
 import { setFlash } from '../session.js';
 import type { Web, WorkspaceRequestContext } from '../server.js';
-import { csrfField, icon, linkBtn, notice, pill, plural, postBtn, segRadios, selectWrap, setting, submitBtn, switchInput, tag, typeIcon } from '../ui.js';
+import { csrfField, icon, linkBtn, notice, pill, plural, postBtn, segLinks, segRadios, selectWrap, setting, submitBtn, switchInput, tag, typeIcon } from '../ui.js';
 import { textField } from './panel.js';
 import { ticketsHeader } from './tickets.js';
 
-const FLAG_COPY: Record<Flag, { title: string; desc: string; placeholders: string }> = {
+export const FLAG_COPY: Record<Flag, { title: string; desc: string; placeholders: string }> = {
   support: { title: 'Not a development issue', desc: 'How-to and installation help, account or billing questions: things your community should answer, not code changes. Adds a label and posts your reply.', placeholders: '{app}, {help_channel}' },
-  duplicate: { title: 'Duplicates', desc: 'Compares the ticket with open issues in the same repository. Adds a label and posts your comment.', placeholders: '{duplicate}, {app}, {help_channel}' },
-  needsInfo: { title: 'Needs more info', desc: 'Real bug reports or feature requests that are missing details. Claude picks what’s missing (steps to reproduce, expected vs. actual, app version, operating system, screenshot); your comment lists it.', placeholders: '{missing}, {app}, {help_channel}' },
+  duplicate: { title: 'Duplicates', desc: 'Compares the ticket with every issue in the same repository and links the original. Adds a label and posts your comment.', placeholders: '{duplicate}, {app}, {help_channel}' },
+  regression: { title: 'Regression', desc: 'A problem that’s back: the ticket matches an issue that was closed as fixed. Adds a label and links the old issue. Never closes the ticket.', placeholders: '{regression}, {app}, {help_channel}' },
+  needsInfo: { title: 'Needs more info', desc: 'Real bug reports or feature requests that are missing details. Claude picks what’s missing (steps to reproduce, expected vs. actual, app version, operating system, screenshot, sample file); your comment lists it.', placeholders: '{missing}, {app}, {help_channel}' },
+  multiple: { title: 'Several problems', desc: 'Tickets that report several separate problems at once. Your comment lists them, so the member can file each one on its own.', placeholders: '{parts}, {app}, {help_channel}' },
+  related: { title: 'Related issues', desc: 'Links up to three issues that are related but not the same problem, from any of your apps’ repositories. Never closes the ticket.', placeholders: '{related}, {app}' },
+  shared: { title: 'Shared across apps', desc: 'Problems that affect several of your apps, such as a shared component or the installer. Adds a label and names the apps. Never closes the ticket.', placeholders: '{shared_apps}, {shared_issue}, {app}' },
+  wrongRepo: { title: 'Wrong repository', desc: 'The ticket is about a different app than the one the member picked. Your comment links the repository it belongs in. Issues are never moved or closed.', placeholders: '{right_app}, {right_repo}, {app}' },
   spam: { title: 'Spam', desc: 'Advertising, scams, gibberish and abuse. Adds a label.', placeholders: '{app}, {help_channel}' },
   noAction: { title: 'No action needed', desc: 'Test messages, thank-yous and things sent by mistake. Adds a label.', placeholders: '{app}, {help_channel}' },
 };
 
-const MODE_OPTIONS = [
+export const MODE_OPTIONS = [
   { value: 'off', label: 'Off' },
   { value: 'suggest', label: 'Suggest' },
   { value: 'auto', label: 'Automatic' },
 ];
 
-/** Approximate list prices (USD per million tokens) for the cost estimate; unknown models show tokens only. */
-const PRICES: Record<string, [number, number]> = {
-  'claude-haiku-5-5': [0.1, 0.5],
-  'claude-sonnet-5-5': [2, 10],
-  'claude-opus-5-5': [4, 20],
-  'claude-opus-5': [5, 25],
-  'claude-fable-5-1': [10, 50],
-};
+export const MODE_NAMES: Record<Mode, string> = { off: 'Off', suggest: 'Suggest', auto: 'Automatic' };
+
+export type TriagePage = 'actions' | 'labels' | 'prompt' | 'runs';
+
+/** The Triage tab's sections. */
+export function triageNav(ctx: WorkspaceRequestContext, current: TriagePage, actions?: SafeHtml | null): SafeHtml {
+  const b = `${ctx.base}/tickets/triage`;
+  return html`<div class="subnav">${segLinks('Triage', [
+    { href: b, label: 'Actions', current: current === 'actions' },
+    { href: `${b}/labels`, label: 'Label groups', current: current === 'labels' },
+    { href: `${b}/prompt`, label: 'Prompt', current: current === 'prompt' },
+    { href: `${b}/runs`, label: 'Re-run', current: current === 'runs' },
+  ])}${actions ? html`<div class="row">${actions}</div>` : ''}</div>`;
+}
+
+/** One line on what an action does when applied, from its settings. */
+function flagSummary(c: TriageConfig, f: Flag): string {
+  const x = c[f];
+  const comments = Boolean(x.comment.trim()) && (!CLOSE_ONLY_COMMENT.has(f) || x.close);
+  return [
+    x.label ? `label “${x.label}”` : 'no label',
+    comments ? 'comments' : 'no comment',
+    !NO_CLOSE.has(f) && x.close ? 'closes the issue' : '',
+    NOTIFIABLE.has(f) && x.notifyMember ? 'tells the member' : '',
+  ].filter(Boolean).join(' · ');
+}
 
 const modelCache = new Map<string, { at: number; models: ModelOption[] }>();
 
@@ -98,8 +125,7 @@ export function registerTriageRoutes(app: FastifyInstance, web: Web): void {
     const keyState = await keyStatus(web, wid);
     const c = settings.config;
     const { models: available, error: modelError } = await models(key?.key ?? null);
-    const price = PRICES[c.model];
-    const cost = price ? (usage.inputTokens * price[0] + usage.outputTokens * price[1]) / 1_000_000 : null;
+    const cost = tokenCost(c.model, usage.inputTokens, usage.outputTokens);
     const nextMonth = new Date(Date.UTC(usage.since.getUTCFullYear(), usage.since.getUTCMonth() + 1, 1));
 
     const status = !settings.enabled ? pill('Off', 'neutral') : settings.paused ? pill('Paused', 'warn') : pill('On', 'ok');
@@ -108,33 +134,39 @@ export function registerTriageRoutes(app: FastifyInstance, web: Web): void {
 
     const flagSection = (f: Flag) => html`<div class="section">
       <div class="section-h"><div><h3>${FLAG_COPY[f].title}</h3><div class="desc">${FLAG_COPY[f].desc}</div></div>${segRadios(`${f}_mode`, MODE_OPTIONS, c[f].mode, `${FLAG_COPY[f].title} mode`)}</div>
-      <div class="fields">
-        <div class="fields-2">
-          <div class="field"><label for="${f}_label">GitHub label</label><input id="${f}_label" type="text" name="${f}_label" value="${c[f].label}" maxlength="50" required></div>
-          <div class="field"><span class="label">When applied</span>
-            <label class="check mt-8"><input type="checkbox" name="${f}_close" value="1" ${c[f].close ? raw('checked') : ''}> Also close the issue (as not planned)</label>
-            ${NOTIFIABLE.has(f) ? html`<label class="check mt-8"><input type="checkbox" name="${f}_notify" value="1" ${c[f].notifyMember ? raw('checked') : ''}> Also tell the member in Discord</label>` : ''}
-            <div class="hint">Applies on Automatic and when someone presses Apply.${NOTIFIABLE.has(f) ? ' Discord can only be updated within 15 minutes of the ticket being filed.' : ''}</div></div>
+      <details class="act-more">
+        <summary>${icon('chevron-right', 14, 'chev')}<span class="what">Label, comment${NO_CLOSE.has(f) ? '' : ' and closing'}</span><span class="truncate">${flagSummary(c, f)}</span></summary>
+        <div class="fields">
+          <div class="fields-2">
+            <div class="field"><label for="${f}_label">GitHub label</label><input id="${f}_label" type="text" name="${f}_label" value="${c[f].label}" maxlength="50" placeholder="No label">
+              <div class="hint">Created on GitHub the first time it’s used. Leave empty to only comment.</div></div>
+            <div class="field"><span class="label">When applied</span>
+              ${NO_CLOSE.has(f) ? html`<p class="small muted mt-8">Never closes the issue.</p>` : html`<label class="check mt-8"><input type="checkbox" name="${f}_close" value="1" ${c[f].close ? raw('checked') : ''}> Also close the issue (as not planned)</label>`}
+              ${NOTIFIABLE.has(f) ? html`<label class="check mt-8"><input type="checkbox" name="${f}_notify" value="1" ${c[f].notifyMember ? raw('checked') : ''}> Also tell the member in Discord</label>` : ''}
+              <div class="hint">Applies on Automatic and when someone presses Apply.${NOTIFIABLE.has(f) ? ' Discord can only be updated within 15 minutes of the ticket being filed.' : ''}</div></div>
+          </div>
+          ${f === 'support' ? html`<div class="field"><label for="help_channel">Help channel</label>
+            ${guild?.ok
+              ? selectWrap(html`<select id="help_channel" name="help_channel"><option value="">None (says “our Discord server”)</option>${guild.channels.map((ch) => html`<option value="${ch.id}" ${ch.id === c.helpChannel?.id ? raw('selected') : ''}>#${ch.name}${ch.category ? ` · ${ch.category}` : ''}</option>`)}</select>`)
+              : html`<p class="small muted">${c.helpChannel ? `#${c.helpChannel.name}. ` : ''}Connect Discord to choose a channel.</p><input type="hidden" name="help_channel" value="${c.helpChannel?.id ?? ''}">`}
+            <div class="hint">Used for {help_channel}: a link to the channel on GitHub, and a clickable #channel in Discord.</div></div>` : ''}
+          ${textField({
+            id: `${f}_comment`,
+            label: CLOSE_ONLY_COMMENT.has(f) ? 'Comment when it closes the issue' : 'Comment on the GitHub issue',
+            value: c[f].comment,
+            max: 1500,
+            rows: 3,
+            placeholder: 'No comment',
+            defaultValue: FLAG_DEFAULTS[f].comment,
+            hint: html`Placeholders: <code>${FLAG_COPY[f].placeholders}</code>. Leave empty to post no comment.${NOTIFIABLE.has(f) ? ' The same text is used for the Discord note.' : ''} <button type="button" class="link-btn" data-reset-fields="${f}_comment">Reset to default</button>`,
+          })}
         </div>
-        ${f === 'support' ? html`<div class="field"><label for="help_channel">Help channel</label>
-          ${guild?.ok
-            ? selectWrap(html`<select id="help_channel" name="help_channel"><option value="">None (says “our Discord server”)</option>${guild.channels.map((ch) => html`<option value="${ch.id}" ${ch.id === c.helpChannel?.id ? raw('selected') : ''}>#${ch.name}${ch.category ? ` · ${ch.category}` : ''}</option>`)}</select>`)
-            : html`<p class="small muted">${c.helpChannel ? `#${c.helpChannel.name}. ` : ''}Connect Discord to choose a channel.</p><input type="hidden" name="help_channel" value="${c.helpChannel?.id ?? ''}">`}
-          <div class="hint">Used for {help_channel}: a link to the channel on GitHub, and a clickable #channel in Discord.</div></div>` : ''}
-        ${textField({
-          id: `${f}_comment`,
-          label: CLOSE_ONLY_COMMENT.has(f) ? 'Comment when it closes the issue' : 'Comment on the GitHub issue',
-          value: c[f].comment,
-          max: 1500,
-          rows: 3,
-          placeholder: 'No comment',
-          defaultValue: FLAG_DEFAULTS[f].comment,
-          hint: html`Placeholders: <code>${FLAG_COPY[f].placeholders}</code>. Leave empty to post no comment.${NOTIFIABLE.has(f) ? ' The same text is used for the Discord note.' : ''} <button type="button" class="link-btn" data-reset-fields="${f}_comment">Reset to default</button>`,
-        })}
-      </div></div>`;
+      </details></div>`;
+    const keys = allActionKeys(c);
 
     const body = html`
       ${await ticketsHeader(web, ctx, 'triage')}
+      ${triageNav(ctx, 'actions')}
       ${!key ? notice('warn', 'Triage needs a Claude API key', 'Add the workspace’s key in Settings. It’s shared by every feature that uses Claude.', { action: linkBtn(`${b}/settings#claude`, 'Open Settings', { size: 'sm', trail: 'arrow-right' }) }) : ''}
       ${settings.enabled && settings.paused
         ? notice('warn', 'Triage is paused', `${pauseMessage(settings.paused.reason, settings.paused.detail, c.model)} Tickets are still being filed normally.`, { action: postBtn(`${b}/tickets/triage/resume`, 'Resume', ctx.csrf, { size: 'sm', icon: 'rotate-ccw' }) })
@@ -143,11 +175,11 @@ export function registerTriageRoutes(app: FastifyInstance, web: Web): void {
         ? notice('warn', 'Monthly limit reached', `Triage resumes on ${nextMonth.toISOString().slice(0, 10)}, or raise the limit below. Tickets are still being filed normally.`)
         : ''}
       <div class="card">
-        <div class="card-h"><div><div class="title"><h2>AI triage</h2>${status}</div><div class="desc">Claude reads each ticket after it’s filed and flags priority, duplicates and spam. It runs in its own worker: if it’s off, paused or out of credits, tickets are still filed exactly as before.</div></div></div>
+        <div class="card-h"><div><div class="title"><h2>AI triage</h2>${status}</div><div class="desc">Claude reads each ticket after it’s filed and flags priority, duplicates, spam and more. It runs in its own worker: if it’s off, paused or out of credits, tickets are still filed exactly as before.</div></div></div>
         ${setting('Claude API key', keySummary(keyState, b), keyPill(keyState))}
-        ${setting('Triage', key ? 'Only tickets filed after you turn it on are triaged.' : html`Needs a Claude API key. <a href="${b}/settings#claude">Add one in Settings</a>.`, html`<form method="post" action="${b}/tickets/triage/enabled" data-async class="inline-form">${csrfField(ctx.csrf)}<input type="hidden" name="set" value="1">
+        ${setting('Triage', key ? html`Only tickets filed after you turn it on are triaged. For older tickets, use <a href="${b}/tickets/triage/runs">Re-run</a>.` : html`Needs a Claude API key. <a href="${b}/settings#claude">Add one in Settings</a>.`, html`<form method="post" action="${b}/tickets/triage/enabled" data-async class="inline-form">${csrfField(ctx.csrf)}<input type="hidden" name="set" value="1">
           ${switchInput({ name: 'enabled', checked: settings.enabled, label: 'Triage on', disabled: !key && !settings.enabled })}<button type="submit" class="btn sm nojs">Save</button></form>`, { switchRow: true })}
-        ${setting('This month', null, html`<span class="value">${plural(usage.triaged, 'ticket')} of ${String(c.monthlyLimit)}${cost !== null ? ` · about $${cost < 0.01 && cost > 0 ? '0.01' : cost.toFixed(2)}` : ''}${usage.inputTokens ? ` · ${(usage.inputTokens + usage.outputTokens).toLocaleString('en-US')} tokens` : ''}</span>`)}
+        ${setting('This month', 'Re-runs count too.', html`<span class="value">${plural(usage.triaged, 'ticket')} of ${String(c.monthlyLimit)}${cost !== null ? ` · ${formatCost(cost)}` : ''}${usage.inputTokens ? ` · ${(usage.inputTokens + usage.outputTokens).toLocaleString('en-US')} tokens` : ''}</span>`)}
       </div>
       <form method="post" action="${b}/tickets/triage" class="stack" data-dirty>
         ${csrfField(ctx.csrf)}
@@ -155,26 +187,30 @@ export function registerTriageRoutes(app: FastifyInstance, web: Web): void {
           <div class="card-h"><div><h2>What triage does</h2><div class="desc">Every action starts off. <strong>Suggest</strong> shows Claude’s call on the ticket for someone to apply. <strong>Automatic</strong> applies it on GitHub when Claude is at least ${String(c.threshold)}% sure; less sure calls become suggestions.</div></div></div>
           <div class="section">
             <div class="section-h"><div><h3>Priority</h3><div class="desc">Adds one of four priority labels. The ticket type isn’t changed; the member picks it.</div></div>${segRadios('priority_mode', MODE_OPTIONS, c.priority.mode, 'Priority mode')}</div>
-            <div class="fields">
-              <div class="fields-2">${PRIORITIES.map((p) => html`<div class="field"><label for="priority_label_${p}">${p[0]!.toUpperCase() + p.slice(1)} label</label><input id="priority_label_${p}" type="text" name="priority_label_${p}" value="${c.priority.labels[p]}" maxlength="50" required></div>`)}</div>
-              ${textField({ id: 'priority_guide', label: 'What each priority means (optional)', value: c.priority.guide, max: 1500, rows: 4, placeholder: 'critical: crashes, data loss, security or payments\nhigh: a core feature is broken with no workaround\nmedium: something is wrong but there’s a workaround\nlow: cosmetic issues, small improvements and questions', hint: 'Leave empty for the defaults shown here.' })}
-            </div>
+            <details class="act-more">
+              <summary>${icon('chevron-right', 14, 'chev')}<span class="what">Labels and what each priority means</span><span class="truncate">${PRIORITIES.map((p) => c.priority.labels[p]).join(', ')}</span></summary>
+              <div class="fields">
+                <div class="fields-2">${PRIORITIES.map((p) => html`<div class="field"><label for="priority_label_${p}">${p[0]!.toUpperCase() + p.slice(1)} label</label><input id="priority_label_${p}" type="text" name="priority_label_${p}" value="${c.priority.labels[p]}" maxlength="50"></div>`)}</div>
+                ${textField({ id: 'priority_guide', label: 'What each priority means (optional)', value: c.priority.guide, max: 1500, rows: 4, placeholder: 'critical: crashes, data loss, security or payments\nhigh: a core feature is broken with no workaround\nmedium: something is wrong but there’s a workaround\nlow: cosmetic issues, small improvements and questions', hint: 'Leave empty for the defaults shown here.' })}
+              </div>
+            </details>
           </div>
           ${FLAGS.map(flagSection)}
+          <div class="section">
+            <div class="section-h"><div><h3>Label groups</h3><div class="desc">Claude can also sort tickets with labels you define, such as Type, Area and Platform. It only picks from your options.</div></div>${linkBtn(`${b}/tickets/triage/labels`, c.labelGroups.length ? 'Edit groups' : 'Add groups', { size: 'sm', trail: 'arrow-right' })}</div>
+            ${c.labelGroups.length ? html`<div class="tags">${c.labelGroups.map((g) => tag(html`${g.name}<span class="muted"> · ${MODE_NAMES[g.mode]}</span>`, { icon: 'tags' }))}</div>` : ''}
+          </div>
         </div>
         ${types.length ? html`<div class="card" id="rules">
           <div class="card-h"><div><h2>Rules by ticket type</h2><div class="desc">Members pick a ticket type when they open a ticket. Choose which actions run for each type. Unticked actions never run for that type, and Claude is told to skip them so it still checks the rest.</div></div></div>
           <input type="hidden" name="rules" value="1">
           <div class="card-b flush"><div class="table-wrap"><table>
-            <thead><tr><th class="th-perm"><div class="l">Ticket type</div></th>${ACTION_KINDS.map((k) => {
-              const m = k === 'priority' ? c.priority.mode : c[k].mode;
-              return html`<th class="th-perm center"><div class="l">${ACTION_NAMES[k]}</div><div class="d">${m === 'off' ? 'Off' : m === 'suggest' ? 'Suggest' : 'Automatic'}</div></th>`;
-            })}</tr></thead>
+            <thead><tr><th class="th-perm"><div class="l">Ticket type</div></th>${keys.map((k) => html`<th class="th-perm center"><div class="l">${actionName(c, k)}</div><div class="d">${MODE_NAMES[actionMode(c, k)]}</div></th>`)}</tr></thead>
             <tbody>${types.map((t) => {
               const off = actionsOffFor(c, t);
               return html`<tr>
-                <td><span class="who-cell">${icon(typeIcon(t), 16, 'muted')}<span><span class="cell-title">${t.name}</span>${t.label ? html`<span class="sub mono">${t.label}</span>` : ''}</span>${off.size === ACTION_KINDS.length ? tag('Not triaged') : ''}</span></td>
-                ${ACTION_KINDS.map((k) => html`<td class="center"><input type="checkbox" class="rule-check" name="rule_${t.id}" value="${k}" ${off.has(k) ? '' : raw('checked')} aria-label="${t.name}: ${ACTION_NAMES[k]}"></td>`)}
+                <td><span class="who-cell">${icon(typeIcon(t), 16, 'muted')}<span><span class="cell-title">${t.name}</span>${t.label ? html`<span class="sub mono">${t.label}</span>` : ''}</span>${keys.every((k) => off.has(k)) ? tag('Not triaged') : ''}</span></td>
+                ${keys.map((k) => html`<td class="center"><input type="checkbox" class="rule-check" name="rule_${t.id}" value="${k}" ${off.has(k) ? '' : raw('checked')} aria-label="${t.name}: ${actionName(c, k)}"></td>`)}
               </tr>`;
             })}</tbody>
           </table></div></div>
@@ -187,7 +223,7 @@ export function registerTriageRoutes(app: FastifyInstance, web: Web): void {
           ${setting('Confidence threshold', 'Automatic actions only happen at or above this confidence.', html`<input type="number" name="threshold" value="${String(c.threshold)}" min="50" max="100" required aria-label="Confidence threshold"><span class="connector">%</span>`)}
           ${setting('Monthly limit', 'Triage stops for the rest of the month after this many tickets. Filing isn’t affected.', html`<input type="number" class="wide" name="monthly_limit" value="${String(c.monthlyLimit)}" min="1" max="100000" required aria-label="Monthly limit"><span class="connector">tickets</span>`)}
           ${setting('Apps', 'Which apps’ tickets are triaged. While all are selected, new apps are included too.', html`<div class="check-list">${apps.map((a) => html`<label class="check"><input type="checkbox" name="app_ids" value="${a.id}" ${!c.appIds || c.appIds.includes(a.id) ? raw('checked') : ''}> ${a.name}</label>`)}</div>`, { stacked: true })}
-          <div class="section">${textField({ id: 'instructions', label: 'Instructions for Claude (optional)', value: c.instructions, max: 2000, rows: 4, placeholder: 'Anything about payments or sign-in is high priority. Questions about pricing are low priority.', hint: 'Context about your product that helps Claude decide. Only admins can see and change this.' })}</div>
+          ${setting('Prompt', 'What Claude is told about your products, each check and examples.', linkBtn(`${b}/tickets/triage/prompt`, 'Edit the prompt', { size: 'sm', trail: 'arrow-right' }))}
           <div class="card-f">${anyActionOn(c) ? html`<span></span>` : html`<span class="small muted">Every action is off, so triage won’t do anything yet.</span>`}<div class="end">
             <button type="button" class="btn" data-discard data-dirty-enable>Cancel</button>
             ${submitBtn('Save changes', { variant: 'primary', loading: 'Saving…', attrs: raw('data-dirty-enable') })}
@@ -208,8 +244,13 @@ export function registerTriageRoutes(app: FastifyInstance, web: Web): void {
       const currentConfig = (await getTriageSettings(deps.db, ctx.workspace.id)).config;
       // A field missing from the form keeps its current value.
       const flagLabel = (f: Flag) => (b[`${f}_label`] === undefined ? currentConfig[f].label : str(`${f}_label`));
-      const labels = [...PRIORITIES.map((p) => str(`priority_label_${p}`)), ...FLAGS.map(flagLabel)];
-      if (labels.some((l) => !l || l.length > 50)) throw new UserFacingError('Every label needs a name of up to 50 characters.');
+      const flagComment = (f: Flag) => (b[`${f}_comment`] === undefined ? currentConfig[f].comment : str(`${f}_comment`).replace(/\r\n/g, '\n').slice(0, 1500));
+      const flagClose = (f: Flag) => !NO_CLOSE.has(f) && b[`${f}_close`] !== undefined;
+      if (PRIORITIES.some((p) => !str(`priority_label_${p}`) || str(`priority_label_${p}`).length > 50)) throw new UserFacingError('Each priority needs a label of up to 50 characters.');
+      if (FLAGS.some((f) => flagLabel(f).length > 50)) throw new UserFacingError('Labels can be up to 50 characters.');
+      // An action that's on must do something when applied.
+      const idle = FLAGS.find((f) => mode(`${f}_mode`) !== 'off' && !flagLabel(f) && !flagClose(f) && !(flagComment(f).trim() && !CLOSE_ONLY_COMMENT.has(f)));
+      if (idle) throw new UserFacingError(`${FLAG_COPY[idle].title} is on but wouldn’t change anything: give it a label${CLOSE_ONLY_COMMENT.has(idle) ? ' or let it close the issue' : ', a comment or closing'}.`);
       const model = str('model') || DEFAULT_MODEL;
       if (!/^[a-z0-9][a-z0-9.-]{2,99}$/.test(model)) throw new UserFacingError('Choose a model from the list.');
       const threshold = Number(str('threshold'));
@@ -233,6 +274,7 @@ export function registerTriageRoutes(app: FastifyInstance, web: Web): void {
         helpChannel = { id: ch.id, name: ch.name };
       }
       const config: TriageConfig = parseTriageConfig({
+        ...currentConfig,
         model,
         threshold,
         monthlyLimit,
@@ -242,10 +284,9 @@ export function registerTriageRoutes(app: FastifyInstance, web: Web): void {
         typeRules: b.rules === '1'
           ? Object.fromEntries(types.map((t) => {
               const on = new Set(list(`rule_${t.id}`));
-              return [t.id, { off: ACTION_KINDS.filter((k) => !on.has(k)) }];
+              return [t.id, { off: allActionKeys(currentConfig).filter((k) => !on.has(k)) }];
             }))
           : currentConfig.typeRules,
-        instructions: str('instructions').replace(/\r\n/g, '\n').slice(0, 2000),
         priority: {
           mode: mode('priority_mode'),
           labels: Object.fromEntries(PRIORITIES.map((p) => [p, str(`priority_label_${p}`)])),
@@ -254,8 +295,8 @@ export function registerTriageRoutes(app: FastifyInstance, web: Web): void {
         ...Object.fromEntries(FLAGS.map((f) => [f, {
           mode: mode(`${f}_mode`),
           label: flagLabel(f),
-          close: b[`${f}_close`] !== undefined,
-          comment: b[`${f}_comment`] === undefined ? currentConfig[f].comment : str(`${f}_comment`).replace(/\r\n/g, '\n').slice(0, 1500),
+          close: flagClose(f),
+          comment: flagComment(f),
           notifyMember: NOTIFIABLE.has(f) && b[`${f}_notify`] !== undefined,
         }])),
         helpChannel,
