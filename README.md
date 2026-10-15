@@ -18,14 +18,36 @@ and filed by a GitHub App. Reporters never need a GitHub account.
 
 ## Features
 
+**Tickets**
+
 - **Discord-native:** members open tickets from a panel in your server and get a private confirmation with the issue link. No GitHub account needed.
-- **Admin console:** guided setup, map apps to repos and labels, a tickets inbox with retry, link and close.
-- **Moderators:** view-only by default; admins choose per person who can act on tickets or see verifications.
-- **Ticket types:** members pick a type (e.g. Bug report, Feature request); each adds its GitHub label and a `[Bug]` title prefix.
-- **AI triage (optional):** Claude flags priority, duplicates, regressions, spam and more on filed tickets, and sorts them with your own label groups, as suggestions or automatically. Every suggestion shows exactly what applying it does. It can also triage issues opened directly on GitHub, with separate settings. Re-run triage on older tickets and issues to compare settings before applying anything. It runs in its own worker, so filing never depends on it.
-- **Contributor roles:** a second panel where members sign in with GitHub and get a role based on their merged PRs or commits across all your apps, e.g. Junior Contributor at 1, Contributor at 10.
-- **Reliable:** duplicate and rate-limit protection; never files the same issue twice.
-- **Secure:** credentials stay on the server; stored tokens and ticket text are encrypted.
+- **Ticket types and forms:** members pick a type (e.g. Bug report, Feature request); each adds its GitHub label and a `[Bug]` title prefix. Each type has its own Discord form with short-answer, paragraph and file-upload questions; answers appear as headings in the issue.
+- **Screenshots:** members attach PNG or JPG images (up to 10 MB per ticket). They're stored on your server with location data removed and embedded in the issue.
+- **Inbox:** every ticket with its status, triage and GitHub link; retry, link an existing issue or close, with search and filters.
+- **Spam and duplicates:** a per-member rate limit and duplicate window; a ticket is never filed twice, even when GitHub's reply is unclear.
+
+**Utilities**
+
+- **Issues:** search every issue, open and closed, across your connected repositories. Kept up to date every 2 minutes, no webhooks needed.
+- **AI triage (optional):** Claude flags priority, duplicates, regressions, spam and more, and sorts tickets with your own label groups. Each action can be off, a suggestion, or automatic above a confidence threshold, with separate settings for issues opened directly on GitHub.
+  - Every ticket shows its triage state (To review, Partly applied, Applied…), and suggestions say exactly what applying them does.
+  - Apply or dismiss in bulk, e.g. all duplicates at 80%+ confidence.
+  - Re-run triage on older tickets and compare settings before applying anything.
+  - Triage › Activity shows what it's doing live, with a log kept 90 days.
+  - It runs in its own worker with a monthly limit and keeps GitHub API headroom for filing, so filing never depends on it.
+- **Files:** see what's stored, clean up files of closed or spam tickets by rule (or automatically once a day), and set a storage limit.
+- **Contributor Roles:** a second panel where members sign in with GitHub and get a role based on their merged PRs or commits across all your apps, e.g. Junior Contributor at 1, Contributor at 10.
+- **Server health:** processes, memory, disk, queues, GitHub API usage and alerts.
+
+**Team**
+
+- **Roles:** owners, admins and moderators; several workspaces on one install.
+- **Moderators:** view-only by default. Admins turn on acting on tickets, verifications, issue search, file cleanup and server health per person, and give no access, view or edit on Apps & repositories and on each Triage page.
+
+**Reliable and secure**
+
+- Duplicate and rate-limit protection, retries, and queues that survive restarts.
+- Credentials stay on the server; stored tokens, the Claude key and ticket text are encrypted.
 
 ## Screenshots
 
@@ -75,6 +97,7 @@ Processes, operations, backups and scaling: [docs/DEPLOYMENT.md](docs/DEPLOYMENT
 | `GITHUB_*` | `APP_ID`, `APP_SLUG`, `CLIENT_ID`, `CLIENT_SECRET`, optional `WEBHOOK_SECRET` |
 | `GITHUB_APP_PRIVATE_KEY_FILE` | `./secrets/sec.pem` (git-ignored; see [`secrets/`](secrets/README.md)) |
 | `PLATFORM_ADMIN_DISCORD_IDS` | Discord user IDs allowed to create workspaces |
+| `ANTHROPIC_API_KEY` | Optional fallback Claude key for AI triage; workspaces normally add their own in Settings |
 
 Optional variables are listed in [`.env.example`](.env.example). Everything else is configured
 in the console.
@@ -86,6 +109,7 @@ in the console.
 | `npm run dev` | Dev server with reload |
 | `npm run build` · `npm start` | Production build and run |
 | `npm run start:worker` | Queue worker process |
+| `npm run start:triage` | Triage and issue-sync worker |
 | `npm run migrate` | Apply migrations (also runs on boot) |
 | `npm run typecheck` | Type-check source and tests |
 | `npm test` | Test suite (self-contained; uses a temporary SQLite file) |
@@ -98,4 +122,4 @@ in the console.
 
 ## Scope
 
-Not included: GitHub ↔ Discord comment sync, issue-status sync, attachments, private ticket channels.
+Not included: GitHub ↔ Discord comment sync, status updates to members after filing (the console shows each issue's live state), private ticket channels.
