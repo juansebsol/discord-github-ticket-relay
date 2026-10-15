@@ -32,8 +32,11 @@ Discord endpoint, OAuth), one or more queue workers, and an optional triage work
   what it was shown, and labels, comments and closing come from the workspace settings.
   Re-runs (`triage_runs`, `triage_run_items`) evaluate already-filed tickets with a saved copy
   of the settings: a preview never touches GitHub; applying it later (or an "apply" run) writes
-  `triage_results` the way normal triage does. The worker only takes re-run items when no new
-  ticket is waiting.
+  `triage_results` the way normal triage does, in bulk if asked (optionally approving the
+  suggestions too). The worker only takes re-run items when no new ticket is waiting, one at a
+  time, and a run waits instead of failing when Claude rate-limits it or when the
+  installation's GitHub budget drops below a reserve (a fifth of the hourly limit, at least
+  500 calls), so filing always has room.
 - **No Discord gateway.** The bot is driven entirely by Discord's HTTP interactions endpoint and
   REST API. It needs no privileged intents and no slash-command registration.
 - **GitHub App auth.** Short-lived installation tokens are minted from the app's private key

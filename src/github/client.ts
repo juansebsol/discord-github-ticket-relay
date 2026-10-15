@@ -114,6 +114,8 @@ export class GitHubClient {
   private readonly tokenCache = new Map<number, { token: string; expiresAt: number }>();
   /** The latest core API rate limit GitHub reported for installation requests (Server health). */
   rateLimit: RateLimit | null = null;
+  /** The same, per installation (each has its own hourly budget). */
+  readonly rateLimits = new Map<number, RateLimit>();
 
   constructor(
     private readonly config: GitHubAppConfig,
@@ -176,7 +178,10 @@ export class GitHubClient {
       const limit = Number(res.headers.get('x-ratelimit-limit'));
       const remaining = Number(res.headers.get('x-ratelimit-remaining'));
       const reset = Number(res.headers.get('x-ratelimit-reset'));
-      if (Number.isFinite(limit) && limit > 0 && Number.isFinite(remaining)) this.rateLimit = { limit, remaining, resetAt: new Date(reset * 1000), at: new Date() };
+      if (Number.isFinite(limit) && limit > 0 && Number.isFinite(remaining)) {
+        this.rateLimit = { limit, remaining, resetAt: new Date(reset * 1000), at: new Date() };
+        for (const [id, t] of this.tokenCache) if (auth === `token ${t.token}`) this.rateLimits.set(id, this.rateLimit);
+      }
     }
     const text = await res.text();
     let data: any = null;
@@ -210,6 +215,12 @@ export class GitHubClient {
     const { data } = await this.request('POST', `/app/installations/${installationId}/access_tokens`, `Bearer ${this.appJwt()}`, {});
     this.tokenCache.set(installationId, { token: data.token, expiresAt: Date.parse(data.expires_at) });
     return data.token;
+  }
+
+  /** What's left of an installation's hourly budget, as last reported (null if unknown or already reset). */
+  rateLimitFor(installationId: number): RateLimit | null {
+    const r = this.rateLimits.get(installationId);
+    return r && r.resetAt.getTime() > Date.now() ? r : null;
   }
 
   invalidateToken(installationId: number): void {

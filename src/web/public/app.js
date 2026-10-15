@@ -639,6 +639,38 @@
     });
     show();
   });
+  // ---- Re-run estimate (Triage › Re-run): how many tickets, cost and time, as the form changes ----
+
+  $$('form[data-estimate]').forEach(function (form) {
+    var src = form.getAttribute('data-estimate');
+    var text = form.querySelector('[data-estimate-text]');
+    var warn = form.querySelector('[data-estimate-warn]');
+    var limit = form.querySelector('input[name="limit"]');
+    var newest = form.querySelector('input[name="count"][value="newest"]');
+    var timer = null;
+    var seq = 0;
+    function update() {
+      var p = new URLSearchParams();
+      new FormData(form).forEach(function (v, k) { if (k !== '_csrf' && k !== 'name') p.append(k, v); });
+      var mine = ++seq;
+      fetch(src + '?' + p.toString(), { credentials: 'same-origin', headers: { accept: 'application/json' } })
+        .then(function (res) { return res.ok && (res.headers.get('content-type') || '').indexOf('json') >= 0 ? res.json() : null; })
+        .then(function (d) {
+          if (!d || mine !== seq) return;
+          if (text) text.textContent = d.text;
+          if (warn) { warn.textContent = d.warn || ''; warn.hidden = !d.warn; }
+          $$('[data-count-all]', form).forEach(function (el) { el.textContent = d.allLabel; });
+        })
+        .catch(function () {});
+    }
+    form.addEventListener('change', update);
+    if (limit) {
+      // Typing a number means "only the newest".
+      limit.addEventListener('focus', function () { if (newest && !newest.checked) { newest.checked = true; update(); } });
+      limit.addEventListener('input', function () { clearTimeout(timer); timer = setTimeout(update, 300); });
+    }
+  });
+
   // ---- Live sections (Server health, triage re-runs) ------------------------------------------
 
   $$('[data-live]').forEach(function (box) {

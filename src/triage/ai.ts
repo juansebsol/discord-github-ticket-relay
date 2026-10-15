@@ -105,6 +105,8 @@ export class TriageAiError extends Error {
     readonly action: 'pause' | 'retry' | 'skip',
     message: string,
     readonly pauseReason: PauseReason | null = null,
+    /** For rate limits: how long Claude asked to wait. */
+    readonly retryAfterSeconds: number | null = null,
   ) {
     super(message);
     this.name = 'TriageAiError';
@@ -122,8 +124,12 @@ export function classifyAiError(err: unknown): TriageAiError {
   }
   if (err instanceof Anthropic.NotFoundError) return new TriageAiError('pause', 'The model isn’t available to this API key.', 'model_unavailable');
   if (err instanceof Anthropic.BadRequestError) return new TriageAiError('pause', err.message.replace(/^\d+\s*/, '').slice(0, 300), 'rejected');
-  if (err instanceof Anthropic.RateLimitError || err instanceof Anthropic.InternalServerError || err instanceof Anthropic.APIConnectionError) {
-    return new TriageAiError('retry', err instanceof Anthropic.RateLimitError ? 'Claude rate limit' : 'Claude was unavailable');
+  if (err instanceof Anthropic.RateLimitError) {
+    const wait = Number((err.headers as Headers | undefined)?.get?.('retry-after'));
+    return new TriageAiError('retry', 'Claude rate limit', null, Number.isFinite(wait) && wait > 0 ? Math.min(wait, 600) : 30);
+  }
+  if (err instanceof Anthropic.InternalServerError || err instanceof Anthropic.APIConnectionError) {
+    return new TriageAiError('retry', 'Claude was unavailable');
   }
   if (err instanceof Anthropic.APIError && err.status !== undefined && err.status >= 500) return new TriageAiError('retry', 'Claude was unavailable');
   if (err instanceof Anthropic.AnthropicError) return new TriageAiError('skip', 'Claude’s answer couldn’t be read.');

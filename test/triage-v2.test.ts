@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { IssueIndexer } from '../src/domain/issue-index.js';
 import { acceptSubmission } from '../src/domain/submissions.js';
@@ -295,5 +296,115 @@ describe('re-running triage', () => {
     expect(env.anthropic.requests.length).toBe(calls);
     const list = await env.server.inject({ method: 'GET', url: `${w()}/tickets/triage/runs`, ...get(ws.owner) });
     expect(list.body).toContain('Stopped');
+  });
+});
+
+describe('re-running at scale', () => {
+  /** Copies a filed ticket many times (their GitHub issues don't exist, so triage skips them). */
+  async function clones(srcId: string, count: number) {
+    const src = (await env.db.query('SELECT * FROM submissions WHERE id = $1', [srcId])).rows[0];
+    for (let i = 0; i < count; i++) {
+      const row = { ...src, id: randomUUID(), ref: `TR-CLONE${String(i).padStart(4, '0')}`, discord_interaction_id: `clone-${i}`, issue_number: 5000 + i, completed_at: new Date(Date.now() - (i + 1) * 1000) };
+      const cols = Object.keys(row);
+      await env.db.query(`INSERT INTO submissions (${cols.join(', ')}) VALUES (${cols.map((_, j) => `$${j + 1}`).join(', ')})`, cols.map((c) => row[c]));
+    }
+  }
+  const start = (fields: Record<string, string>) => env.server.inject({ method: 'POST', url: `${w()}/tickets/triage/runs`, ...form(ws.owner, { never: '1', untouched: '1', mode: 'preview', ...fields }) });
+  const latestRun = async () => (await env.db.query('SELECT * FROM triage_runs WHERE workspace_id = $1 ORDER BY created_at DESC LIMIT 1', [wid()])).rows[0];
+  const items = async (runId: string) => (await env.db.query('SELECT * FROM triage_run_items WHERE run_id = $1 ORDER BY position', [runId])).rows;
+
+  it('queues every matching ticket, well past 200, up to what’s left of the monthly limit, and pages the results', async () => {
+    const t = await file();
+    await clones(t.id, 229);
+    await enable({ priority: { mode: 'suggest' }, monthlyLimit: 5000 });
+    const est = await env.server.inject({ method: 'GET', url: `${w()}/tickets/triage/runs/estimate?untouched=1&never=1&count=all`, ...get(ws.owner) });
+    expect(est.json()).toMatchObject({ allLabel: 'All matching tickets (230)' });
+    expect(est.json().text).toContain('230 tickets');
+    await start({ count: 'all' });
+    const run = await latestRun();
+    expect(await items(run.id)).toHaveLength(230);
+    expect(run.scope).toMatchObject({ matched: 230 });
+    await env.triage.drain();
+    const page = await env.server.inject({ method: 'GET', url: `${w()}/tickets/triage/runs/${run.id}`, ...get(ws.owner) });
+    expect(page.body).toContain('Page 1 of 5');
+    expect(page.body).toContain('page=2');
+
+    // The monthly limit caps a run: the newest tickets go first.
+    await saveTriageConfig(env.db, wid(), parseTriageConfig({ ...(await getTriageSettings(env.db, wid())).config, monthlyLimit: 1 + 10 }));
+    const est2 = await env.server.inject({ method: 'GET', url: `${w()}/tickets/triage/runs/estimate?untouched=1&never=1&count=all`, ...get(ws.owner) });
+    expect(est2.json().text).toContain('The newest 10 of');
+    expect(est2.json().warn).toContain('Raise the monthly limit');
+  });
+
+  it('applies every result in a filter at once, with or without the suggestions, one ticket at a time', async () => {
+    const a = await file('Login fails');
+    const b = await file('Export crashes');
+    const c = await file('Sync is slow');
+    await enable({ priority: { mode: 'suggest' } });
+    // One ticket was triaged before with the same result, so it's "same"; the others are new.
+    await env.db.query(`INSERT INTO triage_results (submission_id, workspace_id, status, suggestions, verdict, completed_at) VALUES ($1, $2, 'done', $3, $4, now_ms())`, [c.id, wid(), JSON.stringify([{ kind: 'priority', label: 'priority: medium', close: false, confidence: 80, priority: 'medium' }]), JSON.stringify({ reason: 'x' })]);
+    await start({ count: 'all' });
+    await env.triage.drain();
+    const run = await latestRun();
+    expect((await items(run.id)).map((i: { change: string }) => i.change).sort()).toEqual(['new', 'new', 'same']);
+
+    // "Apply all changed results", approving the suggestions too.
+    await env.server.inject({ method: 'POST', url: `/w/${wid()}/tickets/triage/runs/${run.id}/apply`, ...form(ws.owner, { scope: 'filter', show: 'changed', include: 'all' }) });
+    expect((await items(run.id)).filter((i: { apply_status: string }) => i.apply_status === 'pending')).toHaveLength(2);
+    await env.triage.drain();
+    expect(issue(a.issue_number).labels).toEqual(['priority: medium']);
+    expect(issue(b.issue_number).labels).toEqual(['priority: medium']);
+    expect(issue(c.issue_number).labels).toEqual([]);
+    expect(await result(a.id)).toMatchObject({ suggestions: [], applied_actions: [expect.objectContaining({ kind: 'priority' })] });
+
+    // Without suggestions, applying the rest only replaces its suggestions.
+    await env.server.inject({ method: 'POST', url: `/w/${wid()}/tickets/triage/runs/${run.id}/apply`, ...form(ws.owner, { scope: 'filter', show: 'all', include: 'auto' }) });
+    await env.triage.drain();
+    expect(issue(c.issue_number).labels).toEqual([]);
+    expect((await result(c.id)).suggestions).toEqual([expect.objectContaining({ kind: 'priority' })]);
+    expect((await items(run.id)).every((i: { apply_status: string }) => i.apply_status === 'done')).toBe(true);
+  });
+
+  it('can stop applying, and the rest can be applied later', async () => {
+    const a = await file('Login fails');
+    await file('Export crashes');
+    await enable({ priority: { mode: 'suggest' } });
+    await start({ count: 'all' });
+    await env.triage.drain();
+    const run = await latestRun();
+    await env.server.inject({ method: 'POST', url: `/w/${wid()}/tickets/triage/runs/${run.id}/apply`, ...form(ws.owner, { scope: 'filter', show: 'all', include: 'all' }) });
+    const page = await env.server.inject({ method: 'GET', url: `${w()}/tickets/triage/runs/${run.id}`, ...get(ws.owner) });
+    expect(page.body).toContain('Stop applying');
+    expect(page.body).toContain('Applying on GitHub');
+    await env.server.inject({ method: 'POST', url: `/w/${wid()}/tickets/triage/runs/${run.id}/stop-applying`, ...form(ws.owner) });
+    await env.triage.drain();
+    expect(issue(a.issue_number).labels).toEqual([]);
+    expect((await items(run.id)).every((i: { apply_status: string | null }) => i.apply_status === null)).toBe(true);
+  });
+
+  it('waits instead of using up GitHub’s hourly budget, so filing keeps working', async () => {
+    await file('Login fails');
+    await enable({ priority: { mode: 'suggest' } });
+    const github = env.triage.engine.deps.github!;
+    github.rateLimits.set(ws.installationId, { limit: 5000, remaining: 300, resetAt: new Date(Date.now() + 30 * 60_000), at: new Date() });
+    await start({ count: 'all' });
+    await env.triage.drain();
+    expect(env.anthropic.requests).toHaveLength(0);
+    const run = await latestRun();
+    expect(run.waiting_reason).toBe('github');
+    expect((await items(run.id))[0]).toMatchObject({ status: 'pending', attempts: 0 });
+    const page = await env.server.inject({ method: 'GET', url: `${w()}/tickets/triage/runs/${run.id}`, ...get(ws.owner) });
+    expect(page.body).toContain('Waiting for GitHub’s hourly limit to reset');
+
+    // A new ticket is still filed and triaged meanwhile.
+    const t = await file('Export crashes');
+    await env.triage.drain();
+    expect((await result(t.id)).status).toBe('done');
+
+    // Once the budget resets, the run carries on.
+    github.rateLimits.delete(ws.installationId);
+    await env.db.query('UPDATE triage_runs SET waiting_until_at = now_ms() - 1000 WHERE id = $1', [run.id]);
+    await env.triage.drain();
+    expect(await latestRun()).toMatchObject({ status: 'done', waiting_reason: null });
   });
 });

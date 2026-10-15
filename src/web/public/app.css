@@ -1000,3 +1000,6 @@ tr.changed > td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
 .tri-line .tags, .tri-row .tags { display: inline-flex; vertical-align: middle; }
 th.half { width: 38%; }
 .run-cell .tags { display: inline-flex; vertical-align: middle; }
+.check-list.stacked { flex-direction: column; gap: 8px; }
+input[type="number"].narrow { width: 88px; height: 28px; margin-left: 4px; }
+progress.bar.wide { max-width: none; }

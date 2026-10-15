@@ -362,7 +362,8 @@ export interface Evaluation {
 export type Outcome =
   | { status: 'done'; e: Evaluation }
   | { status: 'skip'; reason: string; model?: string }
-  | { status: 'retry'; message: string }
+  /** waitSeconds: a rate limit; a re-run waits that long without counting the attempt. */
+  | { status: 'retry'; message: string; waitSeconds?: number; waitFor?: 'github' | 'claude' }
   | { status: 'paused' };
 
 /** The columns of a ticket's triage result that describe what triage decided. */
@@ -392,6 +393,8 @@ export interface RerunScope {
   appId: string | null;
   typeName: string | null;
   limit: number;
+  /** How many tickets matched when the run started (before the limit). */
+  matched?: number;
 }
 
 export interface TriageRunRow {
@@ -407,6 +410,9 @@ export interface TriageRunRow {
   finished_at: Date | null;
   applied_at: Date | null;
   applied_by: string | null;
+  /** Paused for a rate limit until then: GitHub's (to keep room for filing) or Claude's. */
+  waiting_until_at: Date | null;
+  waiting_reason: 'github' | 'claude' | null;
 }
 
 /** The ticket's triage result when a run started, to compare with. */
@@ -434,19 +440,82 @@ export interface RunItemRow {
   note: string | null;
   apply_status: 'pending' | 'done' | 'skipped' | 'failed' | null;
   apply_note: string | null;
+  /** Applying also applies the suggestions (someone approved them in bulk). */
+  apply_suggestions: boolean;
+  apply_done_at: Date | null;
+  /** Compared with the ticket's triage before the run, once the ticket is done. */
+  change: RunChange | null;
   model: string | null;
   input_tokens: number | null;
   output_tokens: number | null;
   completed_at: Date | null;
 }
 
-export const MAX_RERUN = 200;
+/** Most tickets in one run (each one is a Claude call; the monthly limit applies too). */
+export const MAX_RERUN = 10_000;
+
+export type RunChange = 'changed' | 'new' | 'same';
+export type RunFilter = 'all' | 'changed' | 'same' | 'skipped';
+type Decisions = { auto: TriageAction[]; suggested: TriageAction[] };
+
+/** The decisions in a result, ignoring wording: what is done automatically and what is suggested. */
+function decisionKey(d: Decisions): string {
+  return [...d.auto.map((a) => `auto:${describeAction(a)}`), ...d.suggested.map((a) => `suggest:${describeAction(a)}`)].sort().join('|');
+}
+
+/** A ticket's triage before a run, as decisions (null when it had no result). */
+export function beforeDecisions(b: BeforeResult | null): Decisions | null {
+  return b?.status === 'done' ? { auto: b.applied, suggested: b.suggestions } : null;
+}
+
+/** How a result differs from an earlier one (the ticket's triage before, or another run's). */
+export function changeFrom(before: Decisions | null, after: Decisions): RunChange {
+  const now = decisionKey(after);
+  if (!before) return now ? 'new' : 'same';
+  return decisionKey(before) === now ? 'same' : 'changed';
+}
+
+const FILTER_SQL: Record<RunFilter, string> = {
+  all: '1',
+  changed: `i.status = 'done' AND i.change IN ('changed', 'new')`,
+  same: `i.status = 'done' AND i.change = 'same'`,
+  skipped: `i.status IN ('skipped', 'failed')`,
+};
+
+export interface RunCounts {
+  total: number;
+  pending: number;
+  skipped: number;
+  changed: number;
+  new: number;
+  same: number;
+  applying: number;
+  applied: number;
+  notApplied: number;
+  /** Done and not applied yet, overall and per filter. */
+  applicable: Record<RunFilter, number>;
+  /** Applied (or not) since applying last started. */
+  appliedSince: number;
+  inputTokens: number;
+  outputTokens: number;
+  lastDoneAt: Date | null;
+  lastApplyAt: Date | null;
+}
+
+export type RunItemView = RunItemRow & { ref: string; app_name: string; ticket_type_name: string | null; issue_number: number | null; repo_owner: string; repo_name: string; issue_title: string | null; issue_state: string | null };
+
+/** GitHub calls a re-run leaves free for filing and normal triage: a fifth of the hourly budget, at least 500. */
+const GITHUB_RESERVE = { share: 0.2, min: 500 };
 
 /** A run's saved settings, read with today's defaults for anything added since. */
 function withParsedConfig<T extends { config_used: TriageConfig }>(r: T): T {
   return { ...r, config_used: parseTriageConfig(r.config_used) };
 }
 const RERUN_ATTEMPTS = 3;
+
+function isGitHubRateLimit(err: unknown): err is GitHubApiError {
+  return err instanceof GitHubApiError && err.isRateLimit;
+}
 
 /** Tickets a re-run can pick: filed, issue not known to be closed, no triage action applied, not queued. */
 function rerunWhere(scope: RerunScope): { sql: string; params: unknown[] } {
@@ -567,7 +636,7 @@ export class TriageEngine {
   }
 
   /** Applies the automatic actions on GitHub. If GitHub refuses, nothing is lost: they become suggestions. */
-  private async applyAuto(sub: SubmissionRow, auto: TriageAction[], suggestions: TriageAction[], tell: boolean) {
+  private async applyAuto(sub: SubmissionRow, auto: TriageAction[], suggestions: TriageAction[], tell: boolean, o: { rateLimitThrows?: boolean } = {}) {
     const applied: TriageAction[] = [];
     const suggested = [...suggestions];
     let toldMember = false;
@@ -578,6 +647,8 @@ export class TriageEngine {
         applied.push(...auto);
         if (tell) toldMember = await tellMember(this.deps, sub, auto);
       } catch (err) {
+        // A re-run waits out GitHub's rate limit and tries again instead.
+        if (o.rateLimitThrows && isGitHubRateLimit(err)) throw err;
         error = `Couldn’t update the GitHub issue: ${githubMessage(err)}`;
         suggested.unshift(...auto);
       }
@@ -617,6 +688,7 @@ export class TriageEngine {
       issue = await deps.github.getIssueDetail(inst, sub.repo_owner, sub.repo_name, sub.issue_number);
     } catch (err) {
       if (err instanceof GitHubApiError && [403, 404, 410].includes(err.status) && !err.isRateLimit) return skip('The GitHub issue no longer exists or can’t be read');
+      if (isGitHubRateLimit(err)) return { status: 'retry', message: 'GitHub rate limit', waitSeconds: err.retryAfterSeconds ?? 60, waitFor: 'github' };
       return { status: 'retry', message: `GitHub unavailable: ${githubMessage(err)}` };
     }
     if (issue.state === 'closed') return skip('The issue was already closed on GitHub');
@@ -654,7 +726,7 @@ export class TriageEngine {
         return { status: 'paused' };
       }
       if (e.action === 'skip') return skip(e.message, c.model);
-      return { status: 'retry', message: e.message };
+      return e.retryAfterSeconds ? { status: 'retry', message: e.message, waitSeconds: e.retryAfterSeconds, waitFor: 'claude' } : { status: 'retry', message: e.message };
     }
 
     if (key.source === 'workspace') await recordKeyCheck(deps.db, workspaceId, 'working', null).catch(() => {});
@@ -831,23 +903,25 @@ export class TriageEngine {
     const usage = await monthlyUsage(db, workspaceId);
     const left = settings.config.monthlyLimit - usage.triaged;
     if (left <= 0) throw new UserFacingError('This month’s triage limit is used up. Raise the monthly limit to re-run.');
+    const matched = await this.countRerun(workspaceId, o.scope);
+    if (!matched) throw new UserFacingError('No open tickets match. Change which tickets to include.');
     const limit = Math.max(1, Math.min(o.scope.limit, MAX_RERUN, left));
-    const scope = { ...o.scope, limit };
+    const scope: RerunScope = { ...o.scope, limit, matched };
     const w = rerunWhere(scope);
-    const { rows: picked } = await db.query<TriageResultRow & { id: string }>(
-      `SELECT s.id, r.status, r.applied_actions, r.suggestions, r.verdict, r.skip_reason, r.model ${w.sql} ORDER BY s.completed_at DESC, s.rowid DESC LIMIT $${w.params.length + 2}`,
-      [workspaceId, ...w.params, limit],
-    );
-    if (!picked.length) throw new UserFacingError('No open tickets match. Change which tickets to include.');
     const id = randomUUID();
+    const runParam = w.params.length + 2;
+    // Every matching ticket is queued at once, newest first, with its triage so far to compare with.
     await db.transaction(async (tx) => {
       await tx.query('INSERT INTO triage_runs (id, workspace_id, name, mode, scope, config_used, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7)', [id, workspaceId, o.name, o.mode, scope, settings.config, userId]);
-      for (const [i, p] of picked.entries()) {
-        const before: BeforeResult | null = p.status
-          ? { status: p.status, applied: p.applied_actions ?? [], suggestions: p.suggestions ?? [], reason: p.verdict?.reason ?? null, skipReason: p.skip_reason, model: p.model }
-          : null;
-        await tx.query('INSERT INTO triage_run_items (run_id, submission_id, position, before) VALUES ($1, $2, $3, $4)', [id, p.id, i, before]);
-      }
+      await tx.query(
+        `INSERT INTO triage_run_items (run_id, submission_id, position, before)
+         SELECT $${runParam}, s.id, row_number() OVER (ORDER BY s.completed_at DESC, s.rowid DESC) - 1,
+           CASE WHEN r.status IS NULL THEN NULL ELSE json_object(
+             'status', r.status, 'applied', json(COALESCE(r.applied_actions, '[]')), 'suggestions', json(COALESCE(r.suggestions, '[]')),
+             'reason', json_extract(r.verdict, '$.reason'), 'skipReason', r.skip_reason, 'model', r.model) END
+         ${w.sql} ORDER BY s.completed_at DESC, s.rowid DESC LIMIT $${runParam + 1}`,
+        [workspaceId, ...w.params, id, limit],
+      );
     });
     return (await this.getRun(workspaceId, id))!;
   }
@@ -870,8 +944,8 @@ export class TriageEngine {
     return rows.map(withParsedConfig);
   }
 
-  async runItems(runId: string): Promise<(RunItemRow & { ref: string; app_name: string; ticket_type_name: string | null; issue_number: number | null; repo_owner: string; repo_name: string; issue_title: string | null; issue_state: string | null })[]> {
-    const { rows } = await this.deps.db.query<RunItemRow & { ref: string; app_name: string; ticket_type_name: string | null; issue_number: number | null; repo_owner: string; repo_name: string; issue_title: string | null; issue_state: string | null }>(
+  async runItems(runId: string): Promise<RunItemView[]> {
+    const { rows } = await this.deps.db.query<RunItemView>(
       `SELECT i.*, s.ref, s.app_name, s.ticket_type_name, s.issue_number, s.repo_owner, s.repo_name, x.title AS issue_title, x.state AS issue_state
        FROM triage_run_items i JOIN submissions s ON s.id = i.submission_id
        LEFT JOIN issue_index x ON x.repo_id = s.repo_id AND x.number = s.issue_number
@@ -879,6 +953,55 @@ export class TriageEngine {
       [runId],
     );
     return rows;
+  }
+
+  /** One page of a run's tickets, in order. */
+  async runPage(runId: string, filter: RunFilter, limit: number, offset: number): Promise<RunItemView[]> {
+    const { rows } = await this.deps.db.query<RunItemView>(
+      `SELECT i.*, s.ref, s.app_name, s.ticket_type_name, s.issue_number, s.repo_owner, s.repo_name, x.title AS issue_title, x.state AS issue_state
+       FROM triage_run_items i JOIN submissions s ON s.id = i.submission_id
+       LEFT JOIN issue_index x ON x.repo_id = s.repo_id AND x.number = s.issue_number
+       WHERE i.run_id = $1 AND ${FILTER_SQL[filter]} ORDER BY i.position LIMIT $2 OFFSET $3`,
+      [runId, limit, offset],
+    );
+    return rows;
+  }
+
+  /** Progress and results of a run, counted in the database (runs can have thousands of tickets). */
+  async runCounts(runId: string, applyingSince: Date | null = null): Promise<RunCounts> {
+    const { db } = this.deps;
+    // Results from before the comparison was stored get it now.
+    const { rows: old } = await db.query<RunItemRow>(`SELECT submission_id, before, auto_actions, suggestions FROM triage_run_items WHERE run_id = $1 AND status = 'done' AND change IS NULL`, [runId]);
+    for (const i of old) {
+      await db.query('UPDATE triage_run_items SET change = $3 WHERE run_id = $1 AND submission_id = $2', [runId, i.submission_id, changeFrom(beforeDecisions(i.before), { auto: i.auto_actions ?? [], suggested: i.suggestions ?? [] })]);
+    }
+    const open = `(i.apply_status IS NULL OR i.apply_status = 'failed')`;
+    const { rows } = await db.query<Record<string, number | null> & { last_done_at: Date | null; last_apply_at: Date | null }>(
+      `SELECT count(*) AS total, sum(i.status = 'pending') AS pending, sum(i.status IN ('skipped', 'failed')) AS skipped,
+         sum(i.status = 'done' AND i.change = 'changed') AS changed, sum(i.status = 'done' AND i.change = 'new') AS new_, sum(i.status = 'done' AND i.change = 'same') AS same,
+         sum(i.apply_status = 'pending') AS applying, sum(i.apply_status = 'done') AS applied, sum(i.apply_status IN ('skipped', 'failed')) AS not_applied,
+         sum(i.status = 'done' AND ${open}) AS a_all, sum(${FILTER_SQL.changed} AND ${open}) AS a_changed, sum(${FILTER_SQL.same} AND ${open}) AS a_same,
+         sum(i.apply_done_at >= $2) AS applied_since,
+         sum(i.input_tokens) AS input_tokens, sum(i.output_tokens) AS output_tokens, max(i.completed_at) AS last_done_at, max(i.apply_done_at) AS last_apply_at
+       FROM triage_run_items i WHERE i.run_id = $1`,
+      [runId, applyingSince ?? new Date(8.64e15)],
+    );
+    const r = rows[0]!;
+    const n = (k: string) => Number(r[k] ?? 0);
+    return {
+      total: n('total'), pending: n('pending'), skipped: n('skipped'), changed: n('changed'), new: n('new_'), same: n('same'),
+      applying: n('applying'), applied: n('applied'), notApplied: n('not_applied'),
+      applicable: { all: n('a_all'), changed: n('a_changed'), same: n('a_same'), skipped: 0 },
+      appliedSince: n('applied_since'),
+      inputTokens: n('input_tokens'), outputTokens: n('output_tokens'), lastDoneAt: r.last_done_at, lastApplyAt: r.last_apply_at,
+    };
+  }
+
+  /** Stops applying a preview: tickets not reached yet go back to not applied, so they can be applied later. */
+  async stopApplying(workspaceId: string, runId: string): Promise<number> {
+    if (!(await this.getRun(workspaceId, runId))) throw new UserFacingError('That re-run wasn’t found.', 404);
+    const res = await this.deps.db.query(`UPDATE triage_run_items SET apply_status = NULL, apply_suggestions = 0 WHERE run_id = $1 AND apply_status = 'pending' AND (lease_until_at IS NULL OR lease_until_at < now_ms())`, [runId]);
+    return res.rowCount;
   }
 
   /** Stops a running re-run; tickets not reached yet are skipped. Results so far are kept. */
@@ -897,23 +1020,25 @@ export class TriageEngine {
   }
 
   /**
-   * Applies a preview's results (all of them, or the tickets picked): each ticket's result
-   * replaces its old one and its automatic actions are applied on GitHub. Runs in the background.
+   * Applies a preview's results: the tickets picked, or every result in a filter. Each ticket's
+   * result replaces its old one and its automatic actions (and, if asked, its suggestions) are
+   * applied on GitHub. Queued: the worker applies them one at a time.
    */
-  async applyPreview(workspaceId: string, runId: string, userId: string, ids: string[] | null): Promise<number> {
+  async applyPreview(workspaceId: string, runId: string, userId: string, o: { ids?: string[]; filter?: RunFilter; withSuggestions?: boolean }): Promise<number> {
     const { db } = this.deps;
     const run = await this.getRun(workspaceId, runId);
     if (!run || run.mode !== 'preview') throw new UserFacingError('That re-run wasn’t found.', 404);
-    if (run.status === 'running') throw new UserFacingError('Wait for the preview to finish first.', 409);
+    if (run.status === 'running') throw new UserFacingError('Wait for the preview to finish, or stop it, first.', 409);
     const settings = await getTriageSettings(db, workspaceId);
     if (!settings.enabled) throw new UserFacingError('Turn triage on to apply results.');
+    if (!o.ids?.length && !o.filter) throw new UserFacingError('Select the results to apply.');
     const res = await db.query(
-      `UPDATE triage_run_items SET apply_status = 'pending', apply_note = NULL, lease_until_at = NULL
-       WHERE run_id = $1 AND status = 'done' AND (apply_status IS NULL OR apply_status = 'failed')
-         AND ($2 IS NULL OR submission_id IN (SELECT value FROM json_each($2)))`,
-      [runId, ids ? JSON.stringify(ids) : null],
+      `UPDATE triage_run_items AS i SET apply_status = 'pending', apply_note = NULL, apply_suggestions = $3, lease_until_at = NULL
+       WHERE i.run_id = $1 AND i.status = 'done' AND (i.apply_status IS NULL OR i.apply_status = 'failed')
+         AND ${o.ids?.length ? 'i.submission_id IN (SELECT value FROM json_each($2))' : `$2 IS NULL AND ${FILTER_SQL[o.filter ?? 'all']}`}`,
+      [runId, o.ids?.length ? JSON.stringify(o.ids) : null, o.withSuggestions ? 1 : 0],
     );
-    if (!res.rowCount) throw new UserFacingError('There’s nothing left to apply in this preview.', 409);
+    if (!res.rowCount) throw new UserFacingError('There’s nothing left to apply here.', 409);
     await db.query('UPDATE triage_runs SET applied_at = now_ms(), applied_by = $2 WHERE id = $1', [runId, userId]);
     return res.rowCount;
   }
@@ -930,6 +1055,7 @@ export class TriageEngine {
            SELECT i.rowid FROM triage_run_items i JOIN triage_runs r ON r.id = i.run_id
            LEFT JOIN triage_settings t ON t.workspace_id = r.workspace_id
            WHERE ${cond} AND (i.lease_until_at IS NULL OR i.lease_until_at < now_ms()) AND t.paused_reason IS NULL
+             AND (r.waiting_until_at IS NULL OR r.waiting_until_at <= now_ms())
            ORDER BY r.created_at, i.position LIMIT 1
          )
          RETURNING *`,
@@ -938,6 +1064,22 @@ export class TriageEngine {
       if (rows[0]) return { item: rows[0], job };
     }
     return null;
+  }
+
+  /** Whether a re-run should wait to keep GitHub calls free for filing: until the budget resets, or null. */
+  private githubWait(installationId: number): Date | null {
+    const rl = this.deps.github?.rateLimitFor(installationId);
+    if (!rl) return null;
+    const reserve = Math.max(GITHUB_RESERVE.min, Math.round(rl.limit * GITHUB_RESERVE.share));
+    return rl.remaining < reserve ? new Date(rl.resetAt.getTime() + 5_000) : null;
+  }
+
+  /** Pauses a run for a rate limit and puts the ticket back without counting the attempt. */
+  private async waitRun(run: TriageRunRow, item: RunItemRow, until: Date, reason: 'github' | 'claude', uncount: boolean): Promise<void> {
+    const { db } = this.deps;
+    await db.query('UPDATE triage_runs SET waiting_until_at = $2, waiting_reason = $3 WHERE id = $1', [run.id, until, reason]);
+    await db.query('UPDATE triage_run_items SET lease_until_at = NULL, attempts = $3 WHERE run_id = $1 AND submission_id = $2', [run.id, item.submission_id, uncount ? Math.max(0, item.attempts - 1) : item.attempts]);
+    this.deps.log.info({ run: run.id, until, reason }, 're-run waiting for a rate limit');
   }
 
   async processRunItem(claimed: { item: RunItemRow; job: 'evaluate' | 'apply' }): Promise<void> {
@@ -950,34 +1092,53 @@ export class TriageEngine {
       const entries = Object.entries({ ...fields, lease_until_at: null });
       return db.query(`UPDATE triage_run_items SET ${entries.map(([k], i) => `${k} = $${i + 3}`).join(', ')} WHERE run_id = $1 AND submission_id = $2`, [item.run_id, item.submission_id, ...entries.map(([, v]) => v)]);
     };
+    const applied = (r: { status: string; note: string | null }) => set({ apply_status: r.status, apply_note: r.note, apply_done_at: new Date() });
     try {
+      // Filing and normal triage share GitHub's hourly budget: leave them room.
+      const conn = await getGitHubConnection(db, run.workspace_id);
+      const githubWait = conn ? this.githubWait(conn.installation_id) : null;
+      if (githubWait) return await this.waitRun(run, item, githubWait, 'github', job === 'evaluate');
+      if (run.waiting_until_at) await db.query('UPDATE triage_runs SET waiting_until_at = NULL, waiting_reason = NULL WHERE id = $1', [run.id]);
+
       if (job === 'apply') {
-        const r = await this.commitItem(run, item, run.applied_by);
-        await set({ apply_status: r.status, apply_note: r.note });
+        await applied(await this.commitItem(run, item, run.applied_by));
         return;
       }
       const out = await this.evaluate(run.workspace_id, item.submission_id, run.config_used);
       if (out.status === 'skip') await set({ status: 'skipped', note: out.reason, model: out.model ?? null, completed_at: new Date() });
       else if (out.status === 'paused') await set({ attempts: Math.max(0, item.attempts - 1) });
+      else if (out.status === 'retry' && out.waitSeconds) await this.waitRun(run, item, new Date(Date.now() + out.waitSeconds * 1000), out.waitFor ?? 'claude', true);
       else if (out.status === 'retry') {
         await set(item.attempts >= RERUN_ATTEMPTS
           ? { status: 'failed', note: out.message, completed_at: new Date() }
           : { note: out.message, next_attempt_at: new Date(Date.now() + 60_000 * item.attempts) });
       } else {
         const { e } = out;
-        const done = { ...item, verdict: e.verdict, auto_actions: e.auto, suggestions: e.suggested };
-        await set({ status: 'done', note: null, verdict: e.verdict, auto_actions: e.auto, suggestions: e.suggested, model: e.config.model, input_tokens: e.inputTokens, output_tokens: e.outputTokens, completed_at: new Date() });
+        const done: RunItemRow = { ...item, verdict: e.verdict, auto_actions: e.auto, suggestions: e.suggested };
+        const change = changeFrom(beforeDecisions(item.before), { auto: e.auto, suggested: e.suggested });
+        await set({ status: 'done', note: null, change, verdict: e.verdict, auto_actions: e.auto, suggestions: e.suggested, model: e.config.model, input_tokens: e.inputTokens, output_tokens: e.outputTokens, completed_at: new Date() });
         if (run.mode === 'apply') {
-          const r = await this.commitItem(run, done, run.created_by, e);
-          await set({ apply_status: r.status, apply_note: r.note });
+          try {
+            await applied(await this.commitItem(run, done, run.created_by, e));
+          } catch (err) {
+            if (!isGitHubRateLimit(err)) throw err;
+            // Evaluated already: it's applied once GitHub's limit resets.
+            await set({ apply_status: 'pending' });
+            await this.waitRun(run, item, new Date(Date.now() + (err.retryAfterSeconds ?? 60) * 1000), 'github', false);
+          }
         }
       }
     } catch (err) {
+      if (isGitHubRateLimit(err)) {
+        await this.waitRun(run, item, new Date(Date.now() + (err.retryAfterSeconds ?? 60) * 1000), 'github', job === 'evaluate');
+        return;
+      }
       this.deps.log.error({ err: (err as Error).message, run: run.id, submission: item.submission_id }, 're-run failed unexpectedly');
-      await set(job === 'apply' ? { apply_status: 'failed', apply_note: 'Unexpected error' } : { status: 'failed', note: 'Unexpected error', completed_at: new Date() });
+      if (job === 'apply') await applied({ status: 'failed', note: 'Unexpected error' });
+      else await set({ status: 'failed', note: 'Unexpected error', completed_at: new Date() });
     } finally {
       await db.query(
-        `UPDATE triage_runs SET status = 'done', finished_at = now_ms() WHERE id = $1 AND status = 'running'
+        `UPDATE triage_runs SET status = 'done', finished_at = now_ms(), waiting_until_at = NULL, waiting_reason = NULL WHERE id = $1 AND status = 'running'
            AND NOT EXISTS (SELECT 1 FROM triage_run_items WHERE run_id = $1 AND status = 'pending')`,
         [run.id],
       );
@@ -996,7 +1157,10 @@ export class TriageEngine {
     const current = await this.getResult(run.workspace_id, item.submission_id);
     if (current?.status === 'pending') return { status: 'skipped', note: 'Triage is running on this ticket' };
     if ((current?.applied_actions ?? []).length) return { status: 'skipped', note: 'Actions were applied to this ticket since the run started' };
-    const auto = item.auto_actions ?? [];
+    // Approved in bulk: the suggestions are applied too.
+    const withSuggestions = !fresh && item.apply_suggestions;
+    const auto = [...(item.auto_actions ?? []), ...(withSuggestions ? item.suggestions ?? [] : [])];
+    const suggestedIn = withSuggestions ? [] : item.suggestions ?? [];
     if (!fresh && auto.length && deps.github) {
       // A preview may be old: don't act on an issue closed since.
       try {
@@ -1004,11 +1168,12 @@ export class TriageEngine {
         const live = await deps.github.getIssueDetail(conn?.installation_id ?? sub.installation_id, sub.repo_owner, sub.repo_name, sub.issue_number);
         if (live.state === 'closed') return { status: 'skipped', note: 'The issue was closed since the preview' };
       } catch (err) {
+        if (isGitHubRateLimit(err)) throw err;
         return { status: 'failed', note: `GitHub unavailable: ${githubMessage(err)}` };
       }
     }
-    const e: Evaluation = fresh ?? { sub, verdict: item.verdict!, auto, suggested: item.suggestions ?? [], config: run.config_used, inputTokens: 0, outputTokens: 0 };
-    const { applied, suggested, error } = await this.applyAuto(sub, auto, e.suggested, false);
+    const e: Evaluation = fresh ?? { sub, verdict: item.verdict!, auto, suggested: suggestedIn, config: run.config_used, inputTokens: 0, outputTokens: 0 };
+    const { applied, suggested, error } = await this.applyAuto(sub, auto, e.suggested, false, { rateLimitThrows: true });
     const fields = { ...resultFields(e, applied, suggested), error };
     const cols = Object.keys(fields);
     // Tokens stay counted on the run, so a new row has none (the monthly count includes runs).
