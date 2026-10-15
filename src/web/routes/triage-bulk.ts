@@ -28,18 +28,19 @@ const n = (x: number) => x.toLocaleString('en-US');
 export function bulkBar(ctx: WorkspaceRequestContext, o: { matcher: ActionMatcher; selectable: number; matching: number; from: 'inbox' | 'issues'; hidden: Record<string, string | undefined>; back: string }): SafeHtml {
   const m = o.matcher;
   const what = m.narrowed ? m.describe : 'every waiting suggestion';
+  // app.js puts how many of the selected tickets count in front (data-bulk-summary).
   const applyBody = m.narrowed
-    ? `On the selected tickets, ${m.describe} are applied on GitHub: ${m.effects}. Other suggestions stay for review. Tickets without a matching suggestion are left alone. It runs in the background, one ticket at a time, and you can stop it.`
-    : 'Every waiting suggestion on the selected tickets is applied on GitHub, each with its own label, comment and closing. It runs in the background, one ticket at a time, and you can stop it.';
+    ? `Applied on GitHub: ${m.effects}. Other suggestions stay. It runs in the background, and you can stop it.`
+    : 'Each is applied on GitHub with its own label, comment and closing. It runs in the background, and you can stop it.';
   return html`<form id="${FORM}" method="post" action="${ctx.base}/tickets/triage/bulk">${csrfField(ctx.csrf)}
       <input type="hidden" name="from" value="${o.from}"><input type="hidden" name="back" value="${o.back}"><input type="hidden" name="all" value="0">
       ${Object.entries(o.hidden).map(([k, v]) => (v ? html`<input type="hidden" name="${k}" value="${v}">` : ''))}</form>
     <div class="bulk-bar">
-      <span class="small muted" data-selected-text="${FORM}" data-empty-text="Select tickets to apply or dismiss ${what}.">Select tickets to apply or dismiss ${what}.</span>
+      <span class="small muted" data-selected-text="${FORM}" data-count-matches data-empty-text="Select tickets to apply or dismiss ${what}.">Select tickets to apply or dismiss ${what}.</span>
       <div class="row">
         ${o.matching > o.selectable ? html`<button type="button" class="btn sm ghost js-only" data-select-matching="${FORM}" data-matching="${String(o.matching)}">Select all ${n(o.matching)} in this list</button>` : ''}
-        ${submitBtn('Dismiss', { size: 'sm', variant: 'ghost', name: 'op', value: 'dismiss', form: FORM, attrs: html`data-needs-selection="${FORM}" data-confirm-title="Dismiss ${what}?" data-confirm-body="They’re removed from the selected tickets. Nothing changes on GitHub." data-confirm-label="Dismiss"` })}
-        ${submitBtn('Apply', { size: 'sm', variant: 'primary', icon: 'play', name: 'op', value: 'apply', form: FORM, attrs: html`data-needs-selection="${FORM}" data-confirm-title="Apply ${what}?" data-confirm-body="${applyBody}" data-confirm-label="Apply on GitHub"` })}
+        ${submitBtn('Dismiss', { size: 'sm', variant: 'ghost', name: 'op', value: 'dismiss', form: FORM, attrs: html`data-needs-selection="${FORM}" data-bulk-summary="${FORM}" data-confirm-title="Dismiss ${what}?" data-confirm-body="Nothing changes on GitHub." data-confirm-label="Dismiss"` })}
+        ${submitBtn('Apply', { size: 'sm', variant: 'primary', icon: 'play', name: 'op', value: 'apply', form: FORM, attrs: html`data-needs-selection="${FORM}" data-bulk-summary="${FORM}" data-confirm-title="Apply ${what}?" data-confirm-body="${applyBody}" data-confirm-label="Apply on GitHub"` })}
       </div>
     </div>
     <p class="card-note">${m.narrowed ? html`Apply and Dismiss only take <strong>${m.describe}</strong> (${m.effects}). Other suggestions on these tickets stay.` : html`No action filter: Apply and Dismiss take <strong>every waiting suggestion</strong>. Filter by “Flagged as”, priority, label or confidence to take only some.`} Follow it in <a href="${ctx.base}/tickets/triage/activity?source=review">Triage › Activity</a>.</p>`;
@@ -102,10 +103,12 @@ export function registerTriageBulkRoutes(app: FastifyInstance, web: Web): void {
       const what = actionMatcher(filter, settings.config).describe;
       if (one('op') === 'dismiss') {
         const r = await web.triage.dismissBulk(wid, ctx.user.id, { subjects, filter });
-        setFlash(reply, r.suggestions ? 'success' : 'error', r.suggestions ? `Dismissed ${plural(r.suggestions, 'suggestion')} on ${plural(r.tickets, 'ticket')}.` : 'None of these had a matching suggestion waiting.');
+        const skipped = subjects.length - r.tickets;
+        setFlash(reply, r.suggestions ? 'success' : 'error', r.suggestions ? `Dismissed ${plural(r.suggestions, 'suggestion')} on ${plural(r.tickets, 'ticket')}${skipped ? ` (${n(skipped)} had nothing to dismiss)` : ''}.` : 'None of these had a matching suggestion waiting.');
       } else {
         const r = await web.triage.startBulk(wid, ctx.user.id, { subjects, filter });
-        setFlash(reply, 'success', `Applying ${what} on ${plural(r.count, 'ticket').replace(/^\d+/, n(r.count))}, one at a time. Progress is shown above the list.`);
+        const skipped = subjects.length - r.count;
+        setFlash(reply, 'success', `Applying ${what} on ${plural(r.count, 'ticket').replace(/^\d+/, n(r.count))}${skipped ? ` (${n(skipped)} had nothing to apply)` : ''}. Progress is shown above the list.`);
       }
     } catch (err) {
       if (!(err instanceof UserFacingError)) throw err;

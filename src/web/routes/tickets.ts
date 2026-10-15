@@ -150,18 +150,19 @@ function issueRef(s: SubmissionRow): SafeHtml {
  * Ticket list: a table on desktop and stacked rows on phones. Rows carry `data-search`
  * (title, reporter, reference, app) for the inbox's instant filter.
  */
-export function ticketList(base: string, rows: SubmissionRow[], titleOf: (s: SubmissionRow) => string | null, names: Map<string, string>, o: { compact?: boolean; triage?: Map<string, TriageSummary>; select?: (s: SubmissionRow) => boolean } = {}): SafeHtml {
+export function ticketList(base: string, rows: SubmissionRow[], titleOf: (s: SubmissionRow) => string | null, names: Map<string, string>, o: { compact?: boolean; triage?: Map<string, TriageSummary>; select?: { matches: (s: SubmissionRow) => boolean } } = {}): SafeHtml {
   const view = rows.map((s) => {
     const title = titleOf(s) ?? s.ref;
     return { s, title, href: `${base}/tickets/${s.id}`, search: [title, s.reporter_display_name, s.reporter_username, s.ref, s.app_name].filter(Boolean).join(' ').toLowerCase(), reason: statusReason(s, names) };
   });
   const test = (s: SubmissionRow) => (s.source === 'admin_test' ? html` ${tag('Test')}` : '');
-  // Bulk Apply/Dismiss: tickets with a matching suggestion can be ticked (desktop table).
-  const selectable = o.select && rows.some(o.select) ? o.select : null;
+  // Bulk Apply/Dismiss: every ticket can be ticked (desktop table); data-match marks the ones
+  // with a matching suggestion, so the bar and the confirmation can say how many count.
+  const selectable = o.select ?? null;
   return html`<div class="table-wrap only-desktop" data-search-wrap><table>
       <thead><tr>${selectable ? html`<th class="check-col"><input type="checkbox" class="rule-check" data-select-all="bulk-triage" aria-label="Select every ticket on this page"></th>` : ''}<th>Ticket</th>${o.compact ? '' : html`<th>Reporter</th>`}<th>Status</th>${o.triage ? html`<th>Triage</th>` : ''}${o.compact ? '' : html`<th>GitHub issue</th>`}<th class="num">Updated</th></tr></thead>
       <tbody>${view.map((v) => html`<tr class="click" data-search="${v.search}">
-        ${selectable ? html`<td class="check-col">${selectable(v.s) ? html`<input type="checkbox" class="rule-check" name="ticket" value="sub:${v.s.id}" form="bulk-triage" aria-label="Select ${v.title}">` : ''}</td>` : ''}
+        ${selectable ? html`<td class="check-col"><input type="checkbox" class="rule-check" name="ticket" value="sub:${v.s.id}" form="bulk-triage" ${selectable.matches(v.s) ? raw('data-match') : ''} aria-label="Select ${v.title}"></td>` : ''}
         <td><a class="cell-title" href="${v.href}">${v.title}</a>${test(v.s)}<div class="sub">${appLine(v.s)}</div></td>
         ${o.compact ? '' : html`<td><span class="who-cell">${avatar(v.s.reporter_display_name, 20)}<span class="small">${v.s.reporter_display_name}</span></span></td>`}
         <td>${statusPill(v.s.status)}${v.reason && !o.compact ? html`<div class="sub">${v.reason}</div>` : ''}</td>
@@ -448,11 +449,10 @@ export function registerTicketRoutes(app: FastifyInstance, web: Web): void {
     // Bulk Apply/Dismiss of the suggestions these filters are about.
     const act = triageOn && can(ctx.membership, 'tickets.act');
     const matcher = actionMatcher({ triage: triageSpec?.value, conf: confSpec?.value }, triageSettings.config);
-    const selectable = (s: SubmissionRow) => {
+    const matches = (s: SubmissionRow) => {
       const t = triage?.get(s.id);
-      return act && t?.status === 'done' && (t.suggestions ?? []).some(matcher.test);
+      return t?.status === 'done' && (t.suggestions ?? []).some(matcher.test);
     };
-    const selectableCount = rows.filter(selectable).length;
     const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
     const link = (p: Record<string, string | number | undefined>) => {
       const params = new URLSearchParams();
@@ -490,9 +490,9 @@ export function registerTicketRoutes(app: FastifyInstance, web: Web): void {
           </form>
         </div>
         ${act ? await bulkBanner(web, ctx) : ''}
-        ${selectableCount ? bulkBar(ctx, { matcher, selectable: selectableCount, matching: total, from: 'inbox', hidden: { status: filter.key, q: search || undefined, app: appId, type: typeName, triage: triageFilter, conf }, back: link({ page }) }) : ''}
+        ${act && rows.length ? bulkBar(ctx, { matcher, selectable: rows.length, matching: total, from: 'inbox', hidden: { status: filter.key, q: search || undefined, app: appId, type: typeName, triage: triageFilter, conf }, back: link({ page }) }) : ''}
         <div class="card-b flush" id="ticket-rows">
-          ${rows.length ? ticketList(b, rows, (s) => decryptPayload(deps.box, s)?.title ?? null, names, { triage, select: selectableCount ? selectable : undefined }) : emptyState}
+          ${rows.length ? ticketList(b, rows, (s) => decryptPayload(deps.box, s)?.title ?? null, names, { triage, select: act ? { matches } : undefined }) : emptyState}
           <div id="no-match" hidden>${empty('search-x', 'No tickets match', html`Nothing on this page matches “<span data-term></span>”. Press Enter to search all tickets by reporter or reference.`, html`<button type="button" class="btn" data-clear-search>Clear search</button>`)}</div>
         </div>
         ${pages > 1 ? html`<div class="pager"><span>Page ${String(page)} of ${String(pages)} · ${plural(total, 'ticket')}</span><div class="row">

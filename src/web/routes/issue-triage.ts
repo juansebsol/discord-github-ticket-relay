@@ -128,9 +128,9 @@ export function registerIssueTriageRoutes(app: FastifyInstance, web: Web): void 
     // Bulk Apply/Dismiss: people who can act pick issues with a matching suggestion.
     const act = can(ctx.membership, 'tickets.act');
     const matcher = actionMatcher({ triage: extra?.value, conf: confSpec?.value }, settings.config);
-    const selectable = (r: Row) => act && r.status === 'done' && (r.suggestions ?? []).some(matcher.test);
+    const matches = (r: Row) => r.status === 'done' && (r.suggestions ?? []).some(matcher.test);
     const shownRows = rows.slice(0, PAGE);
-    const anySelectable = shownRows.some(selectable);
+    const anySelectable = act && shownRows.length > 0;
     const hasMore = rows.length > PAGE;
     const link = (o: { show?: Show; page?: number }) => {
       const p = new URLSearchParams();
@@ -143,7 +143,7 @@ export function registerIssueTriageRoutes(app: FastifyInstance, web: Web): void 
       return `${b}/tickets/issues/triage${qs ? `?${qs}` : ''}`;
     };
     const list = shownRows.map((r) => html`<li class="issue-row">
-        ${anySelectable ? html`<span class="check-cell">${selectable(r) ? html`<input type="checkbox" class="rule-check" name="ticket" value="gh:${String(r.repo_id)}:${String(r.number)}" form="bulk-triage" aria-label="Select issue #${String(r.number)}">` : ''}</span>` : ''}
+        ${anySelectable ? html`<span class="check-cell"><input type="checkbox" class="rule-check" name="ticket" value="gh:${String(r.repo_id)}:${String(r.number)}" form="bulk-triage" ${matches(r) ? raw('data-match') : ''} aria-label="Select issue #${String(r.number)}"></span>` : ''}
         <span class="issue-ic">${icon(r.issue_state === 'closed' ? 'circle-check' : 'circle-dot', 16, r.issue_state === 'closed' ? 'muted' : 'ok')}</span>
         <div class="grow">
           <div class="issue-t"><a href="${b}/tickets/issues/${String(r.repo_id)}/${String(r.number)}">${r.title ?? `Issue #${r.number}`}</a> <span class="muted nowrap">#${String(r.number)}</span></div>
@@ -164,7 +164,7 @@ export function registerIssueTriageRoutes(app: FastifyInstance, web: Web): void 
               ${selectWrap(html`<select name="conf" aria-label="Filter by triage confidence" data-autosubmit><option value="">Any confidence</option>${CONFIDENCE_STEPS.map((c) => html`<option value="${String(c)}" ${String(c) === confSpec?.value ? raw('selected') : ''}>Confidence ${String(c)}%+</option>`)}</select>`, { sm: true })}
               <button type="submit" class="btn sm nojs">Show</button></form></div>
           ${act ? await bulkBanner(web, ctx) : ''}
-          ${anySelectable ? bulkBar(ctx, { matcher, selectable: shownRows.filter(selectable).length, matching: Number(total[0]?.n ?? 0), from: 'issues', hidden: { show: show.key, f: extra?.value, conf: confSpec?.value }, back: link({ page }) }) : ''}
+          ${anySelectable ? bulkBar(ctx, { matcher, selectable: shownRows.length, matching: Number(total[0]?.n ?? 0), from: 'issues', hidden: { show: show.key, f: extra?.value, conf: confSpec?.value }, back: link({ page }) }) : ''}
           <div class="card-b flush">${list.length
             ? html`<ul class="list issues">${anySelectable ? html`<li class="issue-row select-all-row"><span class="check-cell"><input type="checkbox" class="rule-check" data-select-all="bulk-triage" aria-label="Select every issue on this page"></span><span class="small muted">Select all on this page</span></li>` : ''}${list}</ul>`
             : empty('inbox', show.key === 'review' ? 'Nothing to review' : 'No issues here', show.key === 'review' ? 'Triage suggestions for issues opened on GitHub show up here.' : 'Nothing matches this filter.')}</div>

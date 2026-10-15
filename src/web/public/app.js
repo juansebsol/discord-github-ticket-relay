@@ -132,6 +132,17 @@
   // ---- Confirmations and loading states -------------------------------------------------------
 
   var confirmDialog = document.getElementById('confirm-dialog');
+  /** Bulk triage: one line on which of the selected tickets count, before the confirmation. */
+  function bulkSummary(formId) {
+    if (!formId) return '';
+    var form = document.getElementById(formId);
+    var all = form && form.querySelector('input[name="all"]');
+    if (all && all.value === '1') return 'Tickets with nothing matching are skipped. ';
+    var boxes = $$('input[type="checkbox"][form="' + formId + '"]').filter(function (b) { return b.checked; });
+    var matched = boxes.filter(function (b) { return b.hasAttribute('data-match'); }).length;
+    if (matched === boxes.length) return 'All ' + boxes.length + ' selected have a matching suggestion. ';
+    return matched + ' of the ' + boxes.length + ' selected have a matching suggestion; the other ' + (boxes.length - matched) + ' are skipped. ';
+  }
   var pending = null;
   if (confirmDialog) {
     $('#confirm-ok', confirmDialog).addEventListener('click', function () {
@@ -153,7 +164,7 @@
       closeMenu(false);
       pending = { form: form, submitter: e.submitter };
       $('#confirm-title', confirmDialog).textContent = src.getAttribute('data-confirm-title');
-      $('#confirm-body', confirmDialog).textContent = src.getAttribute('data-confirm-body') || '';
+      $('#confirm-body', confirmDialog).textContent = bulkSummary(src.getAttribute('data-bulk-summary')) + (src.getAttribute('data-confirm-body') || '');
       var ok = $('#confirm-ok', confirmDialog);
       ok.textContent = src.getAttribute('data-confirm-label') || 'Confirm';
       ok.className = 'btn ' + (src.hasAttribute('data-confirm-danger') ? 'danger-solid' : 'primary');
@@ -611,10 +622,16 @@
       all.checked = n > 0 && n === boxes.length;
       all.indeterminate = n > 0 && n < boxes.length;
     });
+    // Bulk triage: how many of the selected have a matching suggestion (data-match).
+    var matched = boxes.filter(function (b) { return b.checked && b.hasAttribute('data-match'); }).length;
+    var counting = false;
     $$('[data-selected-text="' + formId + '"]').forEach(function (t) {
-      t.textContent = n ? n + (n === 1 ? ' ticket selected' : ' tickets selected') : t.getAttribute('data-empty-text') || 'Select tickets to delete their files.';
+      counting = counting || t.hasAttribute('data-count-matches');
+      var text = n ? n + (n === 1 ? ' ticket selected' : ' tickets selected') : t.getAttribute('data-empty-text') || 'Select tickets to delete their files.';
+      if (n && t.hasAttribute('data-count-matches') && matched < n) text = n + ' selected · ' + (matched ? matched + ' with a matching suggestion' : 'none with a matching suggestion');
+      t.textContent = text;
     });
-    $$('[data-needs-selection="' + formId + '"]').forEach(function (b) { b.disabled = n === 0; });
+    $$('[data-needs-selection="' + formId + '"]').forEach(function (b) { b.disabled = n === 0 || (counting && matched === 0); });
   }
   $$('[data-select-all]').forEach(function (all) {
     var formId = all.getAttribute('data-select-all');

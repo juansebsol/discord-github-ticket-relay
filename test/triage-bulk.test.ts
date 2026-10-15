@@ -61,8 +61,9 @@ describe('bulk Apply and Dismiss in the inbox', () => {
   it('applies only the filtered suggestions (spam at 80%+), on everything in the list, one at a time', async () => {
     const { sure, unsure, real } = await setup();
     const page = await env.server.inject({ method: 'GET', url: `${w()}/tickets?status=all&triage=f:spam&conf=80`, ...get(ws.owner) });
-    expect(page.body).toContain(`value="sub:${sure.id}" form="bulk-triage"`);
-    expect(page.body).not.toContain(`value="sub:${unsure.id}" form="bulk-triage"`);
+    // Every ticket can be picked; only the ones with a matching suggestion count.
+    expect(page.body).toContain(`value="sub:${sure.id}" form="bulk-triage" data-match`);
+    expect(page.body).toContain(`value="sub:${unsure.id}" form="bulk-triage"  aria-label`);
     expect(page.body).toContain('data-confirm-title="Apply “Spam” suggestions at 80%+ confidence?"');
     expect(page.body).toContain('adds “spam” · posts your comment · closes the issue');
 
