@@ -71,6 +71,11 @@ function navItem(href: string, label: string, name: IconName, active: boolean, t
   return html`<a href="${href}" class="nav-item" ${active ? raw('aria-current="page"') : ''}>${icon(name)}<span>${label}</span>${trail ? html`<span class="trail">${trail}</span>` : ''}</a>`;
 }
 
+/** A page this person can't open: shown greyed out with a lock, so they know it exists. */
+function lockedNavItem(label: string, name: IconName): SafeHtml {
+  return html`<span class="nav-item locked" aria-disabled="true" title="Only admins can open ${label}. Ask an admin if you need access.">${icon(name)}<span>${label}</span><span class="trail">${icon('lock', 14)}<span class="sr-only"> (admins only)</span></span></span>`;
+}
+
 function stepMark(state: StepState): SafeHtml {
   if (state === 'done') return html`${icon('circle-check', 14, 'ok')}<span class="sr-only"> (done)</span>`;
   if (state === 'problem') return html`${icon('triangle-alert', 14, 'warn')}<span class="sr-only"> (needs attention)</span>`;
@@ -101,19 +106,18 @@ export function layout(ctx: PageContext, opts: { title: string; active: string; 
   const nav = ws && access
     ? html`<nav class="nav" aria-label="Main">
         ${navItem(base, 'Overview', 'layout-dashboard', a === 'overview')}
-        ${manage ? html`<div class="nav-label">General setup</div>
-          ${navItem(`${base}/setup/github`, 'GitHub', 'github', a === 'github', stepMark(p?.github ?? 'todo'))}
-          ${navItem(`${base}/setup/discord`, 'Discord', 'message-circle', a === 'discord', stepMark(p?.discord ?? 'todo'))}
-          ${navItem(`${base}/apps`, 'Apps & repositories', 'boxes', a === 'apps', stepMark(p?.apps ?? 'todo'))}` : ''}
+        <div class="nav-label">General setup</div>
+        ${manage ? navItem(`${base}/setup/github`, 'GitHub', 'github', a === 'github', stepMark(p?.github ?? 'todo')) : lockedNavItem('GitHub', 'github')}
+        ${manage ? navItem(`${base}/setup/discord`, 'Discord', 'message-circle', a === 'discord', stepMark(p?.discord ?? 'todo')) : lockedNavItem('Discord', 'message-circle')}
+        ${manage ? navItem(`${base}/apps`, 'Apps & repositories', 'boxes', a === 'apps', stepMark(p?.apps ?? 'todo')) : lockedNavItem('Apps & repositories', 'boxes')}
         <div class="nav-label">Utilities</div>
         ${navItem(`${base}/tickets`, 'Tickets', 'ticket', a === 'tickets', attention)}
-        ${can(access, 'contrib.view') ? navItem(`${base}/contributors`, 'Contributor Roles', 'award', a === 'contributors') : ''}
-        ${manage ? html`<div class="nav-label">Workspace</div>
-          ${navItem(`${base}/members`, 'Members & permissions', 'users', a === 'members')}
-          ${navItem(`${base}/settings`, 'Settings', 'settings', a === 'settings')}
-          ${navItem(`${base}/deployment`, 'Deployment', 'server', a === 'deployment')}
-          ${navItem(`${base}/health`, 'Server health', 'activity', a === 'health')}`
-          : can(access, 'health.view') ? html`<div class="nav-label">Workspace</div>${navItem(`${base}/health`, 'Server health', 'activity', a === 'health')}` : ''}
+        ${can(access, 'contrib.view') ? navItem(`${base}/contributors`, 'Contributor Roles', 'award', a === 'contributors') : lockedNavItem('Contributor Roles', 'award')}
+        <div class="nav-label">Workspace</div>
+        ${manage ? navItem(`${base}/members`, 'Members & permissions', 'users', a === 'members') : lockedNavItem('Members & permissions', 'users')}
+        ${manage ? navItem(`${base}/settings`, 'Settings', 'settings', a === 'settings') : lockedNavItem('Settings', 'settings')}
+        ${manage ? navItem(`${base}/deployment`, 'Deployment', 'server', a === 'deployment') : lockedNavItem('Deployment', 'server')}
+        ${can(access, 'health.view') ? navItem(`${base}/health`, 'Server health', 'activity', a === 'health') : lockedNavItem('Server health', 'activity')}
       </nav>`
     : html``;
 

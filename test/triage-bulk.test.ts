@@ -113,6 +113,12 @@ describe('bulk Apply and Dismiss in the inbox', () => {
     expect((await bulk({ op: 'apply', triage: 'f:spam', ticket: [`sub:${sure.id}`] }, mod)).statusCode).toBe(403);
     const modInbox = await env.server.inject({ method: 'GET', url: `${w()}/tickets?status=all`, ...get(mod) });
     expect(modInbox.body).not.toContain('form="bulk-triage"');
+    // Moderators see the pages they can't open, locked, and can't follow them.
+    expect(modInbox.body).toContain('class="nav-item locked"');
+    expect(modInbox.body).toContain('Only admins can open Settings.');
+    expect(modInbox.body).not.toContain(`href="${w()}/settings"`);
+    const ownerInbox = await env.server.inject({ method: 'GET', url: `${w()}/tickets?status=all`, ...get(ws.owner) });
+    expect(ownerInbox.body).not.toContain('nav-item locked');
   });
 });
 

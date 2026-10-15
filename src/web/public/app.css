@@ -1043,3 +1043,8 @@ progress.bar.wide { max-width: none; }
 .bulk-line > .ic { flex: none; }
 .issue-row .check-cell { flex: none; display: flex; align-items: center; padding-top: 2px; }
 .select-all-row { min-height: 40px; align-items: center; }
+/* A page this person can't open (moderators): visible, greyed out, with a lock. */
+.nav-item.locked { opacity: 0.6; cursor: not-allowed; user-select: none; }
+.nav-item.locked:hover { background: transparent; }
+.nav-item.locked:hover > .ic { color: var(--muted); }
+.nav-item.locked .trail .ic { color: var(--faint); }
