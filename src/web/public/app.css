@@ -578,7 +578,7 @@ dialog.dialog form { margin: 0; }
 
 /* ---- Toast --------------------------------------------------------------------------------- */
 
-.toasts { position: fixed; right: 24px; bottom: calc(24px + env(safe-area-inset-bottom, 0px)); z-index: 70; display: flex; flex-direction: column; gap: 8px; align-items: flex-end; pointer-events: none; }
+.toasts { position: fixed; right: 24px; bottom: calc(24px + env(safe-area-inset-bottom, 0px) + var(--dock-space, 0px)); z-index: 70; display: flex; flex-direction: column; gap: 8px; align-items: flex-end; pointer-events: none; }
 .toast {
   pointer-events: auto; max-width: 360px; min-height: 40px; padding: 10px 14px; display: flex; gap: 10px; align-items: center; background: var(--surface);
   border: 1px solid var(--border); border-radius: var(--r); box-shadow: var(--shadow-pop); font: 500 13px/20px var(--font); color: var(--text);
@@ -756,7 +756,7 @@ dl.props dd .ic { color: var(--muted); }
   .toolbar .filter-selects .select { width: 100%; }
   .stat { padding: 12px; }
   .stat .v { font-size: 20px; line-height: 28px; }
-  .toasts { left: 16px; right: 16px; bottom: 16px; align-items: stretch; }
+  .toasts { left: 16px; right: 16px; bottom: calc(16px + var(--dock-space, 0px)); align-items: stretch; }
   .toast { max-width: none; }
   .fields-2 { grid-template-columns: minmax(0, 1fr); }
   dl.props { grid-template-columns: 88px minmax(0, 1fr); padding: 16px; }
@@ -1089,3 +1089,50 @@ fieldset.view-only .seg-item:hover { color: var(--muted); }
 fieldset.view-only .seg input:checked + .seg-item:hover { color: var(--text); }
 fieldset.view-only .seg input:not(:checked) + .seg-item { opacity: 0.55; }
 fieldset.view-only .link-btn { display: none; }
+
+/* ---- Alerts that follow you around (the corner panel) ------------------------------------- */
+.dock { position: fixed; right: 24px; bottom: calc(24px + env(safe-area-inset-bottom, 0px)); z-index: 20; width: min(408px, calc(100vw - 48px)); display: flex; flex-direction: column; align-items: flex-end; }
+.dock.min { width: auto; }
+.dock-panel { width: 100%; max-height: min(70vh, 560px); overflow-y: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow-pop); }
+.dock.min .dock-panel, .dock:not(.min) .dock-pill { display: none; }
+.dock-panel, .dock-pill { transition: opacity var(--t) var(--ease), transform var(--t) var(--ease); }
+.dock.enter .dock-panel, .dock.enter .dock-pill { opacity: 0; transform: translateY(8px) scale(0.98); }
+.dock-h { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 8px 6px 16px; border-bottom: 1px solid var(--border); font: 500 12px/16px var(--font); color: var(--muted); }
+.dock:not(.multi) .dock-h, .dock.multi .da-tools [data-dock-min] { display: none; }
+.dock-alert { position: relative; display: grid; grid-template-columns: 20px minmax(0, 1fr); gap: 12px; padding: 14px 12px 16px 16px; }
+.dock-alert + .dock-alert:not([hidden]), .dock-alert[hidden] + .dock-alert { border-top: 1px solid var(--border); }
+.dock-alert::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--warn); }
+.dock-alert.danger::before { background: var(--danger); }
+.dock-alert .da-ic { color: var(--warn); padding-top: 1px; }
+.dock-alert.danger .da-ic { color: var(--danger); }
+.da-top { display: flex; align-items: flex-start; gap: 8px; }
+.da-title { flex: 1; min-width: 0; margin: 0; font: 600 14px/22px var(--font); color: var(--text); }
+.da-tools { display: flex; gap: 2px; margin: -3px -4px 0 0; flex: none; }
+.da-text { margin: 2px 0 0; font-size: 13px; line-height: 20px; color: var(--text); }
+.da-meta { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 6px; font-size: 12px; line-height: 16px; color: var(--muted); }
+.da-meta li { display: flex; gap: 8px; align-items: flex-start; }
+.da-meta .ic { flex: none; margin-top: 1px; color: var(--faint); }
+.da-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+/* Minimized: a small icon that stays in the corner, with how many alerts there are. */
+.dock-pill { position: relative; width: 44px; height: 44px; padding: 0; display: grid; place-items: center; border-radius: var(--r-full); background: var(--surface); border: 1px solid var(--warn-border); color: var(--warn); box-shadow: var(--shadow-pop); cursor: pointer; }
+.dock-pill:hover { border-color: var(--warn); }
+.dock-pill.danger { border-color: var(--danger-border); color: var(--danger); }
+.dock-pill.danger:hover { border-color: var(--danger); }
+.dock-pill:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.dock-pill .n { position: absolute; top: -5px; right: -5px; min-width: 18px; height: 18px; padding: 0 5px; border-radius: var(--r-full); background: var(--warn); color: #fff; font: 600 11px/18px var(--font); text-align: center; font-variant-numeric: tabular-nums; box-shadow: 0 0 0 2px var(--surface); }
+.dock-pill.danger .n { background: var(--danger); }
+.dock-pill::after { content: ""; position: absolute; inset: -1px; border-radius: inherit; border: 2px solid currentColor; opacity: 0; pointer-events: none; animation: dock-ring 2.4s var(--ease) 3; }
+@keyframes dock-ring { 0% { opacity: 0.45; transform: scale(1); } 100% { opacity: 0; transform: scale(1.45); } }
+@media (prefers-reduced-motion: reduce) { .dock-pill::after { animation: none; } .dock-panel, .dock-pill { transition: none; } }
+@media (max-width: 640px) {
+  .dock { right: 12px; left: 12px; bottom: calc(12px + env(safe-area-inset-bottom, 0px)); width: auto; }
+  .dock.min { left: auto; }
+}
+@media print { .dock { display: none; } }
+
+/* ---- Dev mode ------------------------------------------------------------------------------ */
+.nav-tag { display: inline-flex; align-items: center; height: 18px; padding: 0 6px; border-radius: var(--r-full); background: var(--accent-soft); color: var(--accent-text); font: 600 11px/18px var(--font); white-space: nowrap; }
+.dev-switch { align-items: center; gap: 8px; height: 28px; padding: 0 4px 0 10px; border: 1px solid var(--border); border-radius: var(--r-full); }
+.dev-switch label { display: inline-flex; align-items: center; gap: 6px; font: 500 12px/1 var(--font); color: var(--muted); cursor: pointer; white-space: nowrap; }
+.dev-switch:has(input:checked) { border-color: var(--info-border); background: var(--accent-soft); }
+.dev-switch:has(input:checked) label { color: var(--accent-text); }

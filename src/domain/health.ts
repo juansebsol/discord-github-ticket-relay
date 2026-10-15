@@ -7,6 +7,7 @@ import { readFileSync } from 'node:fs';
 import os from 'node:os';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 import type { Db, Queryable } from '../db/database.js';
+import type { DevMode } from './dev-mode.js';
 
 const BEAT_MS = 30_000;
 /** A process that hasn't reported for this long has stopped (or was restarted). */
@@ -128,19 +129,37 @@ export async function samplesSince(q: Queryable, sinceMs: number): Promise<Sampl
 export interface HealthView {
   host: { total: number; available: number; reportedAt: Date } | null;
   running: ProcessRow[];
-  /** Processes of each role that stopped in the last 24 hours (restarts, crashes or deploys). */
+  /** Processes of each role that stopped in the last 24 hours (restarts, crashes or deploys), dev mode left out. */
   restarts: Record<ProcessRole, number>;
+  /** Restarts in the last 24 hours that weren't counted: while dev mode was on, or before it was last turned off. */
+  uncounted: Record<ProcessRole, number>;
   /** Roles that ran in the last 24 hours but have no process reporting now. */
   missing: { role: ProcessRole; lastSeen: Date }[];
 }
 
-export async function healthView(q: Queryable): Promise<HealthView> {
+/**
+ * Whether a process that stopped is counted as a restart. Its last report can be up to one beat
+ * before it stopped, so one that last reported just before dev mode was turned on still counts
+ * as stopping during dev mode.
+ */
+function counted(lastSeen: number, dev: DevMode | undefined): boolean {
+  if (!dev) return true;
+  if (dev.offAt && lastSeen <= dev.offAt.getTime()) return false;
+  if (dev.on && dev.since && lastSeen >= dev.since.getTime() - BEAT_MS - 5_000) return false;
+  return true;
+}
+
+export async function healthView(q: Queryable, dev?: DevMode): Promise<HealthView> {
   const { rows } = await q.query<ProcessRow>('SELECT * FROM process_status WHERE seen_at > now_ms() - 86400000 ORDER BY role, started_at');
   const now = Date.now();
   const order: Record<string, number> = { web: 0, worker: 1, triage: 2 };
   const running = rows.filter((r) => now - r.seen_at.getTime() < STALE_MS).sort((a, b) => (order[a.role] ?? 9) - (order[b.role] ?? 9) || a.started_at.getTime() - b.started_at.getTime());
   const restarts: Record<ProcessRole, number> = { web: 0, worker: 0, triage: 0 };
-  for (const r of rows) if (now - r.seen_at.getTime() >= STALE_MS && r.role in restarts) restarts[r.role]++;
+  const uncounted: Record<ProcessRole, number> = { web: 0, worker: 0, triage: 0 };
+  for (const r of rows) {
+    if (now - r.seen_at.getTime() < STALE_MS || !(r.role in restarts)) continue;
+    (counted(r.seen_at.getTime(), dev) ? restarts : uncounted)[r.role]++;
+  }
   const latest = [...rows].filter((r) => r.host_total_bytes).sort((a, b) => b.seen_at.getTime() - a.seen_at.getTime())[0];
   const missing: HealthView['missing'] = [];
   for (const role of ['web', 'worker', 'triage'] as ProcessRole[]) {
@@ -152,6 +171,7 @@ export async function healthView(q: Queryable): Promise<HealthView> {
     host: latest ? { total: latest.host_total_bytes!, available: latest.host_available_bytes ?? 0, reportedAt: latest.seen_at } : null,
     running,
     restarts,
+    uncounted,
     missing,
   };
 }

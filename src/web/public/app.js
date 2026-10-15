@@ -254,6 +254,9 @@
           return res.json().catch(function () { return {}; }).then(function (body) {
             if (!res.ok || !body.ok) throw { shown: body.error || (res.status === 403 ? 'You don’t have permission to change this.' : 'Not saved. Reload the page and try again.') };
             toast(body.message || 'Saved');
+            // Dev mode: the sidebar tag follows the switch, and Server health updates right away.
+            if (form.hasAttribute('data-dev-mode')) $$('[data-dev-tag]').forEach(function (t) { t.hidden = !input.checked; });
+            if (form.hasAttribute('data-live-refresh')) document.dispatchEvent(new CustomEvent('tr:live-refresh'));
           });
         })
         .catch(function (err) {
@@ -853,5 +856,176 @@
     setInterval(refresh, ms);
     setInterval(label, 1000);
     document.addEventListener('visibilitychange', function () { if (!document.hidden && Date.now() - last > ms) refresh(); });
+    document.addEventListener('tr:live-refresh', refresh);
   });
+
+  // ---- Alerts that follow you around (AI triage stopped) --------------------------------------
+  //
+  // The server sends the panel for this person; it shows on every page until the problem is
+  // fixed. Minimized, it shrinks to an icon in the corner (until something new comes up, which
+  // opens it again); a dismissed alert stays away until it happens again.
+
+  var dockBox = document.getElementById('alert-dock');
+  if (dockBox) (function () {
+    var src = dockBox.getAttribute('data-dock-src');
+    var SKEY = 'tr.dock.' + dockBox.getAttribute('data-dock-ws');
+    var DKEY = 'tr.dock.dismissed';
+    function read(store, key, fallback) { try { var v = store.getItem(key); return v ? JSON.parse(v) : fallback; } catch (e) { return fallback; } }
+    function write(store, key, value) { try { store.setItem(key, JSON.stringify(value)); } catch (e) { /* storage off: still works for this page */ } }
+    // This tab: the last panel (shown right away on the next page), its alerts and what was minimized.
+    var state = read(sessionStorage, SKEY, null) || { html: '', ids: [], resolved: {}, min: [] };
+    var markup = null;
+    var lastFetch = 0;
+
+    function cards() { return $$('[data-alert-id]', dockBox); }
+    function idOf(a) { return a.getAttribute('data-alert-id'); }
+    function shown() { return cards().filter(function (a) { return !a.hidden; }); }
+    // Toasts stack above the panel instead of under it.
+    function setSpace() {
+      var dock = $('.dock', dockBox);
+      var part = dock && !dockBox.hidden ? (dock.classList.contains('min') ? $('[data-dock-open]', dock) : $('.dock-panel', dock)) : null;
+      root.style.setProperty('--dock-space', part ? part.offsetHeight + 12 + 'px' : '0px');
+    }
+    function setMin(dock, min, animate) {
+      dock.classList.toggle('min', min);
+      if (animate && !reduceMotion) {
+        // Start from the "enter" look, then let the transition play (no animation frame needed,
+        // so it also works in a tab that opens in the background).
+        dock.classList.add('enter');
+        void dock.offsetWidth;
+        dock.classList.remove('enter');
+      }
+      setSpace();
+    }
+    function show(html, animate) {
+      if (html !== markup) { dockBox.innerHTML = html; markup = html; }
+      var dismissed = read(localStorage, DKEY, []);
+      var visible = cards().filter(function (a) {
+        // Left out: dismissed, or the page shows the same thing itself (Triage › Actions).
+        var inline = a.getAttribute('data-inline');
+        a.hidden = dismissed.indexOf(idOf(a)) !== -1 || Boolean(inline && document.getElementById(inline));
+        return !a.hidden;
+      });
+      var dock = $('.dock', dockBox);
+      dockBox.hidden = !dock || !visible.length;
+      if (dockBox.hidden) return setSpace();
+      dock.classList.toggle('multi', visible.length > 1);
+      var count = $('[data-dock-count]', dock);
+      if (count) count.textContent = visible.length + ' alerts';
+      var n = $('[data-dock-n]', dock);
+      if (n) n.textContent = String(visible.length);
+      var pill = $('[data-dock-open]', dock);
+      var titles = visible.map(function (a) { return a.getAttribute('data-title'); }).join(' · ');
+      pill.setAttribute('aria-label', 'Show alerts: ' + titles);
+      pill.setAttribute('title', titles);
+      var min = visible.every(function (a) { return state.min.indexOf(idOf(a)) !== -1; });
+      setMin(dock, min, animate && !min);
+    }
+    function remember(html) {
+      var tmp = document.createElement('div');
+      tmp.innerHTML = html;
+      var list = $$('[data-alert-id]', tmp);
+      var ids = list.map(idOf);
+      var dismissed = read(localStorage, DKEY, []);
+      // Fixed since this tab last looked: say so (unless it was dismissed).
+      state.ids.forEach(function (id) {
+        if (ids.indexOf(id) === -1 && state.resolved[id] && dismissed.indexOf(id) === -1) toast(state.resolved[id]);
+      });
+      var resolved = {};
+      list.forEach(function (a) { if (a.getAttribute('data-resolved')) resolved[idOf(a)] = a.getAttribute('data-resolved'); });
+      state = { html: html, ids: ids, resolved: resolved, min: state.min.filter(function (id) { return ids.indexOf(id) !== -1; }) };
+      write(sessionStorage, SKEY, state);
+    }
+    function refresh() {
+      if (document.hidden || !src) return;
+      lastFetch = Date.now();
+      fetch(src, { credentials: 'same-origin', headers: { accept: 'text/html' } })
+        .then(function (res) {
+          // A signed-out session redirects to the sign-in page: never paste that in.
+          if (!res.ok || res.headers.get('x-live-partial') !== '1') throw new Error('not alerts');
+          return res.text();
+        })
+        .then(function (html) {
+          var changed = html !== state.html;
+          remember(html);
+          show(html, changed);
+        })
+        .catch(function () { /* keep what's shown */ });
+    }
+    function minimize(dock) {
+      state.min = shown().map(idOf);
+      write(sessionStorage, SKEY, state);
+      setMin(dock, true, false);
+      $('[data-dock-open]', dock).focus();
+    }
+
+    if (state.html) show(state.html, false);
+    refresh();
+    setInterval(refresh, 60000);
+    document.addEventListener('visibilitychange', function () { if (!document.hidden && Date.now() - lastFetch > 30000) refresh(); });
+    window.addEventListener('resize', setSpace);
+
+    dockBox.addEventListener('click', function (e) {
+      var dock = $('.dock', dockBox);
+      if (!dock) return;
+      if (e.target.closest('[data-dock-min]')) return minimize(dock);
+      if (e.target.closest('[data-dock-open]')) {
+        state.min = [];
+        write(sessionStorage, SKEY, state);
+        setMin(dock, false, true);
+        var first = $('.dock-panel a, .dock-panel button:not([data-dock-min]):not([data-alert-dismiss])', dock);
+        if (first) first.focus({ preventScroll: true });
+        return;
+      }
+      var dismiss = e.target.closest('[data-alert-dismiss]');
+      if (dismiss) {
+        var gone = read(localStorage, DKEY, []);
+        gone.push(idOf(dismiss.closest('[data-alert-id]')));
+        write(localStorage, DKEY, gone.slice(-50));
+        show(markup, false);
+        // Keyboard users carry on with the next alert.
+        var next = shown()[0];
+        var target = next && $('button, a', next);
+        if (target) target.focus({ preventScroll: true });
+      }
+    });
+    dockBox.addEventListener('keydown', function (e) {
+      var dock = $('.dock', dockBox);
+      if (e.key === 'Escape' && dock && !dock.classList.contains('min') && !openMenu) minimize(dock);
+    });
+    // Try again: asks Claude without leaving the page, then shows what it found.
+    dockBox.addEventListener('submit', function (e) {
+      var form = e.target.closest('form[data-dock-action]');
+      if (!form) return;
+      e.preventDefault();
+      var button = form.querySelector('button[type="submit"]');
+      var label = button && button.querySelector('.lbl');
+      var text = label && label.textContent;
+      if (button) {
+        button.disabled = true;
+        button.classList.add('loading');
+        if (label && button.dataset.loadingText) label.textContent = button.dataset.loadingText;
+      }
+      var card = form.closest('[data-alert-id]');
+      fetch(form.action, { method: 'POST', body: new URLSearchParams(new FormData(form)), credentials: 'same-origin', headers: { accept: 'application/json' } })
+        .then(function (res) {
+          return res.json().catch(function () { return {}; }).then(function (body) {
+            if (res.ok && body.ok) {
+              // Fixed: this toast says so, not a second one when the alert goes away.
+              if (card) state.ids = state.ids.filter(function (id) { return id !== idOf(card); });
+              toast(body.message || 'Done');
+            } else toast(body.error || (res.status === 403 ? 'You don’t have permission to do this.' : 'That didn’t work. Try again in a minute.'), 'danger');
+          });
+        })
+        .catch(function () { toast('Not sent. Check your connection and try again.', 'danger'); })
+        .then(function () {
+          if (button) {
+            button.disabled = false;
+            button.classList.remove('loading');
+            if (label) label.textContent = text;
+          }
+          refresh();
+        });
+    });
+  })();
 })();

@@ -122,6 +122,10 @@ export function classifyAiError(err: unknown): TriageAiError {
   if (err instanceof Anthropic.APIError && (err.status === 402 || err.type === 'billing_error')) {
     return new TriageAiError('pause', 'The Anthropic account is out of credits.', 'credits');
   }
+  // An empty account usually answers 400 "Your credit balance is too low…", not 402.
+  if (err instanceof Anthropic.BadRequestError && /credit balance/i.test(err.message)) {
+    return new TriageAiError('pause', 'The Anthropic account is out of credits.', 'credits');
+  }
   if (err instanceof Anthropic.NotFoundError) return new TriageAiError('pause', 'The model isn’t available to this API key.', 'model_unavailable');
   if (err instanceof Anthropic.BadRequestError) return new TriageAiError('pause', err.message.replace(/^\d+\s*/, '').slice(0, 300), 'rejected');
   if (err instanceof Anthropic.RateLimitError) {
@@ -157,6 +161,18 @@ export class TriageAi {
       out.push({ id: m.id, name: m.display_name, deprecated: m.lifecycle === 'deprecated' });
     }
     return out;
+  }
+
+  /**
+   * The smallest possible request (one output token), to find out whether Claude works again
+   * with this key and model. Throws a TriageAiError when it doesn't.
+   */
+  async ping(apiKey: string, model: string): Promise<void> {
+    try {
+      await this.client(apiKey).messages.create({ model, max_tokens: 1, messages: [{ role: 'user', content: 'Reply with OK.' }] });
+    } catch (err) {
+      throw classifyAiError(err);
+    }
   }
 
   async classify(apiKey: string, model: string, system: string, user: string, schema: ReturnType<typeof verdictSchema> = VerdictSchema): Promise<Classification> {

@@ -5,14 +5,17 @@ import path from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { APP_ROOT } from '../../config.js';
 import { getFileSettings } from '../../domain/files.js';
+import { getDevMode, setDevMode } from '../../domain/dev-mode.js';
 import { can } from '../../domain/permissions.js';
 import { healthView, samplesSince, type ProcessRole, type ProcessRow, type Sample } from '../../domain/health.js';
 import { indexStatus } from '../../domain/issue-index.js';
 import { listApps } from '../../domain/store.js';
+import { userNames } from '../../domain/workspaces.js';
 import { html, raw, type SafeHtml } from '../../lib/html.js';
-import { getTriageSettings } from '../../triage/settings.js';
+import { autoChecked, getTriageSettings, pauseMessage } from '../../triage/settings.js';
+import { setFlash } from '../session.js';
 import type { Web, WorkspaceRequestContext } from '../server.js';
-import { icon, linkBtn, notice, pageHeader, pill, plural, timeAgo, when, type IconName, type Tone } from '../ui.js';
+import { csrfField, icon, linkBtn, notice, pageHeader, pill, plural, switchInput, tag, timeAgo, when, type IconName, type Tone } from '../ui.js';
 import { keyPill, keyStatus } from './claude.js';
 
 const ROLE_NAMES: Record<ProcessRole, string> = { web: 'Web (console and Discord)', worker: 'Filing worker', triage: 'Triage and issue sync' };
@@ -152,8 +155,9 @@ async function gather(web: Web, ctx: WorkspaceRequestContext) {
   const { deps } = web;
   const wid = ctx.workspace.id;
   const dataDir = path.dirname(deps.config.databasePath);
+  const dev = await getDevMode(deps.db);
   const [h, samples, disk, dbFile, walFile, files, filing, filedDay, failedDay, triage, triageCounts, apps, cleanup, claude] = await Promise.all([
-    healthView(deps.db),
+    healthView(deps.db, dev),
     samplesSince(deps.db, 86_400_000),
     statfs(dataDir).then((s) => ({ total: Number(s.blocks) * Number(s.bsize), free: Number(s.bavail) * Number(s.bsize) })).catch(() => null),
     stat(deps.config.databasePath).then((s) => s.size).catch(() => 0),
@@ -174,11 +178,11 @@ async function gather(web: Web, ctx: WorkspaceRequestContext) {
     getFileSettings(deps.db, wid),
     keyStatus(web, wid, { live: false }),
   ]);
-  const repos = await indexStatus(deps.db, [...new Set(apps.map((a) => a.repo_id))]);
+  const [repos, names] = await Promise.all([indexStatus(deps.db, [...new Set(apps.map((a) => a.repo_id))]), userNames(deps.db, [dev.by])]);
   const github = h.running.map((p) => p.stats?.github).filter((g): g is NonNullable<typeof g> => Boolean(g)).sort((a, b) => b.at.localeCompare(a.at))[0] ?? null;
   const count = (s: string) => filing.find((f) => f.status === s)?.n ?? 0;
   const oldestQueued = filing.filter((f) => f.status === 'pending' || f.status === 'processing').map((f) => f.oldest).filter((n): n is number => n !== null).sort()[0] ?? null;
-  return { h, samples, disk, dbBytes: dbFile + walFile, files, filing: { queued: count('pending') + count('processing'), unconfirmed: count('uncertain'), failed: count('failed'), failedDay, filedDay, oldestQueued }, triage, triageCounts, repos, cleanup, claude, github };
+  return { dev: { ...dev, byName: dev.by ? names.get(dev.by) ?? null : null }, h, samples, disk, dbBytes: dbFile + walFile, files, filing: { queued: count('pending') + count('processing'), unconfirmed: count('uncertain'), failed: count('failed'), failedDay, filedDay, oldestQueued }, triage, triageCounts, repos, cleanup, claude, github };
 }
 
 type Data = Awaited<ReturnType<typeof gather>>;
@@ -196,14 +200,17 @@ function alertsFor(d: Data, base: string, links: Links): Alert[] {
     if ((p.stats?.lagP99Ms ?? 0) > 250) out.push({ tone: 'warn', title: `${ROLE_NAMES[p.role]} is slow to respond`, text: `Work waits up to ${Math.round(p.stats!.lagP99Ms)} ms before it runs. The server may be overloaded.` });
   }
   for (const role of ['web', 'worker', 'triage'] as ProcessRole[]) {
-    if (h.restarts[role] >= 3) out.push({ tone: 'warn', title: `${ROLE_NAMES[role]} restarted ${h.restarts[role]} times in 24 hours`, text: 'Deploys count too. If you didn’t deploy that often, check pm2 logs for crashes.' });
+    if (h.restarts[role] >= 3) out.push({ tone: 'warn', title: `${ROLE_NAMES[role]} restarted ${h.restarts[role]} times in 24 hours`, text: 'If these were deploys, turn on Dev mode while you deploy so they aren’t counted. Otherwise check pm2 logs for crashes.' });
   }
   if (h.host && (h.host.available < 300 * MB || h.host.available / h.host.total < 0.15)) out.push({ tone: 'warn', title: 'The server is low on memory', text: `${gb(h.host.available)} of ${gb(h.host.total)} available.` });
   // Space left matters, not the percentage: 27 GB free on a big disk is fine.
   if (d.disk && (d.disk.free < 3 * GB || (d.disk.free < 10 * GB && d.disk.free / d.disk.total < 0.05))) out.push({ tone: d.disk.free < GB ? 'danger' : 'warn', title: 'The disk is almost full', text: `${gb(d.disk.free)} free of ${gb(d.disk.total)}. New attachments stop being saved below 1 GB.`, action: links.files ? { href: `${base}/tickets/files`, label: 'Clean up files' } : undefined });
   if (d.filing.failedDay) out.push({ tone: 'warn', title: `${plural(d.filing.failedDay, 'ticket')} couldn’t be filed in the last 24 hours`, text: 'They’re waiting in the inbox for someone to retry or close them.', action: { href: `${base}/tickets?status=attention`, label: 'Open inbox' } });
   if (d.filing.oldestQueued && Date.now() - d.filing.oldestQueued > 15 * 60_000) out.push({ tone: 'warn', title: 'Tickets are waiting to be filed', text: `The oldest has been queued since ${timeAgo(new Date(d.filing.oldestQueued))}. GitHub may be unavailable; they’re retried automatically.` });
-  if (d.triage.enabled && d.triage.paused) out.push({ tone: 'warn', title: 'AI triage is paused', text: 'Tickets are still filed. Fix the reason shown on the Triage tab, then resume.', action: links.triage ? { href: `${base}/tickets/triage`, label: 'Open Triage' } : undefined });
+  if ((d.triage.enabled || d.triage.githubEnabled) && d.triage.paused) {
+    const p = d.triage.paused;
+    out.push({ tone: 'warn', title: 'AI triage is paused', text: `${pauseMessage(p.reason, p.detail, d.triage.config.model)} Tickets are still filed.${autoChecked(p) ? '' : ' Press Try again on the Triage tab once it’s fixed.'}`, action: links.triage ? { href: `${base}/tickets/triage`, label: 'Open Triage' } : undefined });
+  }
   if (d.claude.state === 'rejected' || d.claude.state === 'credits') out.push({ tone: d.claude.state === 'rejected' ? 'danger' : 'warn', title: d.claude.state === 'rejected' ? 'Claude rejected the API key' : 'The Anthropic account is out of credits', text: 'Features that use Claude are paused. Tickets are still filed.', action: links.settings ? { href: `${base}/settings#claude`, label: 'Open Settings' } : undefined });
   for (const r of d.repos) if (r.status === 'error') out.push({ tone: 'warn', title: `Issue sync problem for ${r.owner}/${r.name}`, text: r.last_error ?? 'GitHub couldn’t be reached.', action: links.issues ? { href: `${base}/tickets/issues`, label: 'Open Issues' } : undefined });
   if (d.github && d.github.remaining / d.github.limit < 0.1) out.push({ tone: 'warn', title: 'GitHub API requests are running low', text: `${d.github.remaining} of ${d.github.limit} left until ${new Date(d.github.resetAt).toISOString().slice(11, 16)} UTC. Work slows down until then.` });
@@ -236,11 +243,17 @@ function processRows(d: Data): SafeHtml {
       <td class="num"><span class="small">${cpu.toFixed(1)}%</span>${sparkline(byProcess(p.id, (s) => s.cpu_pct), { maxY: 100, cls: ROLE_CLASS[p.role], label: 'CPU over the last 2 hours' })}</td>
       <td class="num"><span class="small ${lag > 250 ? 'warn-text' : ''}">${lag < 1 ? '<1' : String(Math.round(lag))} ms</span></td>
       <td class="num">${when(p.started_at)}</td>
-      <td class="num">${d.h.restarts[p.role] > 3 ? html`<span class="warn-text">${String(d.h.restarts[p.role])}</span>` : String(d.h.restarts[p.role])}</td></tr>`;
+      <td class="num">${d.h.restarts[p.role] > 3 ? html`<span class="warn-text">${String(d.h.restarts[p.role])}</span>` : String(d.h.restarts[p.role])}${d.h.uncounted[p.role] ? html`<div class="sub" title="Restarts while dev mode was on, or before it was last turned off">+${String(d.h.uncounted[p.role])} in dev mode</div>` : ''}</td></tr>`;
   });
   const stopped = d.h.missing.map((m) => html`<tr class="off-row"><td><div class="who-cell"><span class="key ${ROLE_CLASS[m.role]}" aria-hidden="true"></span><div><div class="cell-title">${ROLE_NAMES[m.role]}</div><div class="sub">Not reporting</div></div></div></td>
     <td colspan="6">${pill('Stopped', 'danger')} <span class="small muted">Last report ${timeAgo(m.lastSeen)}</span></td></tr>`);
   return html`${rows}${stopped}`;
+}
+
+/** While dev mode is on: what it does, since when, and what it has left out so far. */
+function devNotice(d: Data): SafeHtml {
+  const left = d.h.uncounted.web + d.h.uncounted.worker + d.h.uncounted.triage;
+  return notice('info', 'Dev mode is on', html`Restarts aren’t counted while you deploy${left ? ` (${plural(left, 'restart')} so far)` : ''}. Turned on ${timeAgo(d.dev.since!)}${d.dev.byName ? ` by ${d.dev.byName}` : ''}. Turn it off when you’re done, and counting starts again from zero.`, { icon: 'wrench' });
 }
 
 function liveBody(d: Data, base: string, links: Links): SafeHtml {
@@ -269,7 +282,7 @@ function liveBody(d: Data, base: string, links: Links): SafeHtml {
     <div class="card">
       <div class="card-h"><div><div class="title"><h2>Status</h2>${worst === 'ok' ? pill('All good', 'ok') : worst === 'warn' ? pill(plural(alerts.length, 'thing') + ' to check', 'warn') : pill('Needs attention', 'danger')}</div>
         <div class="desc">${worst === 'ok' ? 'Every process is running and within its limits. Nothing needs your attention.' : 'Here’s what needs a look, most important first.'}</div></div></div>
-      ${alerts.length ? html`<div class="card-b alerts">${alerts.sort((a, b) => (a.tone === b.tone ? 0 : a.tone === 'danger' ? -1 : 1)).map((a) => notice(a.tone, a.title, a.text, { action: a.action ? linkBtn(a.action.href, a.action.label, { size: 'sm' }) : null }))}</div>` : ''}
+      ${alerts.length || d.dev.on ? html`<div class="card-b alerts">${d.dev.on ? devNotice(d) : ''}${alerts.sort((a, b) => (a.tone === b.tone ? 0 : a.tone === 'danger' ? -1 : 1)).map((a) => notice(a.tone, a.title, a.text, { action: a.action ? linkBtn(a.action.href, a.action.label, { size: 'sm' }) : null }))}</div>` : ''}
       <div class="stats four">
         ${tile({ icon: 'memory-stick', label: 'Memory', value: h.host ? `${gb(h.host.total - h.host.available)} used` : '—', sub: h.host ? `${gb(h.host.available)} available of ${gb(h.host.total)}` : 'Waiting for the first report', bar: h.host ? meter(h.host.total - h.host.available, h.host.total, { warnAt: 0.85, label: 'Server memory used' }) : undefined })}
         ${tile({ icon: 'cpu', label: 'CPU load', value: `${Math.round(loadShare * 100)}%`, sub: `${load.map((l) => l.toFixed(2)).join(' · ')} over 1, 5, 15 min · ${plural(cores, 'core')}`, bar: meter(Math.min(load[0]!, cores), cores, { warnAt: 0.9, label: 'CPU load' }) })}
@@ -284,7 +297,7 @@ function liveBody(d: Data, base: string, links: Links): SafeHtml {
         ? html`<div class="table-wrap wide"><table>
             <thead><tr><th>Process</th><th>Memory</th><th>Last 2 h</th><th class="num">CPU</th><th class="num" title="How long work waits before it runs (99th percentile). Under 50 ms is good.">Delay</th><th class="num">Running since</th><th class="num">Restarts (24 h)</th></tr></thead>
             <tbody>${processRows(d)}</tbody></table></div>
-          <div class="card-note">Delay is how long work waits before it runs; under 50 ms is good. Restarts include deploys (pm2 reload).</div>`
+          <div class="card-note">Delay is how long work waits before it runs; under 50 ms is good. Restarts include deploys (pm2 reload), except while Dev mode is on.</div>`
         : html`<div class="card-b"><p class="small muted">No process has reported yet. Reports start within a minute of the processes running this version.</p></div>`}
     </div>
 
@@ -326,14 +339,31 @@ export function registerHealthRoutes(app: FastifyInstance, web: Web): void {
     if ((req.query as { partial?: string }).partial === '1') {
       return reply.header('x-health-partial', '1').header('Cache-Control', 'no-store').type('text/html').send(liveBody(d, ctx.base, links).toString());
     }
+    const admin = can(ctx.membership, 'manage');
+    // Dev mode is for the whole server; admins switch it, everyone who can see this page sees it.
+    const devControl = admin
+      ? html`<form method="post" action="${ctx.base}/health/dev-mode" class="inline-form dev-switch" data-async data-dev-mode data-live-refresh>${csrfField(ctx.csrf)}<input type="hidden" name="set" value="1">
+          <label for="dev-mode" title="While it’s on, restarts (deploys) aren’t counted as problems">${icon('wrench', 14)}Dev mode</label>${switchInput({ name: 'on', checked: d.dev.on, label: 'Dev mode', id: 'dev-mode' })}<button type="submit" class="btn sm nojs">Save</button></form>`
+      : d.dev.on ? tag('Dev mode on', { icon: 'wrench', title: 'An admin turned on dev mode: restarts aren’t counted while they deploy.' }) : '';
     const body = html`
       ${pageHeader({
         title: 'Server health',
-        description: 'How the server and its processes are doing right now.',
-        actions: html`<span class="live" data-live-status>${raw('<span class="pulse" aria-hidden="true"></span>')}<span class="t">Live · updates every 15 s</span></span>`,
+        description: admin ? 'How the server and its processes are doing right now. Turn on Dev mode while you deploy, so restarts aren’t counted as problems.' : 'How the server and its processes are doing right now.',
+        actions: html`${devControl}<span class="live" data-live-status>${raw('<span class="pulse" aria-hidden="true"></span>')}<span class="t">Live · updates every 15 s</span></span>`,
       })}
       <div class="stack" id="health-live" data-live="${String(LIVE_MS)}" data-live-src="${ctx.base}/health?partial=1">${liveBody(d, ctx.base, links)}</div>`;
     return web.render(reply, ctx, 'Server health', 'health', body);
+  });
+
+  /** Dev mode on or off (JSON from the switch, or a plain form without JavaScript). */
+  app.post('/w/:wid/health/dev-mode', async (req, reply) => {
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'manage' });
+    if (!ctx) return reply;
+    const dev = await setDevMode(web.deps.db, (req.body as { on?: string }).on !== undefined, ctx.user.id);
+    const message = dev.on ? 'Dev mode is on: restarts aren’t counted until you turn it off.' : 'Dev mode is off: restarts are counted again, starting from zero.';
+    if (web.wantsJson(req)) return reply.send({ ok: true, message, on: dev.on });
+    setFlash(reply, 'success', message);
+    return reply.redirect(`${ctx.base}/health`);
   });
 }
 

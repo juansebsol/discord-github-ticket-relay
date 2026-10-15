@@ -32,7 +32,6 @@ import {
   parseTriageConfig,
   pauseMessage,
   resolveApiKey,
-  resumeTriage,
   saveTriageConfig,
   setTriageEnabled,
   type Flag,
@@ -214,7 +213,7 @@ export function registerTriageRoutes(app: FastifyInstance, web: Web): void {
       ${triageNav(ctx, 'actions')}
       ${!key ? notice('warn', 'Triage needs a Claude API key', admin ? 'Add the workspace’s key in Settings. It’s shared by every feature that uses Claude.' : 'An admin can add the workspace’s key in Settings.', { action: admin ? linkBtn(`${b}/settings#claude`, 'Open Settings', { size: 'sm', trail: 'arrow-right' }) : undefined }) : ''}
       ${anyOn && settings.paused
-        ? notice('warn', 'Triage is paused', `${pauseMessage(settings.paused.reason, settings.paused.detail, c.model)} Tickets are still being filed normally.`, { action: edit ? postBtn(`${b}/tickets/triage/resume`, 'Resume', ctx.csrf, { size: 'sm', icon: 'rotate-ccw' }) : undefined })
+        ? notice('warn', 'Triage is paused', `${pauseMessage(settings.paused.reason, settings.paused.detail, c.model)} Tickets are still being filed normally.`, { id: 'triage-paused', action: edit ? postBtn(`${b}/tickets/triage/resume`, 'Try again', ctx.csrf, { size: 'sm', icon: 'rotate-ccw', loading: 'Checking…' }) : undefined })
         : ''}
       ${anyOn && usage.triaged >= c.monthlyLimit
         ? notice('warn', 'Monthly limit reached', `Triage resumes on ${nextMonth.toISOString().slice(0, 10)}, or raise the limit below. Tickets are still being filed normally.`)
@@ -267,7 +266,7 @@ export function registerTriageRoutes(app: FastifyInstance, web: Web): void {
           </table></div></div>
           <div class="card-note">New ticket types start with every action ticked, except Not a dev issue for feature requests and ideas. An action that’s Off above doesn’t run for any type.</div>
         </div>` : ''}
-        <div class="card">
+        <div class="card" id="limits">
           <div class="card-h"><h2>Model, scope and limits</h2></div>
           ${setting('Model', modelError ? `Couldn’t load models: ${modelError}` : key ? 'Models available to your API key. Haiku is the fastest and cheapest.' : 'Add an API key to load the models it can use.', selectWrap(html`<select id="model" name="model" ${available.length ? '' : raw('disabled')}>${modelOptions.map((m) => html`<option value="${m.id}" ${m.id === c.model ? raw('selected') : ''}>${m.name}${m.deprecated && available.length ? ' (deprecated)' : ''}</option>`)}</select>`), { for: 'model' })}
           ${available.length ? '' : html`<input type="hidden" name="model" value="${c.model}">`}
@@ -405,11 +404,15 @@ export function registerTriageRoutes(app: FastifyInstance, web: Web): void {
       : 'Triage of issues opened on GitHub is off.');
   });
 
+  /** Try again: asks Claude first, and carries on only if it answers (JSON for the alert, or a form). */
   app.post('/w/:wid/tickets/triage/resume', async (req, reply) => {
     const ctx = await web.requireWorkspace(req, reply, { permission: 'triage.actions.edit' });
     if (!ctx) return reply;
-    await resumeTriage(deps.db, ctx.workspace.id);
-    setFlash(reply, 'success', 'Triage resumed');
+    const [check] = await web.triage.checkPaused({ workspaceId: ctx.workspace.id, by: ctx.user.id });
+    const ok = !check || check.resumed;
+    const message = !check ? 'Triage is running.' : check.resumed ? check.message : `Still paused: ${check.message}`;
+    if (web.wantsJson(req)) return reply.send(ok ? { ok: true, message } : { ok: false, error: message });
+    setFlash(reply, ok ? 'success' : 'error', message);
     return reply.redirect(back(ctx));
   });
 

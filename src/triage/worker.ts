@@ -56,12 +56,18 @@ export class TriageWorker {
    * Re-runs only use the time left over: new tickets and issues always go first. Exposed for tests.
    */
   private prunedAt = 0;
+  private pauseCheckedAt = 0;
 
   async drain(): Promise<number> {
     // The activity log keeps 90 days; old entries go once an hour.
     if (Date.now() - this.prunedAt > 3600_000) {
       this.prunedAt = Date.now();
       await this.engine.pruneLog().catch(() => 0);
+    }
+    // A workspace paused because it ran out of credits carries on by itself once they're added.
+    if (Date.now() - this.pauseCheckedAt > 60_000) {
+      this.pauseCheckedAt = Date.now();
+      await this.engine.checkPaused().catch((err) => this.engine.deps.log.warn({ err: (err as Error).message }, 'pause check failed'));
     }
     await this.engine.enqueueNew();
     let processed = 0;

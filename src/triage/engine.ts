@@ -48,7 +48,12 @@ import {
   monthlyUsage,
   parseTriageConfig,
   pauseTriage,
+  recordPauseCheck,
   resolveApiKey,
+  resumeTriage,
+  autoChecked,
+  AUTO_CHECK_MS,
+  type PauseReason,
   forGitHub,
   groupKind,
   NO_CLOSE,
@@ -652,7 +657,8 @@ async function isTicketIssue(q: Queryable, repoId: number, number: number): Prom
 // ---- Activity log (Triage › Activity) ------------------------------------------------------
 
 /** Where an entry comes from: a new ticket, a new GitHub issue, a re-run (preview or applying), or someone reviewing. */
-export type LogSource = 'ticket' | 'github' | 'preview' | 'rerun' | 'review';
+/** system: triage paused, or carried on. */
+export type LogSource = 'ticket' | 'github' | 'preview' | 'rerun' | 'review' | 'system';
 export type LogResult = 'ok' | 'failed' | 'skipped' | 'info';
 
 export interface LogDetail {
@@ -741,6 +747,15 @@ export interface ActivityNow {
   bulks: BulkProgress[];
   /** When the triage worker process last reported in (null if never). */
   workerSeenAt: Date | null;
+}
+
+/** What trying Claude again found (see checkPaused). */
+export interface PauseCheck {
+  workspaceId: string;
+  resumed: boolean;
+  /** Why it's still paused (null when resumed, or when Claude couldn't be reached). */
+  reason: PauseReason | null;
+  message: string;
 }
 
 /** A log entry with what's needed to show it. */
@@ -992,7 +1007,7 @@ export class TriageEngine {
     if (usage.triaged >= c.monthlyLimit) return skip('Monthly limit reached');
     const key = await resolveApiKey(deps, workspaceId);
     if (!key) {
-      await pauseTriage(deps.db, workspaceId, 'no_key', null);
+      if (await pauseTriage(deps.db, workspaceId, 'no_key', null)) await writeTriageLog(deps.db, { workspaceId, source: 'system', result: 'failed', message: 'Paused: there’s no Claude API key.' });
       return { status: 'paused' };
     }
     if (!deps.github) return skip('GitHub isn’t configured');
@@ -1040,7 +1055,10 @@ export class TriageEngine {
     } catch (err) {
       const e = err instanceof TriageAiError ? err : new TriageAiError('retry', (err as Error).message);
       if (e.action === 'pause') {
-        await pauseTriage(deps.db, workspaceId, e.pauseReason ?? 'rejected', e.message);
+        // Triage › Activity shows when it stopped (once, not for every ticket that was waiting).
+        if (await pauseTriage(deps.db, workspaceId, e.pauseReason ?? 'rejected', e.message)) {
+          await writeTriageLog(deps.db, { workspaceId, source: 'system', result: 'failed', message: `Paused: ${e.message}` });
+        }
         // Settings › Claude API shows the key's problem too.
         if (key.source === 'workspace' && (e.pauseReason === 'key_invalid' || e.pauseReason === 'credits')) await recordKeyCheck(deps.db, workspaceId, stateFromPause(e.pauseReason), e.message);
         deps.log.warn({ workspace: workspaceId, reason: e.pauseReason }, 'triage paused');
@@ -1650,6 +1668,56 @@ export class TriageEngine {
       workerSeenAt: worker.rows[0]?.seen_at ?? null,
       bulks: await this.activeBulks(workspaceId),
     };
+  }
+
+  /**
+   * Tries Claude again for paused workspaces and carries on if it answers. Without a workspace,
+   * this is the worker's own check: pauses that can end by themselves (an account out of credits)
+   * are tried every AUTO_CHECK_MS. With one, it's someone pressing Try again: tried right away,
+   * whatever the reason. The check is the smallest possible request, so it costs next to nothing.
+   */
+  async checkPaused(o: { workspaceId?: string; by?: string | null } = {}): Promise<PauseCheck[]> {
+    const { db } = this.deps;
+    const { rows } = await db.query<{ workspace_id: string; paused_reason: PauseReason; paused_detail: string | null }>(
+      o.workspaceId
+        ? 'SELECT workspace_id, paused_reason, paused_detail FROM triage_settings WHERE workspace_id = $1 AND paused_reason IS NOT NULL'
+        : 'SELECT workspace_id, paused_reason, paused_detail FROM triage_settings WHERE paused_reason IS NOT NULL AND coalesce(paused_checked_at, paused_at) < $1',
+      [o.workspaceId ?? Date.now() - AUTO_CHECK_MS],
+    );
+    const out: PauseCheck[] = [];
+    for (const r of rows) {
+      if (!o.workspaceId && !autoChecked({ reason: r.paused_reason, detail: r.paused_detail })) continue;
+      out.push(await this.tryClaude(r.workspace_id, o.by ?? null, Boolean(o.workspaceId)));
+    }
+    return out;
+  }
+
+  private async tryClaude(workspaceId: string, by: string | null, manual: boolean): Promise<PauseCheck> {
+    const { db } = this.deps;
+    const key = await resolveApiKey(this.deps, workspaceId);
+    if (!key) {
+      await recordPauseCheck(db, workspaceId, 'no_key', null);
+      return { workspaceId, resumed: false, reason: 'no_key', message: 'There’s no Claude API key yet.' };
+    }
+    const { config } = await getTriageSettings(db, workspaceId);
+    try {
+      await this.ai.ping(key.key, config.model);
+    } catch (err) {
+      const e = err instanceof TriageAiError ? err : new TriageAiError('retry', (err as Error).message);
+      if (e.action === 'pause') {
+        await recordPauseCheck(db, workspaceId, e.pauseReason ?? 'rejected', e.message);
+        if (key.source === 'workspace' && (e.pauseReason === 'key_invalid' || e.pauseReason === 'credits')) await recordKeyCheck(db, workspaceId, stateFromPause(e.pauseReason), e.message).catch(() => {});
+        return { workspaceId, resumed: false, reason: e.pauseReason, message: e.message };
+      }
+      // Claude busy or unreachable: still paused, and tried again later.
+      await db.query('UPDATE triage_settings SET paused_checked_at = now_ms() WHERE workspace_id = $1 AND paused_reason IS NOT NULL', [workspaceId]);
+      return { workspaceId, resumed: false, reason: null, message: 'Claude couldn’t be reached. Try again in a minute.' };
+    }
+    await resumeTriage(db, workspaceId);
+    if (key.source === 'workspace') await recordKeyCheck(db, workspaceId, 'working', null).catch(() => {});
+    await writeTriageLog(db, { workspaceId, source: 'system', result: 'ok', by, message: manual ? 'Claude works again, so triage carried on.' : 'Claude works again, so triage carried on by itself.' });
+    this.deps.log.info({ workspace: workspaceId, manual }, 'triage resumed');
+    return { workspaceId, resumed: true, reason: null, message: 'Claude works again, so triage carried on.' };
   }
 
   /** A page of the activity log, newest first (before: an entry id, for the next page). */

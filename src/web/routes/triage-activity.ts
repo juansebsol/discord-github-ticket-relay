@@ -26,6 +26,7 @@ const SOURCES: { value: LogSource; label: string }[] = [
   { value: 'preview', label: 'Re-run previews' },
   { value: 'rerun', label: 'Re-runs applying' },
   { value: 'review', label: 'Apply and Dismiss' },
+  { value: 'system', label: 'Paused and carried on' },
 ];
 
 function actionList(actions: TriageAction[], repo: { owner: string; name: string }): SafeHtml {
@@ -72,6 +73,8 @@ function sourceTag(l: LogRow, names: Map<string, string>, b: string, runs: strin
       return html`${tag('Re-run preview', { icon: 'flask-conical' })}${run}`;
     case 'rerun':
       return html`${tag('Re-run', { icon: 'play' })}${run}`;
+    case 'system':
+      return l.result === 'ok' ? html`${tag('Carried on', { icon: 'play' })}` : html`${tag('Paused', { icon: 'circle-pause' })}`;
     default: {
       const who = l.by_user ? names.get(l.by_user) ?? 'An admin' : 'Someone';
       return l.bulk_id || l.detail?.bulk
@@ -86,7 +89,7 @@ function subject(l: LogRow, b: string, runs: string | null): SafeHtml {
   if (l.repo_id && l.number) return html`<a class="cell-title" href="${b}/tickets/issues/${String(l.repo_id)}/${String(l.number)}">${l.title ?? `Issue #${l.number}`}</a> <span class="muted nowrap">${l.owner && l.name ? `${l.owner}/${l.name}` : ''}#${String(l.number)}</span>`;
   if (l.run_id) return runs ? html`<a class="cell-title" href="${runs}/tickets/triage/runs/${l.run_id}">${l.run_name || 'Re-run'}</a>` : html`<span class="cell-title">${l.run_name || 'Re-run'}</span>`;
   if (l.bulk_id) return html`<span class="cell-title">Bulk apply</span>`;
-  return html`<span class="cell-title">Triage</span>`;
+  return html`<span class="cell-title">AI triage</span>`;
 }
 
 export function registerTriageActivityRoutes(app: FastifyInstance, web: Web): void {

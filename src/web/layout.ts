@@ -16,6 +16,8 @@ export interface SetupProgress {
   apps: StepState;
   panel: StepState;
   attention: number;
+  /** Dev mode is on (the whole server): the sidebar shows it next to Server health. */
+  devMode?: boolean;
 }
 
 export interface PageContext {
@@ -124,7 +126,7 @@ export function layout(ctx: PageContext, opts: { title: string; active: string; 
         ${manage ? navItem(`${base}/members`, 'Members & permissions', 'users', a === 'members') : lockedNavItem('Members & permissions', 'users')}
         ${manage ? navItem(`${base}/settings`, 'Settings', 'settings', a === 'settings') : lockedNavItem('Settings', 'settings')}
         ${manage ? navItem(`${base}/deployment`, 'Deployment', 'server', a === 'deployment') : lockedNavItem('Deployment', 'server')}
-        ${can(access, 'health.view') ? navItem(`${base}/health`, 'Server health', 'activity', a === 'health') : lockedNavItem('Server health', 'activity')}
+        ${can(access, 'health.view') ? navItem(`${base}/health`, 'Server health', 'activity', a === 'health', html`<span class="nav-tag" data-dev-tag title="Dev mode is on: restarts aren’t counted" ${p?.devMode ? '' : raw('hidden')}>Dev mode</span>`) : lockedNavItem('Server health', 'activity')}
       </nav>`
     : html``;
 
@@ -170,6 +172,7 @@ export function layout(ctx: PageContext, opts: { title: string; active: string; 
     </div>
   </main>
 </div>
+${ws && access ? html`<div id="alert-dock" data-dock-src="${base}/alerts" data-dock-ws="${ws.id}" hidden></div>` : ''}
 ${toastsFor(ctx.flash)}
 ${CONFIRM_DIALOG}
 ${ICON_TEMPLATES}

@@ -19,6 +19,8 @@ const NAMES = [
   'activity', 'cpu', 'database', 'gauge', 'hard-drive', 'memory-stick', 'sparkles', 'timer',
   // Triage
   'bell', 'file-text', 'flask-conical', 'git-compare-arrows', 'history', 'message-square', 'play', 'split', 'tags',
+  // Alerts and dev mode
+  'circle-alert', 'circle-pause', 'external-link', 'minus', 'wrench',
 ];
 
 const require = createRequire(import.meta.url);

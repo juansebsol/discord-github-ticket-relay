@@ -27,6 +27,7 @@ import {
   actionName,
   allActionKeys,
   anyActionOn,
+  autoChecked,
   FLAGS,
   forGitHub,
   formatCost,
@@ -36,6 +37,7 @@ import {
   saveTriageConfig,
   tokenCost,
   type TriageConfig,
+  type TriageSettings,
 } from '../../triage/settings.js';
 import { setFlash } from '../session.js';
 import type { Web, WorkspaceRequestContext } from '../server.js';
@@ -135,6 +137,13 @@ function waitingText(r: Pick<TriageRunRow, 'waiting_until_at' | 'waiting_reason'
   return r.waiting_reason === 'github'
     ? `Waiting for GitHub’s hourly limit to reset (in ${left}), so new tickets can still be filed meanwhile. It carries on by itself.`
     : `Claude asked to slow down. It carries on by itself in ${left}.`;
+}
+
+/** A run waiting because triage is paused: why, and whether it carries on by itself. */
+function pausedText(p: NonNullable<TriageSettings['paused']>): string {
+  return autoChecked(p)
+    ? 'Paused: the Anthropic account is out of credits. It carries on by itself once credits are added (checked every 5 minutes).'
+    : 'Paused: triage is paused (see Triage › Actions). It carries on once that’s fixed and someone presses Try again.';
 }
 
 /** The ticket's triage before the run (or in the run compared with). */
@@ -297,13 +306,13 @@ export function registerTriageRunRoutes(app: FastifyInstance, web: Web): void {
           <tbody>${runs.map((r) => {
             const finished = r.done + r.skipped + r.failed;
             const cost = r.input_tokens ? tokenCost(r.config_used.model, r.input_tokens, r.output_tokens ?? 0) : null;
-            const waiting = r.status === 'running' ? waitingText(r) : null;
+            const waiting = r.status === 'running' ? (settings.paused ? 'paused' : waitingText(r)) : null;
             return html`<tr class="click">
               <td><a class="cell-title" href="${b}/${r.id}">${runName(r)}</a><div class="sub">${r.created_by ? names.get(r.created_by) ?? 'An admin' : 'An admin'} · ${r.config_used.model}</div></td>
               <td>${r.mode === 'preview' ? tag('Preview', { icon: 'flask-conical' }) : tag('Applied', { icon: 'play' })}${r.mode === 'preview' && r.applied ? html`<div class="sub">${n(r.applied)} applied</div>` : ''}</td>
               <td class="num">${r.status === 'running' ? html`${n(finished)} of ${n(r.total)}<progress class="bar" max="${String(r.total || 1)}" value="${String(finished)}"></progress>` : html`${n(r.done)} triaged${r.skipped + r.failed ? html`<div class="sub">${n(r.skipped + r.failed)} skipped</div>` : ''}`}</td>
               <td>${cost !== null ? formatCost(cost) : html`<span class="em">—</span>`}</td>
-              <td>${pill(...STATUS_PILL[r.status])}${waiting ? html`<div class="sub">Waiting for ${r.waiting_reason === 'github' ? 'GitHub' : 'Claude'}</div>` : r.applying ? html`<div class="sub">Applying ${n(r.applying)}…</div>` : ''}</td>
+              <td>${pill(...STATUS_PILL[r.status])}${waiting === 'paused' ? html`<div class="sub warn-text">Paused: triage is paused</div>` : waiting ? html`<div class="sub">Waiting for ${r.waiting_reason === 'github' ? 'GitHub' : 'Claude'}</div>` : r.applying ? html`<div class="sub">Applying ${n(r.applying)}…</div>` : ''}</td>
               <td class="num">${when(r.created_at)}</td>
             </tr>`;
           })}</tbody></table></div></div>`
@@ -313,7 +322,7 @@ export function registerTriageRunRoutes(app: FastifyInstance, web: Web): void {
       ${await ticketsHeader(web, ctx, 'triage')}
       ${triageNav(ctx, 'runs')}
       <div class="stack">
-        ${running ? notice('info', 'A re-run is going', `${runName(running)}: ${n(running.done + running.skipped + running.failed)} of ${n(running.total)} tickets. ${waitingText(running) ?? 'It uses the time between new tickets, so filing and normal triage are never delayed.'}`, { action: linkBtn(`${b}/${running.id}`, 'View', { size: 'sm', trail: 'arrow-right' }) }) : ''}
+        ${running ? notice('info', 'A re-run is going', `${runName(running)}: ${n(running.done + running.skipped + running.failed)} of ${n(running.total)} tickets. ${(settings.paused ? pausedText(settings.paused) : waitingText(running)) ?? 'It uses the time between new tickets, so filing and normal triage are never delayed.'}`, { action: linkBtn(`${b}/${running.id}`, 'View', { size: 'sm', trail: 'arrow-right' }) }) : ''}
         ${blocked && !running ? notice('warn', null, blocked) : ''}
         <div class="card">
           <div class="card-h"><div><h2>Re-run triage</h2><div class="desc">Run the current settings on tickets that are already filed: all of them, or the newest few to try something quickly. Change a setting, preview again and compare, until you like the results; then apply them in bulk. Each ticket counts toward the monthly limit.</div></div></div>
@@ -416,7 +425,7 @@ export function registerTriageRunRoutes(app: FastifyInstance, web: Web): void {
     const finished = counts.total - counts.pending;
     const cost = counts.inputTokens ? tokenCost(run.config_used.model, counts.inputTokens, counts.outputTokens) : null;
     const repoOf = (i: { repo_owner: string; repo_name: string }) => ({ owner: i.repo_owner, name: i.repo_name });
-    const waiting = live ? waitingText(run) : null;
+    const waiting = live ? (settings.paused ? pausedText(settings.paused) : waitingText(run)) : null;
 
     // Time left, from the pace so far.
     const evalPace = finished >= 3 && counts.lastDoneAt ? Math.max(1, (counts.lastDoneAt.getTime() - run.created_at.getTime()) / 1000 / finished) : TYPICAL_SECONDS;

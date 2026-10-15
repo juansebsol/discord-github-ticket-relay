@@ -350,7 +350,7 @@ export function pauseMessage(reason: PauseReason, detail: string | null, model: 
     case 'key_invalid':
       return 'Claude rejected the API key. Replace it below to resume.';
     case 'credits':
-      return 'The Anthropic account behind this key is out of credits. Add credits in the Anthropic Console, then resume.';
+      return 'The Anthropic account behind this key is out of credits. Add credits in the Anthropic Console: triage checks again every 5 minutes and carries on by itself.';
     case 'model_unavailable':
       return `The model ${model} isn’t available to this API key. Choose another model, then resume.`;
     case 'rejected':
@@ -366,7 +366,8 @@ export interface TriageSettings {
   githubEnabled: boolean;
   githubEnabledAt: Date | null;
   config: TriageConfig;
-  paused: { reason: PauseReason; detail: string | null; at: Date } | null;
+  /** checkedAt: when Claude was last tried while paused (see AUTO_CHECK_REASONS). */
+  paused: { reason: PauseReason; detail: string | null; at: Date; checkedAt: Date | null } | null;
   key: { hint: string; addedBy: string | null; addedAt: Date | null } | null;
 }
 
@@ -380,6 +381,7 @@ interface Row {
   paused_reason: PauseReason | null;
   paused_detail: string | null;
   paused_at: Date | null;
+  paused_checked_at: Date | null;
 }
 
 async function row(q: Queryable, workspaceId: string): Promise<Row | null> {
@@ -396,7 +398,7 @@ export async function getTriageSettings(q: Queryable, workspaceId: string): Prom
     githubEnabled: Boolean(r?.github_enabled),
     githubEnabledAt: r?.github_enabled_at ?? null,
     config: parseTriageConfig(r?.triage_config),
-    paused: r?.paused_reason ? { reason: r.paused_reason, detail: r.paused_detail, at: r.paused_at ?? new Date() } : null,
+    paused: r?.paused_reason ? { reason: r.paused_reason, detail: r.paused_detail, at: r.paused_at ?? new Date(), checkedAt: r.paused_checked_at } : null,
     key: key ? { hint: key.hint, addedBy: key.addedBy, addedAt: key.addedAt } : null,
   };
 }
@@ -445,16 +447,40 @@ export async function removeApiKey(q: Queryable, workspaceId: string): Promise<v
   await removeClaudeKey(q, workspaceId);
 }
 
-export async function pauseTriage(q: Queryable, workspaceId: string, reason: PauseReason, detail: string | null): Promise<void> {
-  await q.query(
+/** Pauses triage (keeping the first reason if it's already paused). True if this paused it. */
+export async function pauseTriage(q: Queryable, workspaceId: string, reason: PauseReason, detail: string | null): Promise<boolean> {
+  const res = await q.query(
     `UPDATE triage_settings SET paused_reason = $2, paused_detail = $3, paused_at = now_ms(), updated_at = now_ms()
      WHERE workspace_id = $1 AND paused_reason IS NULL`,
     [workspaceId, reason, detail ? detail.slice(0, 300) : null],
   );
+  return res.rowCount > 0;
 }
 
 export async function resumeTriage(q: Queryable, workspaceId: string): Promise<void> {
-  await q.query(`UPDATE triage_settings SET paused_reason = NULL, paused_detail = NULL, paused_at = NULL, updated_at = now_ms() WHERE workspace_id = $1`, [workspaceId]);
+  await q.query(`UPDATE triage_settings SET paused_reason = NULL, paused_detail = NULL, paused_at = NULL, paused_checked_at = NULL, updated_at = now_ms() WHERE workspace_id = $1`, [workspaceId]);
+}
+
+/**
+ * Pauses that can end without anyone changing a setting, so triage tries Claude again every
+ * few minutes and carries on by itself: an account out of credits works again once credits are
+ * added. (A rejected or missing key, or a model the key can't use, needs someone to fix it.)
+ */
+export const AUTO_CHECK_REASONS: ReadonlySet<PauseReason> = new Set(['credits']);
+export const AUTO_CHECK_MS = 5 * 60_000;
+
+/** Whether a pause is checked again by itself. Older pauses saved a credit error as "rejected". */
+export function autoChecked(p: Pick<NonNullable<TriageSettings['paused']>, 'reason' | 'detail'>): boolean {
+  return AUTO_CHECK_REASONS.has(p.reason) || (p.reason === 'rejected' && /credit balance/i.test(p.detail ?? ''));
+}
+
+/** Records a check that found Claude still not working, keeping when the pause started. */
+export async function recordPauseCheck(q: Queryable, workspaceId: string, reason: PauseReason, detail: string | null): Promise<void> {
+  await q.query(
+    `UPDATE triage_settings SET paused_checked_at = now_ms(), paused_reason = $2, paused_detail = $3, updated_at = now_ms()
+     WHERE workspace_id = $1 AND paused_reason IS NOT NULL`,
+    [workspaceId, reason, detail ? detail.slice(0, 300) : null],
+  );
 }
 
 /** The workspace's own key, or the deployment's fallback key from ANTHROPIC_API_KEY. */

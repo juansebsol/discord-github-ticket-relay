@@ -38,6 +38,7 @@ import { registerIssueRoutes } from './routes/issues.js';
 import { registerIssueTriageRoutes } from './routes/issue-triage.js';
 import { registerClaudeRoutes } from './routes/claude.js';
 import { registerHealthRoutes } from './routes/health.js';
+import { registerAlertRoutes } from './routes/alerts.js';
 import { MAX_FILE_BYTES } from '../domain/files.js';
 
 declare module 'fastify' {
@@ -76,12 +77,13 @@ export interface Web {
 }
 
 export async function computeProgress(deps: Deps, workspaceId: string): Promise<SetupProgress> {
-  const [gh, dc, apps, panel, attention] = await Promise.all([
+  const [gh, dc, apps, panel, attention, dev] = await Promise.all([
     getGitHubConnection(deps.db, workspaceId),
     getDiscordConnection(deps.db, workspaceId),
     listApps(deps.db, workspaceId),
     getPanel(deps.db, workspaceId),
     deps.db.query<{ n: number }>(`SELECT count(*) AS n FROM submissions WHERE workspace_id = $1 AND status IN ('failed', 'uncertain')`, [workspaceId]),
+    deps.db.query<{ on: number }>('SELECT dev_mode_on_at IS NOT NULL AS "on" FROM server_settings WHERE id = 1'),
   ]);
   return {
     github: !gh ? 'todo' : gh.status === 'active' ? 'done' : 'problem',
@@ -89,6 +91,7 @@ export async function computeProgress(deps: Deps, workspaceId: string): Promise<
     apps: apps.some((a) => a.enabled) ? 'done' : 'todo',
     panel: !panel ? 'todo' : panel.status === 'missing' ? 'problem' : 'done',
     attention: attention.rows[0]!.n,
+    devMode: Boolean(dev.rows[0]?.on),
   };
 }
 
@@ -259,6 +262,7 @@ export async function buildServer(deps: Deps, processor: Processor, opts: { logg
   registerIssueTriageRoutes(app, web);
   registerClaudeRoutes(app, web);
   registerHealthRoutes(app, web);
+  registerAlertRoutes(app, web);
 
   return app;
 }
