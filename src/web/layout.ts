@@ -4,7 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { html, raw, type SafeHtml } from '../lib/html.js';
 import type { Membership } from '../domain/workspaces.js';
-import { can, ROLE_LABELS, TRIAGE_AREAS, type MemberAccess } from '../domain/permissions.js';
+import { can, PAGE_AREAS, ROLE_LABELS, TRIAGE_AREAS, type MemberAccess } from '../domain/permissions.js';
 import type { Role, UserRow, WorkspaceRow } from '../domain/types.js';
 import { avatar, csrfField, discordAvatar, icon, iconBtn, initials, menu, notice, type IconName } from './ui.js';
 
@@ -72,8 +72,10 @@ function navItem(href: string, label: string, name: IconName, active: boolean, t
 }
 
 /** A page this person can't open: shown greyed out with a lock, so they know it exists. */
-function lockedNavItem(label: string, name: IconName): SafeHtml {
-  return html`<span class="nav-item locked" aria-disabled="true" title="Only admins can open ${label}. Ask an admin if you need access.">${icon(name)}<span>${label}</span><span class="trail">${icon('lock', 14)}<span class="sr-only"> (admins only)</span></span></span>`;
+/** A page this person can't open: greyed out with a lock. `grantable` pages can be opened to moderators by an admin. */
+function lockedNavItem(label: string, name: IconName, o: { grantable?: boolean } = {}): SafeHtml {
+  const why = o.grantable ? `You don’t have access to ${label}. Ask an admin if you need it.` : `Only admins can open ${label}. Ask an admin if you need access.`;
+  return html`<span class="nav-item locked" aria-disabled="true" title="${why}">${icon(name)}<span>${label}</span><span class="trail">${icon('lock', 14)}<span class="sr-only"> (${o.grantable ? 'no access' : 'admins only'})</span></span></span>`;
 }
 
 function stepMark(state: StepState): SafeHtml {
@@ -83,8 +85,9 @@ function stepMark(state: StepState): SafeHtml {
 }
 
 export function roleLabel(access: MemberAccess): string {
-  // View only: can't act on tickets or change any Triage page.
-  if (access.role === 'moderator' && !access.can_act_tickets && !TRIAGE_AREAS.some((a) => can(access, `triage.${a}.edit`))) return 'Moderator · View only';
+  // View only: can't act on tickets or change any page.
+  const changes = access.can_act_tickets || TRIAGE_AREAS.some((a) => can(access, `triage.${a}.edit`)) || PAGE_AREAS.some((a) => can(access, `${a}.edit`));
+  if (access.role === 'moderator' && !changes) return 'Moderator · View only';
   return ROLE_LABELS[access.role];
 }
 
@@ -110,7 +113,7 @@ export function layout(ctx: PageContext, opts: { title: string; active: string; 
         <div class="nav-label">General setup</div>
         ${manage ? navItem(`${base}/setup/github`, 'GitHub', 'github', a === 'github', stepMark(p?.github ?? 'todo')) : lockedNavItem('GitHub', 'github')}
         ${manage ? navItem(`${base}/setup/discord`, 'Discord', 'message-circle', a === 'discord', stepMark(p?.discord ?? 'todo')) : lockedNavItem('Discord', 'message-circle')}
-        ${manage ? navItem(`${base}/apps`, 'Apps & repositories', 'boxes', a === 'apps', stepMark(p?.apps ?? 'todo')) : lockedNavItem('Apps & repositories', 'boxes')}
+        ${can(access, 'apps.view') ? navItem(`${base}/apps`, 'Apps & repositories', 'boxes', a === 'apps', stepMark(p?.apps ?? 'todo')) : lockedNavItem('Apps & repositories', 'boxes', { grantable: true })}
         <div class="nav-label">Utilities</div>
         ${navItem(`${base}/tickets`, 'Tickets', 'ticket', a === 'tickets', attention)}
         ${can(access, 'contrib.view') ? navItem(`${base}/contributors`, 'Contributor Roles', 'award', a === 'contributors') : lockedNavItem('Contributor Roles', 'award')}

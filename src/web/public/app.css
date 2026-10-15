@@ -1052,9 +1052,17 @@ progress.bar.wide { max-width: none; }
 /* Members › Triage access */
 .level-select[data-level="none"] { color: var(--muted); }
 .level-select[data-level="edit"] { color: var(--accent-text); font-weight: 500; }
-/* Room for the longest choice (“No access”) next to the chevron. */
-.access-table .select { min-width: 112px; }
+/* Room for the longest choice (“No access”) next to the chevron; tighter cells so every page fits the card. */
+.access-table .select { min-width: 100px; }
+.access-table th.th-perm, .access-table td.perm { padding-left: 8px; padding-right: 8px; }
+.access-table th.th-perm:first-child, .access-table td.perm:first-child { padding-left: 20px; }
+.access-table th.th-perm:last-child, .access-table td.perm:last-child { padding-right: 20px; }
 .access-table td.all-col { border-right: 1px solid var(--border); }
+/* Page access: a heading row naming each group of pages, with a line where a group starts. */
+.access-table tr.group-h th.grp { padding-top: 10px; padding-bottom: 0; border-bottom: 0; vertical-align: bottom; }
+.access-table tr.group-h .g { display: inline-flex; align-items: center; gap: 6px; font: 500 12px/16px var(--font); color: var(--muted); }
+.access-table tr.group-h th[rowspan] { vertical-align: bottom; }
+.access-table .group-start, .access-table tr.group-h th.grp + th.grp { border-left: 1px solid var(--border); }
 .seg-item.locked { opacity: 0.6; cursor: not-allowed; }
 .seg-item.locked:hover { color: var(--muted); }
 .seg-item.locked svg { flex: none; }

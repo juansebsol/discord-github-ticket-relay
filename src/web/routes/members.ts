@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
-import { can, ROLE_LABELS, TRIAGE_AREA_NAMES, TRIAGE_AREAS, triageLevel, VIEW_ONLY_AREAS, type AccessLevel, type MemberAccess, type TriageArea } from '../../domain/permissions.js';
+import { can, PAGE_AREA_NAMES, PAGE_AREAS, pageLevel, ROLE_LABELS, TRIAGE_AREA_NAMES, TRIAGE_AREAS, triageLevel, VIEW_ONLY_AREAS, type AccessLevel, type MemberAccess, type PageArea, type TriageArea } from '../../domain/permissions.js';
 import { UserFacingError, type Role } from '../../domain/types.js';
-import { createInvite, listInvites, listMembers, removeMember, revokeInvite, setMemberRole, setModeratorPermissions, setModeratorTriageAccess } from '../../domain/workspaces.js';
+import { createInvite, listInvites, listMembers, removeMember, revokeInvite, setMemberRole, setModeratorPageAccess, setModeratorPermissions, setModeratorTriageAccess } from '../../domain/workspaces.js';
 import { html, raw, type SafeHtml } from '../../lib/html.js';
 import { setFlash } from '../session.js';
 import type { Web, WorkspaceRequestContext } from '../server.js';
@@ -51,7 +51,8 @@ const MOD_SWITCHES = [
 type ModField = (typeof MOD_SWITCHES)[number]['field'];
 
 const CAPABILITIES: [string, string, string, string][] = [
-  ['Setup, panels and settings', 'yes', 'yes', 'no'],
+  ['GitHub, Discord, panels and settings', 'yes', 'yes', 'no'],
+  ['Apps & repositories (view or edit)', 'yes', 'yes', 'maybe'],
   ['Ticket forms and file rules', 'yes', 'yes', 'no'],
   ['Triage pages (view or edit, page by page)', 'yes', 'yes', 'maybe'],
   ['Tickets inbox', 'yes', 'yes', 'yes'],
@@ -63,6 +64,11 @@ const CAPABILITIES: [string, string, string, string][] = [
   ['Revoke contributor roles', 'yes', 'yes', 'no'],
   ['Invite people and change roles', 'yes', 'no', 'no'],
 ];
+
+/** What each setup page covers, for the access table. */
+const PAGE_AREA_DESC: Record<PageArea, string> = {
+  apps: 'Apps and their repositories.',
+};
 
 /** What each Triage page covers, for the access table. */
 const TRIAGE_AREA_DESC: Record<TriageArea, string> = {
@@ -89,7 +95,8 @@ function accessTags(m: MemberAccess): SafeHtml {
   if (m.role === 'owner') return html`${tag('Full access')}${tag('Invites & roles')}`;
   if (m.role === 'admin') return tag('Full access');
   const triage = triageSummary(m);
-  return html`${tag(m.can_act_tickets ? 'Act on tickets' : 'View tickets')}${m.can_view_contributors ? tag('Verifications') : ''}${m.can_search_issues ? tag('Issue search') : ''}${m.can_manage_files ? tag('Files') : ''}${m.can_view_health ? tag('Server health') : ''}${triage ? tag(triage) : ''}`;
+  const pages = PAGE_AREAS.filter((a) => pageLevel(m.page_access, a) !== 'none').map((a) => tag(`${a === 'apps' ? 'Apps' : PAGE_AREA_NAMES[a]}: ${pageLevel(m.page_access, a)}`));
+  return html`${pages}${tag(m.can_act_tickets ? 'Act on tickets' : 'View tickets')}${m.can_view_contributors ? tag('Verifications') : ''}${m.can_search_issues ? tag('Issue search') : ''}${m.can_manage_files ? tag('Files') : ''}${m.can_view_health ? tag('Server health') : ''}${triage ? tag(triage) : ''}`;
 }
 
 export function registerMemberRoutes(app: FastifyInstance, web: Web): void {
@@ -155,7 +162,7 @@ export function registerMemberRoutes(app: FastifyInstance, web: Web): void {
       switchInput({ name: field, checked: m[field], label: `${nameOf(m)}: ${label}`, attrs: html`form="perm-${suffix}${m.id}"` });
 
     const modAccess = html`<div class="card" id="moderator-access">
-      <div class="card-h"><div><h2>Moderator access</h2><div class="desc">New moderators start view-only. Moderators never see setup, panels or settings. Triage pages are set below.</div></div></div>
+      <div class="card-h"><div><h2>Moderator access</h2><div class="desc">New moderators start view-only. The pages they can open, like Apps &amp; repositories and Triage, are set below in Page access. GitHub, Discord, panels and settings stay with admins.</div></div></div>
       ${mods.length
         ? html`${mods.map((m) => html`${permForm(m, '')}${permForm(m, 'm-')}`)}
             <div class="table-wrap only-desktop"><table>
@@ -175,32 +182,46 @@ export function registerMemberRoutes(app: FastifyInstance, web: Web): void {
         : empty('users', 'No moderators yet', 'Moderators can read the tickets inbox. Invite someone as a moderator, then choose what else they can do here.', owner ? linkBtn(`${b}/members?invite=1#invite`, 'Invite', { icon: 'user-plus' }) : null)}
     </div>`;
 
+    const levelOptions = (levels: AccessLevel[], level: AccessLevel) => levels.map((l) => html`<option value="${l}" ${l === level ? raw('selected') : ''}>${LEVEL_NAMES[l]}</option>`);
     const levelSelect = (m: (typeof members)[number], area: TriageArea, suffix: string) => {
       const level = triageLevel(m.triage_access, area);
       const levels: AccessLevel[] = VIEW_ONLY_AREAS.has(area) ? ['none', 'view'] : ['none', 'view', 'edit'];
-      return selectWrap(html`<select name="${area}" form="tri-${suffix}${m.id}" class="level-select" data-level="${level}" aria-label="${nameOf(m)}: ${TRIAGE_AREA_NAMES[area]}">${levels.map((l) => html`<option value="${l}" ${l === level ? raw('selected') : ''}>${LEVEL_NAMES[l]}</option>`)}</select>`, { sm: true });
+      return selectWrap(html`<select name="${area}" form="tri-${suffix}${m.id}" class="level-select" data-level="${level}" aria-label="${nameOf(m)}: ${TRIAGE_AREA_NAMES[area]}">${levelOptions(levels, level)}</select>`, { sm: true });
     };
-    // "All pages" sets every page at once (Activity goes up to View); it shows Custom when they differ.
+    const pageSelect = (m: (typeof members)[number], area: PageArea, suffix: string) => {
+      const level = pageLevel(m.page_access, area);
+      return selectWrap(html`<select name="${area}" form="pg-${suffix}${m.id}" class="level-select" data-level="${level}" aria-label="${nameOf(m)}: ${PAGE_AREA_NAMES[area]}">${levelOptions(['none', 'view', 'edit'], level)}</select>`, { sm: true });
+    };
+    // "All Triage pages" sets every Triage page at once (Activity goes up to View); it shows Custom when they differ.
     const allSelect = (m: (typeof members)[number], suffix: string) => {
       const levels = TRIAGE_AREAS.map((a) => triageLevel(m.triage_access, a));
       const same = (l: AccessLevel) => TRIAGE_AREAS.every((a, i) => levels[i] === (l === 'edit' && VIEW_ONLY_AREAS.has(a) ? 'view' : l));
       const current = (['none', 'view', 'edit'] as const).find(same) ?? '';
       return selectWrap(html`<select data-set-levels="tri-${suffix}${m.id}" aria-label="${nameOf(m)}: every Triage page"><option value="" ${current ? '' : raw('selected')} disabled hidden>Custom</option>${(['none', 'view', 'edit'] as const).map((l) => html`<option value="${l}" ${l === current ? raw('selected') : ''}>${l === 'none' ? 'No access' : l === 'view' ? 'View all' : 'Edit all'}</option>`)}</select>`, { sm: true });
     };
-    const triageAccess = mods.length ? html`<div class="card" id="triage-access">
-      <div class="card-h"><div><h2>Triage access</h2><div class="desc">What each moderator can do in Tickets › Triage, page by page. <strong>View</strong> shows the page with every control turned off; <strong>Edit</strong> lets them change it. Moderators start with no access.</div></div></div>
-      ${mods.map((m) => html`<form id="tri-${m.id}" method="post" action="${b}/members/${m.id}/triage-access" data-async hidden>${csrfField(ctx.csrf)}</form><form id="tri-m-${m.id}" method="post" action="${b}/members/${m.id}/triage-access" data-async hidden>${csrfField(ctx.csrf)}</form>`)}
+    const accessForms = (m: (typeof members)[number]) => html`${['', 'm-'].map((suffix) => html`<form id="pg-${suffix}${m.id}" method="post" action="${b}/members/${m.id}/page-access" data-async hidden>${csrfField(ctx.csrf)}</form><form id="tri-${suffix}${m.id}" method="post" action="${b}/members/${m.id}/triage-access" data-async hidden>${csrfField(ctx.csrf)}</form>`)}`;
+    const pageAccess = mods.length ? html`<div class="card" id="page-access">
+      <div class="card-h"><div><h2>Page access</h2><div class="desc">Pages each moderator can open, and whether they can change them. <strong>View</strong> shows the page with every control turned off; <strong>Edit</strong> lets them change it. Moderators start with no access.</div></div></div>
+      ${mods.map(accessForms)}
       <div class="table-wrap only-desktop"><table class="access-table">
-        <thead><tr><th class="th-perm"><div class="l">Moderator</div></th><th class="th-perm"><div class="l">All pages</div><div class="d">Set every page at once.</div></th>${TRIAGE_AREAS.map((a) => html`<th class="th-perm"><div class="l">${TRIAGE_AREA_NAMES[a]}</div><div class="d">${TRIAGE_AREA_DESC[a]}</div></th>`)}</tr></thead>
+        <thead>
+          <tr class="group-h"><th class="th-perm" rowspan="2"><div class="l">Moderator</div></th><th class="th-perm grp" colspan="${String(PAGE_AREAS.length)}"><div class="g">${icon('boxes', 14)}General setup</div></th><th class="th-perm grp" colspan="${String(TRIAGE_AREAS.length + 1)}"><div class="g">${icon('ticket', 14)}Tickets › Triage</div></th></tr>
+          <tr>${PAGE_AREAS.map((a) => html`<th class="th-perm"><div class="l">${PAGE_AREA_NAMES[a]}</div><div class="d">${PAGE_AREA_DESC[a]}</div></th>`)}<th class="th-perm group-start"><div class="l">All Triage pages</div><div class="d">Set them all at once.</div></th>${TRIAGE_AREAS.map((a) => html`<th class="th-perm"><div class="l">${TRIAGE_AREA_NAMES[a]}</div><div class="d">${TRIAGE_AREA_DESC[a]}</div></th>`)}</tr>
+        </thead>
         <tbody>${mods.map((m) => html`<tr>
           <td class="perm"><span class="who-cell">${avatar(nameOf(m), 24, { src: discordAvatar(m) })}<span class="name">${nameOf(m)}</span></span></td>
-          <td class="perm all-col">${allSelect(m, '')}</td>
+          ${PAGE_AREAS.map((a) => html`<td class="perm">${pageSelect(m, a, '')}</td>`)}
+          <td class="perm group-start all-col">${allSelect(m, '')}</td>
           ${TRIAGE_AREAS.map((a) => html`<td class="perm">${levelSelect(m, a, '')}</td>`)}
         </tr>`)}</tbody></table></div>
       <div class="only-mobile">${mods.map((m) => html`<div class="mod-block">
-        <div class="line"><span class="who-cell">${avatar(nameOf(m), 24, { src: discordAvatar(m) })}<span class="name">${nameOf(m)}</span></span>${allSelect(m, 'm-')}</div>
+        <div class="line"><span class="who-cell">${avatar(nameOf(m), 24, { src: discordAvatar(m) })}<span class="name">${nameOf(m)}</span></span></div>
+        <div class="sub-h">General setup</div>
+        ${PAGE_AREAS.map((a) => setting(PAGE_AREA_NAMES[a], PAGE_AREA_DESC[a], pageSelect(m, a, 'm-')))}
+        <div class="sub-h">Tickets › Triage</div>
+        ${setting('All Triage pages', 'Set them all at once.', allSelect(m, 'm-'))}
         ${TRIAGE_AREAS.map((a) => setting(TRIAGE_AREA_NAMES[a], TRIAGE_AREA_DESC[a], levelSelect(m, a, 'm-')))}</div>`)}</div>
-      <div class="card-note">Changes apply right away. “Use these settings” on a re-run also needs Edit on Actions, Label groups and Prompt. Applying suggestions on tickets is set by “Act on tickets” above.</div>
+      <div class="card-note">Changes apply right away. Edit on Apps &amp; repositories lets them add, change and remove apps, and pick any repository the GitHub App can access; updating the panel in Discord stays with admins. “Use these settings” on a re-run also needs Edit on Actions, Label groups and Prompt. Applying suggestions on tickets is set by “Act on tickets” above.</div>
     </div>` : '';
 
     const mark = (v: string) => (v === 'yes' ? html`${icon('circle-check', 16, 'ok')}<span class="sr-only">Yes</span>` : v === 'maybe' ? html`<span class="xs muted">If allowed</span>` : html`<span class="em" aria-label="No">—</span>`);
@@ -217,7 +238,7 @@ export function registerMemberRoutes(app: FastifyInstance, web: Web): void {
         ${pending}
       </div>
       ${modAccess}
-      ${triageAccess}
+      ${pageAccess}
       <details class="card">
         <summary>${icon('info')}<span>What each role can do</span>${icon('chevron-down', 16, 'chev')}</summary>
         <div class="table-wrap"><table>
@@ -304,6 +325,27 @@ export function registerMemberRoutes(app: FastifyInstance, web: Web): void {
     return reply.redirect(`${ctx.base}/members`);
   });
 
+  /** Owners and admins set a moderator's access to setup pages such as Apps & repositories (JSON from the selects, or a form). */
+  app.post('/w/:wid/members/:userId/page-access', async (req, reply) => {
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'manage' });
+    if (!ctx) return reply;
+    const userId = (req.params as { userId: string }).userId;
+    try {
+      const before = (await listMembers(deps.db, ctx.workspace.id)).find((m) => m.id === userId);
+      const next = await setModeratorPageAccess(deps.db, ctx.workspace.id, userId, req.body as Record<string, string>);
+      const name = before ? before.display_name ?? before.username : 'Moderator';
+      const changes = PAGE_AREAS.filter((a) => pageLevel(before?.page_access, a) !== pageLevel(next, a)).map((a) => `${PAGE_AREA_NAMES[a]} → ${LEVEL_NAMES[pageLevel(next, a)]}`);
+      const message = `${name}: ${changes.length ? changes.join(', ') : 'Access saved'}`;
+      if (web.wantsJson(req)) return reply.send({ ok: true, message });
+      setFlash(reply, 'success', message);
+    } catch (err) {
+      if (!(err instanceof UserFacingError)) throw err;
+      if (web.wantsJson(req)) return reply.code(err.status).send({ ok: false, error: err.message });
+      setFlash(reply, 'error', err.message);
+    }
+    return reply.redirect(`${ctx.base}/members#page-access`);
+  });
+
   /** Owners and admins set a moderator's access to each Triage page (JSON from the selects, or a form). */
   app.post('/w/:wid/members/:userId/triage-access', async (req, reply) => {
     const ctx = await web.requireWorkspace(req, reply, { permission: 'manage' });
@@ -322,7 +364,7 @@ export function registerMemberRoutes(app: FastifyInstance, web: Web): void {
       if (web.wantsJson(req)) return reply.code(err.status).send({ ok: false, error: err.message });
       setFlash(reply, 'error', err.message);
     }
-    return reply.redirect(`${ctx.base}/members#triage-access`);
+    return reply.redirect(`${ctx.base}/members#page-access`);
   });
 
   app.post('/w/:wid/members/:userId/remove', async (req, reply) => {

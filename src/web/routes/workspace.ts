@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { checkContributorPanel, contributorApps, getContributorSettings, listManualRoles, listTiers, verificationStats } from '../../domain/contributors.js';
 import { checkDiscordCredentials, checkGitHubCredentials, type CredentialCheck } from '../../domain/credentials.js';
 import { checkPanel } from '../../domain/panel.js';
-import { can } from '../../domain/permissions.js';
+import { can, firstTriageArea, TRIAGE_AREAS, VIEW_ONLY_AREAS } from '../../domain/permissions.js';
 import { getDiscordConnection, getGitHubConnection, listApps } from '../../domain/store.js';
 import { countByStatus, decryptPayload, filedThisWeek, listSubmissions } from '../../domain/submissions.js';
 import { enabledTicketTypes } from '../../domain/ticket-types.js';
@@ -117,9 +117,17 @@ export function registerWorkspaceRoutes(app: FastifyInstance, web: Web): void {
 
     if (!manage) {
       // Moderators: what needs attention, the latest tickets and what they're allowed to do.
-      const accessRow = (label: string, allowed: boolean, always = false) => html`<div class="line sm"><span class="grow small">${label}</span>${allowed
-        ? html`<span class="locked">${icon('circle-check', 14, 'ok')}${always ? 'Always' : 'Allowed'}</span>`
+      const accessRow = (label: string, allowed: boolean | string, always = false) => html`<div class="line sm"><span class="grow small">${label}</span>${allowed
+        ? html`<span class="locked">${icon('circle-check', 14, 'ok')}${typeof allowed === 'string' ? allowed : always ? 'Always' : 'Allowed'}</span>`
         : locked('Not allowed')}</div>`;
+      const m = ctx.membership;
+      const level = (view: boolean, edit: boolean) => (edit ? 'Edit' : view ? 'View' : false);
+      // Triage: "Edit", "View", "View · 2 of 5 pages" or "3 of 5 pages · 1 editable".
+      const viewN = TRIAGE_AREAS.filter((a) => can(m, `triage.${a}.view`)).length;
+      const editN = TRIAGE_AREAS.filter((a) => can(m, `triage.${a}.edit`)).length;
+      const editable = TRIAGE_AREAS.filter((a) => !VIEW_ONLY_AREAS.has(a)).length;
+      const pagesOf = `${viewN} of ${TRIAGE_AREAS.length} pages`;
+      const triage = !firstTriageArea(m) ? false : editN === editable && viewN === TRIAGE_AREAS.length ? 'Edit' : !editN ? (viewN === TRIAGE_AREAS.length ? 'View' : `View · ${pagesOf}`) : `${pagesOf} · ${editN} editable`;
       const body = html`
         ${pageHeader({ title: 'Overview', description: `${ctx.workspace.name} · You're a moderator` })}
         ${attentionNotice}
@@ -130,7 +138,9 @@ export function registerWorkspaceRoutes(app: FastifyInstance, web: Web): void {
         <div class="g-2-1">
           ${latest}
           <div class="card"><div class="card-h"><div><h2>Your access</h2><div class="desc">Set by admins in Members &amp; permissions.</div></div></div>
-            <div>${accessRow('View tickets', true, true)}${accessRow('Act on tickets', act)}${accessRow('Contributor verifications', contribView)}</div></div>
+            <div>${accessRow('View tickets', true, true)}${accessRow('Act on tickets', act)}${accessRow('Contributor verifications', contribView)}${accessRow('Search all issues', can(m, 'issues.view'))}${accessRow('Clean up files', can(m, 'files.manage'))}${accessRow('Server health', can(m, 'health.view'))}
+              ${accessRow('Apps & repositories', level(can(m, 'apps.view'), can(m, 'apps.edit')))}
+              ${accessRow('Triage', triage)}</div></div>
         </div>`;
       return web.render(reply, ctx, 'Overview', 'overview', body);
     }

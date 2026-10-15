@@ -216,7 +216,7 @@ export function registerTriageConfigRoutes(app: FastifyInstance, web: Web): void
         ${csrfField(ctx.csrf)}
         <fieldset class="plain stack${edit ? '' : ' view-only'}" ${edit ? '' : raw('disabled')}>
         <div class="card">
-          <div class="card-h"><div><h2>About your products</h2><div class="desc">Claude reads this with every ticket. It already gets each app’s name, repository and description.</div></div>${can(ctx.membership, 'manage') ? linkBtn(`${ctx.base}/apps`, 'Edit apps', { size: 'sm', variant: 'ghost', trail: 'arrow-right' }) : ''}</div>
+          <div class="card-h"><div><h2>About your products</h2><div class="desc">Claude reads this with every ticket. It already gets each app’s name, repository and description.</div></div>${can(ctx.membership, 'apps.view') ? linkBtn(`${ctx.base}/apps`, can(ctx.membership, 'apps.edit') ? 'Edit apps' : 'See apps', { size: 'sm', variant: 'ghost', trail: 'arrow-right' }) : ''}</div>
           <div class="card-b tight">${apps.length
             ? html`<ul class="tri-effects">${apps.map((a) => html`<li><span><strong>${a.name}</strong> <span class="muted mono xs">${a.repo_owner}/${a.repo_name}</span>${a.description ? html`<span class="muted"> · ${a.description}</span>` : html`<span class="em"> · no description</span>`}</span></li>`)}</ul>`
             : html`<p class="small muted">No apps yet.</p>`}</div>

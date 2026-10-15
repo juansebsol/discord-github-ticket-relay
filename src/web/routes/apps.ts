@@ -3,10 +3,11 @@ import { z } from 'zod';
 import type { RepoInfo } from '../../github/client.js';
 import { getInstallationRepos } from '../../domain/repos.js';
 import { checkPanel } from '../../domain/panel.js';
+import { can } from '../../domain/permissions.js';
 import { createApp, deleteApp, getApp, getGitHubConnection, listApps, moveApp, setAppEnabled, updateApp } from '../../domain/store.js';
 import { UserFacingError, type AppRow, type Deps } from '../../domain/types.js';
 import { html, raw } from '../../lib/html.js';
-import { avatar, badge, csrfField, empty, icon, iconBtn, labelTag, linkBtn, menu, notice, pageHeader, pill, plural, selectWrap, submitBtn, tag } from '../ui.js';
+import { avatar, badge, csrfField, empty, icon, iconBtn, labelTag, linkBtn, menu, notice, pageHeader, pill, plural, selectWrap, submitBtn, tag, viewOnlyTag } from '../ui.js';
 import { setFlash } from '../session.js';
 import type { Web, WorkspaceRequestContext } from '../server.js';
 
@@ -58,11 +59,16 @@ async function validateAppInput(deps: Deps, installationId: number, body: unknow
   return { values, errors, repo };
 }
 
+/** How to get a change into Discord: update the panel, or ask an admin to (moderators can't open it). */
+function panelStep(ctx: WorkspaceRequestContext, what: string): string {
+  return can(ctx.membership, 'manage') ? `Update the panel to ${what}.` : `An admin needs to update the panel to ${what}.`;
+}
+
 export function registerAppRoutes(app: FastifyInstance, web: Web): void {
   const { deps } = web;
 
   app.get('/w/:wid/apps', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply);
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'apps.view' });
     if (!ctx) return reply;
     const apps = await listApps(deps.db, ctx.workspace.id);
     const panel = await checkPanel(deps, ctx.workspace.id, { live: false });
@@ -85,26 +91,27 @@ export function registerAppRoutes(app: FastifyInstance, web: Web): void {
       return html`<span class="inline" aria-label="Files tickets" title="Files tickets">${icon('circle-check', 16, 'ok')}</span>`;
     };
     const b = ctx.base;
+    const edit = can(ctx.membership, 'apps.edit');
     const repoUse = new Map<number, number>();
     for (const a of apps) repoUse.set(a.repo_id, (repoUse.get(a.repo_id) ?? 0) + 1);
-    const addApp = linkBtn(`${b}/apps/new`, 'Add app', { variant: 'primary', icon: 'plus' });
+    const addApp = edit ? linkBtn(`${b}/apps/new`, 'Add app', { variant: 'primary', icon: 'plus' }) : null;
 
     const body = html`
       ${pageHeader({
         eyebrow: 'General setup · Step 3 of 3',
         title: 'Apps & repositories',
-        after: apps.length ? badge(apps.length) : '',
+        after: [apps.length ? badge(apps.length) : '', edit ? '' : viewOnlyTag('You can see the apps and their repositories. Ask an admin if you need to change them.')],
         description: 'The apps members pick in Discord, each mapped to a GitHub repository. Tickets and Contributor Roles both use this list.',
-        actions: addApp,
+        actions: addApp ?? undefined,
       })}
       ${panel.state === 'published' && panel.outdated
-        ? notice('info', 'The ticket panel in Discord doesn’t show your latest changes yet', 'Members still see the old list of apps.', { action: linkBtn(`${b}/tickets/panel`, 'Update panel', { size: 'sm' }) })
+        ? notice('info', 'The ticket panel in Discord doesn’t show your latest changes yet', can(ctx.membership, 'manage') ? 'Members still see the old list of apps.' : 'Members still see the old list of apps until an admin updates the panel.', { action: can(ctx.membership, 'manage') ? linkBtn(`${b}/tickets/panel`, 'Update panel', { size: 'sm' }) : undefined })
         : ''}
       <div class="card">
         ${apps.length === 0
-          ? empty('boxes', 'No apps yet', 'Add the first app members can file tickets for, for example “Mobile app” or “Billing portal”.', addApp)
+          ? empty('boxes', 'No apps yet', edit ? 'Add the first app members can file tickets for, for example “Mobile app” or “Billing portal”.' : 'An admin can add the apps members file tickets for.', addApp)
           : html`<div class="card-b flush"><div class="table-wrap wide"><table>
-              <thead><tr><th>App</th><th>Repository</th><th class="center">Tickets</th><th class="center">Contributor Roles</th><th>Extra labels</th><th class="actions"><span class="sr-only">Actions</span></th></tr></thead>
+              <thead><tr><th>App</th><th>Repository</th><th class="center">Tickets</th><th class="center">Contributor Roles</th><th>Extra labels</th>${edit ? html`<th class="actions"><span class="sr-only">Actions</span></th>` : ''}</tr></thead>
               <tbody>${apps.map((a, i) => {
                 const shared = repoUse.get(a.repo_id)! - 1;
                 return html`<tr class="${a.enabled ? '' : 'off'}">
@@ -113,7 +120,7 @@ export function registerAppRoutes(app: FastifyInstance, web: Web): void {
                   <td class="center">${ticketState(a)}</td>
                   <td class="center">${a.contributor_enabled ? html`<span class="inline" aria-label="Counts for Contributor Roles" title="Counts for Contributor Roles">${icon('circle-check', 16, 'ok')}</span>` : html`<span class="em" aria-label="Not counted">—</span>`}</td>
                   <td>${a.labels.length ? html`<div class="tags">${a.labels.map((l) => labelTag(l))}</div>` : html`<span class="em">—</span>`}</td>
-                  <td class="actions"><div class="row">
+                  ${edit ? html`<td class="actions"><div class="row">
                     ${iconBtn('pencil', `Edit ${a.name}`, { size: 'sm', href: `${b}/apps/${a.id}/edit` })}
                     ${menu([
                       i > 0 ? { post: `${b}/apps/${a.id}/move`, label: 'Move up', icon: 'arrow-up', fields: { direction: 'up' } } : null,
@@ -122,7 +129,7 @@ export function registerAppRoutes(app: FastifyInstance, web: Web): void {
                       'sep',
                       { post: `${b}/apps/${a.id}/delete`, label: 'Remove app…', icon: 'trash-2', danger: true, confirm: { title: `Remove “${a.name}”?`, body: 'Members can’t pick it after you update the panel. Past tickets are kept.', label: 'Remove app', danger: true } },
                     ], { csrf: ctx.csrf, label: `More actions for ${a.name}` })}
-                  </div></td></tr>`;
+                  </div></td>` : ''}</tr>`;
               })}
               </tbody></table></div></div>
               <div class="card-note">Hidden apps don’t appear on the panel. With more than 25 apps, the panel shows 24 and a “More apps…” option that opens a page-by-page list.</div>`}
@@ -140,7 +147,8 @@ export function registerAppRoutes(app: FastifyInstance, web: Web): void {
       description: 'Members only see the name and description. The repository stays behind the scenes.',
     });
     if (!gh || !deps.github) {
-      return web.render(reply, ctx, title, 'apps', html`${header}${notice('warn', 'Connect GitHub first', 'You need a connected GitHub account to choose a repository.', { action: linkBtn(`${b}/setup/github`, 'Connect GitHub', { size: 'sm' }) })}`);
+      const admin = can(ctx.membership, 'manage');
+      return web.render(reply, ctx, title, 'apps', html`${header}${notice('warn', 'Connect GitHub first', admin ? 'You need a connected GitHub account to choose a repository.' : 'An admin needs to connect GitHub before apps can be added.', { action: admin ? linkBtn(`${b}/setup/github`, 'Connect GitHub', { size: 'sm' }) : undefined })}`);
     }
     let repos: RepoInfo[] = [];
     let repoError = '';
@@ -162,6 +170,7 @@ export function registerAppRoutes(app: FastifyInstance, web: Web): void {
             <div class="field"><label for="description">Short description <span class="opt">(optional)</span></label><input id="description" type="text" name="description" value="${values.description}" maxlength="100" placeholder="iOS and Android"><div class="hint">Helps members pick the right app. Up to 100 characters.</div></div>
           </div>
           <div class="field"><label for="repo">GitHub repository</label>
+            ${can(ctx.membership, 'manage') ? '' : html`<div class="hint">Repositories the GitHub App can access. Ask an admin if one is missing.</div>`}
             ${selectWrap(html`<select id="repo" name="repo_id" required>
               <option value="">Choose a repository…</option>
               ${repos.map((r) => {
@@ -170,7 +179,7 @@ export function registerAppRoutes(app: FastifyInstance, web: Web): void {
               })}
             </select>`)}
             <div class="hint" id="repo-visibility"></div>
-            ${repos.length === 0 && !repoError ? html`<div class="hint">No repositories are shared with the GitHub App yet. <a href="${b}/setup/github">Manage repository access</a>.</div>` : ''}
+            ${repos.length === 0 && !repoError ? html`<div class="hint">No repositories are shared with the GitHub App yet. ${can(ctx.membership, 'manage') ? html`<a href="${b}/setup/github">Manage repository access</a>.` : 'Ask an admin to share them in GitHub setup.'}</div>` : ''}
           </div>
           <div class="field"><span class="label">Labels <span class="opt">(optional)</span></span>
             <div class="hint">Existing labels from the repository, added to every ticket for this app.</div>
@@ -188,13 +197,13 @@ export function registerAppRoutes(app: FastifyInstance, web: Web): void {
   }
 
   app.get('/w/:wid/apps/new', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply);
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'apps.edit' });
     if (!ctx) return reply;
     return renderForm(ctx, reply, null, { name: '', description: '', repoId: null, labels: [], enabled: true });
   });
 
   app.get('/w/:wid/apps/:appId/edit', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply);
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'apps.edit' });
     if (!ctx) return reply;
     const existing = await getApp(deps.db, ctx.workspace.id, (req.params as { appId: string }).appId);
     if (!existing) return reply.callNotFound();
@@ -202,7 +211,7 @@ export function registerAppRoutes(app: FastifyInstance, web: Web): void {
   });
 
   async function save(req: FastifyRequest, reply: FastifyReply, appId: string | null) {
-    const ctx = await web.requireWorkspace(req, reply);
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'apps.edit' });
     if (!ctx) return reply;
     const existing = appId ? await getApp(deps.db, ctx.workspace.id, appId) : null;
     if (appId && !existing) return reply.callNotFound();
@@ -229,7 +238,7 @@ export function registerAppRoutes(app: FastifyInstance, web: Web): void {
       if (err instanceof UserFacingError) return renderForm(ctx, reply.code(400), existing, result.values, [err.message]);
       throw err;
     }
-    setFlash(reply, 'success', existing ? `Saved “${input.name}”` : `Added “${input.name}”. Update the panel to show it in Discord.`);
+    setFlash(reply, 'success', existing ? `Saved “${input.name}”` : `Added “${input.name}”. ${panelStep(ctx, 'show it in Discord')}`);
     return reply.redirect(`${ctx.base}/apps`);
   }
 
@@ -237,17 +246,17 @@ export function registerAppRoutes(app: FastifyInstance, web: Web): void {
   app.post('/w/:wid/apps/:appId', (req, reply) => save(req, reply, (req.params as { appId: string }).appId));
 
   app.post('/w/:wid/apps/:appId/toggle', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply);
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'apps.edit' });
     if (!ctx) return reply;
     const existing = await getApp(deps.db, ctx.workspace.id, (req.params as { appId: string }).appId);
     if (!existing) return reply.callNotFound();
     await setAppEnabled(deps.db, ctx.workspace.id, existing.id, !existing.enabled);
-    setFlash(reply, 'success', `“${existing.name}” ${existing.enabled ? 'hidden from' : 'shown on'} the panel. Update the panel to reflect this in Discord.`);
+    setFlash(reply, 'success', `“${existing.name}” ${existing.enabled ? 'hidden from' : 'shown on'} the panel. ${panelStep(ctx, 'reflect this in Discord')}`);
     return reply.redirect(`${ctx.base}/apps`);
   });
 
   app.post('/w/:wid/apps/:appId/move', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply);
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'apps.edit' });
     if (!ctx) return reply;
     const direction = (req.body as { direction?: string }).direction === 'up' ? 'up' : 'down';
     await moveApp(deps.db, ctx.workspace.id, (req.params as { appId: string }).appId, direction);
@@ -255,18 +264,18 @@ export function registerAppRoutes(app: FastifyInstance, web: Web): void {
   });
 
   app.post('/w/:wid/apps/:appId/delete', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply);
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'apps.edit' });
     if (!ctx) return reply;
     const existing = await getApp(deps.db, ctx.workspace.id, (req.params as { appId: string }).appId);
     if (!existing) return reply.callNotFound();
     await deleteApp(deps.db, ctx.workspace.id, existing.id);
-    setFlash(reply, 'success', `Removed “${existing.name}”. Update the panel to remove it from Discord.`);
+    setFlash(reply, 'success', `Removed “${existing.name}”. ${panelStep(ctx, 'remove it from Discord')}`);
     return reply.redirect(`${ctx.base}/apps`);
   });
 
   /** JSON: labels of a repository, restricted to repositories the installation can access. */
   app.get('/w/:wid/apps/labels', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply);
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'apps.edit' });
     if (!ctx) return reply;
     const gh = await getGitHubConnection(deps.db, ctx.workspace.id);
     if (!gh || !deps.github) return reply.code(400).send({ error: 'Connect GitHub first.' });

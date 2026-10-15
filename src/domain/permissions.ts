@@ -8,6 +8,17 @@ export type AccessLevel = 'none' | 'view' | 'edit';
 export const VIEW_ONLY_AREAS: ReadonlySet<TriageArea> = new Set(['activity']);
 export const TRIAGE_AREA_NAMES: Record<TriageArea, string> = { actions: 'Actions', labels: 'Label groups', prompt: 'Prompt', runs: 'Re-run', activity: 'Activity' };
 
+/** Setup pages an admin can open to moderators, each with no access, view or edit. */
+export const PAGE_AREAS = ['apps'] as const;
+export type PageArea = (typeof PAGE_AREAS)[number];
+export const PAGE_AREA_NAMES: Record<PageArea, string> = { apps: 'Apps & repositories' };
+
+/** A moderator's level on a setup page (none when unset or unknown). */
+export function pageLevel(access: Partial<Record<string, unknown>> | null | undefined, area: PageArea): AccessLevel {
+  const v = access?.[area];
+  return v === 'edit' || v === 'view' ? v : 'none';
+}
+
 /** A moderator's level on a Triage page (none when unset or unknown). */
 export function triageLevel(access: Partial<Record<string, unknown>> | null | undefined, area: TriageArea): AccessLevel {
   const v = access?.[area];
@@ -18,7 +29,8 @@ export function triageLevel(access: Partial<Record<string, unknown>> | null | un
 /**
  * What a workspace member may do. Owners and admins can do everything except that only
  * owners manage people; moderators can always see tickets and, if an admin allows it, act on
- * them and see contributor verifications. Moderators never change setup, panels or settings.
+ * them, see contributor verifications, and see or change Apps & repositories and the Triage
+ * pages. GitHub, Discord, panels and settings stay with admins.
  */
 export type Permission =
   | 'view' // overview
@@ -30,7 +42,8 @@ export type Permission =
   | 'health.view' // the Server health page
   | 'manage' // setup, apps, panels, ticket types, contributor roles, settings, moderator permissions
   | 'members' // invite people, change roles, remove people
-  | `triage.${TriageArea}.${'view' | 'edit'}`; // a Triage page: see it, or change it
+  | `triage.${TriageArea}.${'view' | 'edit'}` // a Triage page: see it, or change it
+  | `${PageArea}.${'view' | 'edit'}`; // a setup page opened to moderators: see it, or change it
 
 export interface MemberAccess {
   role: Role;
@@ -41,6 +54,8 @@ export interface MemberAccess {
   can_view_health: boolean;
   /** Per Triage page: none, view or edit. */
   triage_access: Partial<Record<TriageArea, AccessLevel>>;
+  /** Per setup page (Apps & repositories): none, view or edit. */
+  page_access: Partial<Record<PageArea, AccessLevel>>;
 }
 
 export function can(m: MemberAccess, p: Permission): boolean {
@@ -61,6 +76,11 @@ export function can(m: MemberAccess, p: Permission): boolean {
     case 'health.view':
       return m.can_view_health;
     default: {
+      const page = /^(\w+)\.(view|edit)$/.exec(p);
+      if (page && (PAGE_AREAS as readonly string[]).includes(page[1]!)) {
+        const level = pageLevel(m.page_access, page[1] as PageArea);
+        return page[2] === 'view' ? level !== 'none' : level === 'edit';
+      }
       const t = /^triage\.(\w+)\.(view|edit)$/.exec(p);
       if (!t || !(TRIAGE_AREAS as readonly string[]).includes(t[1]!)) return false;
       const level = triageLevel(m.triage_access, t[1] as TriageArea);
