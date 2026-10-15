@@ -57,6 +57,8 @@ export interface IssueDetail {
   /** Who opened it, and whether that's a bot account (GitHub Apps, Dependabot and the like). */
   author: string | null;
   authorIsBot: boolean;
+  /** GitHub's avatar for the author (only from avatars.githubusercontent.com). */
+  authorAvatar: string | null;
 }
 
 function toIssueDetail(data: any): IssueDetail {
@@ -73,6 +75,7 @@ function toIssueDetail(data: any): IssueDetail {
     updatedAt: new Date(typeof data.updated_at === 'string' ? data.updated_at : typeof data.created_at === 'string' ? data.created_at : 0),
     author: typeof data.user?.login === 'string' ? data.user.login : null,
     authorIsBot: data.user?.type === 'Bot' || /\[bot\]$/.test(String(data.user?.login ?? '')),
+    authorAvatar: typeof data.user?.avatar_url === 'string' && data.user.avatar_url.startsWith('https://avatars.githubusercontent.com/') ? data.user.avatar_url.slice(0, 300) : null,
   };
 }
 

@@ -1048,3 +1048,4 @@ progress.bar.wide { max-width: none; }
 .nav-item.locked:hover { background: transparent; }
 .nav-item.locked:hover > .ic { color: var(--muted); }
 .nav-item.locked .trail .ic { color: var(--faint); }
+.list-row .l2.tri-line-m { overflow: visible; white-space: normal; }

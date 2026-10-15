@@ -16,21 +16,14 @@ import { listApps } from '../../domain/store.js';
 import { escapeHtml, html, raw, type SafeHtml } from '../../lib/html.js';
 import { setFlash } from '../session.js';
 import type { Web } from '../server.js';
-import { empty, icon, linkBtn, pill, plural, postBtn, segLinks, selectWrap, timeAgo, when } from '../ui.js';
-import { ticketsHeader } from './tickets.js';
-import { issuesNav, issueTriageCount } from './issue-triage.js';
+import { empty, icon, linkBtn, pill, plural, postBtn, segLinks, selectWrap, tag, when } from '../ui.js';
+import { ticketsHeader, triageCell, type TriageSummary } from './tickets.js';
+import { issuesNav, issueTable, issueTriageCount } from './issue-triage.js';
+import { triageSummaries } from '../../triage/engine.js';
 
 const PAGE_SIZE = 50;
 
 type StateFilter = 'open' | 'closed' | 'all';
-
-function closedAs(reason: string | null): string {
-  return reason === 'not_planned' ? 'not planned' : reason === 'duplicate' ? 'duplicate' : 'completed';
-}
-
-function statePill(i: IndexedIssue): SafeHtml {
-  return i.state === 'open' ? pill('Open', 'ok') : pill(`Closed · ${closedAs(i.state_reason)}`, 'closed');
-}
 
 /** FTS snippet markers (\u0001 … \u0002) become <mark> after escaping everything else. */
 function snippetHtml(s: string | null): SafeHtml | string {
@@ -97,18 +90,22 @@ export function registerIssueRoutes(app: FastifyInstance, web: Web): void {
     rows = rows.slice(0, PAGE_SIZE);
 
     // Issues this app filed link to their ticket in the console.
-    const { rows: tickets } = await deps.db.query<{ id: string; repo_id: number; issue_number: number }>(
-      `SELECT id, repo_id, issue_number FROM submissions WHERE workspace_id = $1 AND issue_number IS NOT NULL
+    const { rows: tickets } = await deps.db.query<{ id: string; repo_id: number; issue_number: number; reporter_display_name: string }>(
+      `SELECT id, repo_id, issue_number, reporter_display_name FROM submissions WHERE workspace_id = $1 AND issue_number IS NOT NULL
          AND issue_number IN (SELECT value FROM json_each($2))`,
       [wid, JSON.stringify(rows.map((r) => r.number))],
     );
     const ticketOf = new Map(tickets.map((t) => [`${t.repo_id}:${t.issue_number}`, t.id]));
-    // Issues opened on GitHub that triage looked at link to their triage page.
-    const { rows: triaged } = await deps.db.query<{ repo_id: number; number: number }>(
-      `SELECT repo_id, number FROM issue_triage WHERE workspace_id = $1 AND number IN (SELECT value FROM json_each($2))`,
+    const reporterOf = new Map(tickets.map((t) => [t.id, t.reporter_display_name]));
+    // Triage: a ticket's (from Discord), or an issue opened on GitHub's.
+    const ticketTriage = await triageSummaries(deps.db, wid, tickets.map((t) => t.id));
+    const { rows: triaged } = await deps.db.query<TriageSummary & { repo_id: number; number: number }>(
+      `SELECT repo_id, number, status, priority, is_duplicate, is_spam, is_support, suggestion_count, suggestions, dismissed_count,
+         json_array_length(COALESCE(applied_actions, '[]')) AS applied_count
+       FROM issue_triage WHERE workspace_id = $1 AND number IN (SELECT value FROM json_each($2))`,
       [wid, JSON.stringify(rows.map((r) => r.number))],
     );
-    const triagedSet = new Set(triaged.map((t) => `${t.repo_id}:${t.number}`));
+    const issueTriage = new Map(triaged.map((t) => [`${t.repo_id}:${t.number}`, t]));
     const toReview = await issueTriageCount(web, wid);
 
     const link = (o: { state?: StateFilter; page?: number; q?: string; repo?: number | null }) => {
@@ -146,21 +143,33 @@ export function registerIssueRoutes(app: FastifyInstance, web: Web): void {
         : html`<div class="card-b"><p class="small muted">Add an app first: its repository is copied here.</p></div>`}
     </div>`;
 
-    const resultRows = rows.map((r) => {
-      const ticket = ticketOf.get(`${r.repo_id}:${r.number}`);
+    const table = issueTable(rows.map((r) => {
+      const key = `${r.repo_id}:${r.number}`;
+      const ticket = ticketOf.get(key);
+      const own = issueTriage.get(key);
+      const repo = repos.get(r.repo_id);
       // Only when the description itself matched (the title is already shown).
       const snippet = 'snippet' in r && r.snippet?.includes('\u0001') ? r.snippet : null;
-      const repo = repos.get(r.repo_id);
-      return html`<li class="issue-row">
-        <span class="issue-ic">${icon(r.state === 'open' ? 'circle-dot' : 'circle-check', 16, r.state === 'open' ? 'ok' : 'muted')}</span>
-        <div class="grow">
-          <div class="issue-t"><a href="${r.html_url}" target="_blank" rel="noopener noreferrer">${r.title}</a> <span class="muted nowrap">#${String(r.number)}</span></div>
-          <div class="sub">${[repos.size > 1 && repo ? repo.name : null, r.app_name, `opened ${timeAgo(r.created_at)}`, r.state === 'closed' && r.closed_at ? `closed ${timeAgo(r.closed_at)}` : null].filter(Boolean).join(' · ')}${r.duplicate_of ? html` · duplicate of <a href="https://github.com/${repo?.owner ?? ''}/${repo?.name ?? ''}/issues/${String(r.duplicate_of)}" target="_blank" rel="noopener noreferrer">#${String(r.duplicate_of)}</a>` : ''}</div>
-          ${snippet ? html`<p class="issue-snip">${snippetHtml(snippet)}</p>` : ''}
-        </div>
-        <div class="issue-meta">${statePill(r)}${ticket ? linkBtn(`${b}/tickets/${ticket}`, 'Ticket', { size: 'sm', variant: 'ghost' }) : triagedSet.has(`${r.repo_id}:${r.number}`) ? linkBtn(`${b}/tickets/issues/${String(r.repo_id)}/${String(r.number)}`, 'Triage', { size: 'sm', variant: 'ghost', icon: 'bot' }) : ''}</div>
-      </li>`;
-    });
+      return {
+        repoId: r.repo_id,
+        number: r.number,
+        title: r.title,
+        closed: r.state === 'closed',
+        closedReason: r.state_reason,
+        url: r.html_url,
+        repoName: repo?.name ?? '',
+        app: r.app_name ?? repo?.apps.join(', ') ?? null,
+        // A Discord ticket's GitHub author is this app's bot: show the member instead.
+        author: ticket ? reporterOf.get(ticket) ?? r.author : r.author,
+        authorAvatar: ticket ? null : r.author_avatar,
+        viaDiscord: Boolean(ticket),
+        updatedAt: r.updated_at,
+        href: ticket ? `${b}/tickets/${ticket}` : own ? `${b}/tickets/issues/${String(r.repo_id)}/${String(r.number)}` : r.html_url,
+        external: !ticket && !own,
+        triage: ticket ? html`${triageCell(ticketTriage.get(ticket), true) || tag('Discord ticket', { icon: 'message-circle' })}` : own ? triageCell(own) : html`<span class="em">—</span>`,
+        extra: html`${r.duplicate_of ? html`<div class="sub">Duplicate of <a href="https://github.com/${repo?.owner ?? ''}/${repo?.name ?? ''}/issues/${String(r.duplicate_of)}" target="_blank" rel="noopener noreferrer">#${String(r.duplicate_of)}</a></div>` : ''}${snippet ? html`<p class="issue-snip">${snippetHtml(snippet)}</p>` : ''}`,
+      };
+    }));
 
     const body = html`
       ${await ticketsHeader(web, ctx, 'issues')}
@@ -182,7 +191,7 @@ export function registerIssueRoutes(app: FastifyInstance, web: Web): void {
         </div>
         ${related ? html`<div class="notice flat info">${icon('info')}<div><div class="n-text">No issue has all of those words. Showing the closest matches.</div></div><span></span></div>` : ''}
         <div class="card-b flush">${rows.length
-          ? html`<ul class="list issues">${resultRows}</ul>`
+          ? table
           : search
             ? empty('search-x', 'No matching issues', 'Try fewer or different words, or another state.', linkBtn(link({ q: '', page: 1 }), 'Clear search'))
             : empty('inbox', totalIndexed ? 'No issues here' : 'No issues yet', totalIndexed ? 'Nothing matches this filter.' : loading ? 'The first load is running. Issues appear here as they’re copied.' : 'Issues from your repositories appear here once they’re copied.')}</div>

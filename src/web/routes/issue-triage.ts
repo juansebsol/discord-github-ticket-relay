@@ -16,7 +16,7 @@ import { actionMatcher, CONFIDENCE_STEPS, confidenceFilter, TRIAGE_STATES, triag
 import { bulkBanner, bulkBar } from './triage-bulk.js';
 import { setFlash } from '../session.js';
 import type { Web, WorkspaceRequestContext } from '../server.js';
-import { avatar, empty, formatDate, icon, labelTag, linkBtn, notice, pageHeader, pill, segLinks, selectWrap, timeAgo, when } from '../ui.js';
+import { avatar, empty, formatDate, icon, labelTag, linkBtn, notice, pageHeader, pill, segLinks, selectWrap, tag, timeAgo, when } from '../ui.js';
 import { ticketsHeader, triageCard, triageCell } from './tickets.js';
 
 const PAGE = 50;
@@ -29,7 +29,58 @@ const SHOWS: { key: Show; label: string; where: string }[] = [
   { key: 'all', label: 'All', where: '1' },
 ];
 
-type Row = IssueTriageRow & { title: string | null; html_url: string | null; issue_state: string | null; opened_at: Date | null; owner: string | null; name: string | null };
+type Row = IssueTriageRow & { title: string | null; html_url: string | null; issue_state: string | null; issue_state_reason: string | null; opened_at: Date | null; issue_updated_at: Date | null; author: string | null; author_avatar: string | null; owner: string | null; name: string | null };
+
+/** One row of an Issues table (both views). */
+export interface IssueTableRow {
+  repoId: number;
+  number: number;
+  title: string;
+  closed: boolean;
+  /** GitHub's reason: completed, not_planned, duplicate. */
+  closedReason?: string | null;
+  url: string;
+  repoName: string;
+  app: string | null;
+  author: string | null;
+  authorAvatar: string | null;
+  /** The ticket came from Discord: the author is the member there (GitHub shows the bot). */
+  viaDiscord?: boolean;
+  updatedAt: Date | null;
+  /** Where the title goes: the ticket, the triage page, or GitHub. */
+  href: string;
+  external: boolean;
+  triage: SafeHtml | string;
+  /** Extra line under the title (search match, duplicate of). */
+  extra?: SafeHtml | string;
+  select?: { value: string; match: boolean } | null;
+}
+
+/** A repository shared by many apps: the first two, then "+N more". */
+function shortApps(apps: string | null): string | null {
+  const list = (apps ?? '').split(', ').filter(Boolean);
+  return list.length > 2 ? `${list.slice(0, 2).join(', ')} +${list.length - 2} more` : apps;
+}
+
+/** The Issues table: like the inbox, a table on desktop and stacked rows on phones. */
+export function issueTable(rows: IssueTableRow[], o: { select?: boolean } = {}): SafeHtml {
+  const target = (r: IssueTableRow) => (r.external ? raw('target="_blank" rel="noopener noreferrer"') : '');
+  const closedText = (r: IssueTableRow) => (r.closedReason === 'not_planned' ? 'Closed · not planned' : r.closedReason === 'duplicate' ? 'Closed · duplicate' : 'Closed');
+  const closedTag = (r: IssueTableRow) => (r.closed ? html` ${tag(closedText(r))}` : '');
+  return html`<div class="table-wrap only-desktop"><table>
+      <thead><tr>${o.select ? html`<th class="check-col"><input type="checkbox" class="rule-check" data-select-all="bulk-triage" aria-label="Select every issue on this page"></th>` : ''}<th>Issue</th><th>Reporter</th><th>Triage</th><th>GitHub issue</th><th class="num">Updated</th></tr></thead>
+      <tbody>${rows.map((r) => html`<tr class="click">
+        ${o.select ? html`<td class="check-col">${r.select ? html`<input type="checkbox" class="rule-check" name="ticket" value="${r.select.value}" form="bulk-triage" ${r.select.match ? raw('data-match') : ''} aria-label="Select issue #${String(r.number)}">` : ''}</td>` : ''}
+        <td><a class="cell-title" href="${r.href}" ${target(r)}>${r.title}</a>${closedTag(r)}<div class="sub">${[shortApps(r.app), r.repoName].filter(Boolean).join(' · ')}</div>${r.extra ?? ''}</td>
+        <td>${r.author ? html`<span class="who-cell">${avatar(r.author, 20, { src: r.authorAvatar })}<span class="small">${r.author}</span>${r.viaDiscord ? html`<span title="Reported in Discord">${icon('message-circle', 14, 'faint')}</span>` : ''}</span>` : html`<span class="em">—</span>`}</td>
+        <td>${r.triage}</td>
+        <td><a class="inline gap-4 nowrap" href="${r.url}" target="_blank" rel="noopener noreferrer">${icon('circle-dot', 14, r.closed ? 'faint' : 'muted')}${r.repoName}#${String(r.number)}</a></td>
+        <td class="num">${r.updatedAt ? when(r.updatedAt) : html`<span class="em">—</span>`}</td></tr>`)}</tbody></table></div>
+    <ul class="list only-mobile">${rows.map((r) => html`<li><a class="list-row" href="${r.href}" ${target(r)}>
+      <span class="l1">${r.title}</span>${r.closed ? tag(closedText(r)) : ''}
+      <span class="l2 tri-line-m">${r.triage}</span>
+      <span class="l2">${[shortApps(r.app), `${r.repoName}#${r.number}`, r.author, r.updatedAt ? timeAgo(r.updatedAt) : null].filter(Boolean).join(' · ')}</span></a></li>`)}</ul>`;
+}
 
 type IssueQuery = { show?: string; f?: string; conf?: string };
 
@@ -117,7 +168,8 @@ export function registerIssueTriageRoutes(app: FastifyInstance, web: Web): void 
     );
     const count = (k: Show) => Number(counts[0]?.[k] ?? 0);
     const [{ rows: total }, { rows }] = await Promise.all([deps.db.query<{ n: number }>(`SELECT count(*) AS n FROM issue_triage t WHERE ${where}`, [...params]), deps.db.query<Row>(
-      `SELECT t.*, x.title, x.html_url, x.state AS issue_state, x.created_at AS opened_at, COALESCE(ir.owner, a.repo_owner) AS owner, COALESCE(ir.name, a.repo_name) AS name
+      `SELECT t.*, x.title, x.html_url, x.state AS issue_state, x.state_reason AS issue_state_reason, x.created_at AS opened_at, x.updated_at AS issue_updated_at, x.author, x.author_avatar,
+         COALESCE(ir.owner, a.repo_owner) AS owner, COALESCE(ir.name, a.repo_name) AS name
        FROM issue_triage t
        LEFT JOIN issue_index x ON x.repo_id = t.repo_id AND x.number = t.number
        LEFT JOIN issue_index_repos ir ON ir.repo_id = t.repo_id
@@ -142,15 +194,27 @@ export function registerIssueTriageRoutes(app: FastifyInstance, web: Web): void 
       const qs = p.toString();
       return `${b}/tickets/issues/triage${qs ? `?${qs}` : ''}`;
     };
-    const list = shownRows.map((r) => html`<li class="issue-row">
-        ${anySelectable ? html`<span class="check-cell"><input type="checkbox" class="rule-check" name="ticket" value="gh:${String(r.repo_id)}:${String(r.number)}" form="bulk-triage" ${matches(r) ? raw('data-match') : ''} aria-label="Select issue #${String(r.number)}"></span>` : ''}
-        <span class="issue-ic">${icon(r.issue_state === 'closed' ? 'circle-check' : 'circle-dot', 16, r.issue_state === 'closed' ? 'muted' : 'ok')}</span>
-        <div class="grow">
-          <div class="issue-t"><a href="${b}/tickets/issues/${String(r.repo_id)}/${String(r.number)}">${r.title ?? `Issue #${r.number}`}</a> <span class="muted nowrap">#${String(r.number)}</span></div>
-          <div class="sub">${[r.owner && r.name ? `${r.owner}/${r.name}` : null, r.opened_at ? `opened ${timeAgo(r.opened_at)}` : null, r.status === 'skipped' ? r.skip_reason : r.status === 'failed' ? r.error : null].filter(Boolean).join(' · ')}</div>
-        </div>
-        <div class="issue-meta">${triageCell(r)}</div>
-      </li>`);
+    const apps = await listApps(deps.db, wid);
+    const appsOf = (repoId: number) => apps.filter((a) => a.repo_id === repoId).map((a) => a.name).join(', ') || null;
+    const table = issueTable(shownRows.map((r) => ({
+      repoId: r.repo_id,
+      number: r.number,
+      title: r.title ?? `Issue #${r.number}`,
+      closed: r.issue_state === 'closed',
+      closedReason: r.issue_state_reason,
+      url: r.html_url ?? `https://github.com/${r.owner}/${r.name}/issues/${r.number}`,
+      repoName: r.name ?? '',
+      app: appsOf(r.repo_id),
+      author: r.author,
+      authorAvatar: r.author_avatar,
+      updatedAt: r.issue_updated_at ?? r.updated_at,
+      href: `${b}/tickets/issues/${String(r.repo_id)}/${String(r.number)}`,
+      external: false,
+      triage: triageCell(r),
+      extra: r.status === 'skipped' || r.status === 'failed' ? html`<div class="sub">${r.status === 'skipped' ? r.skip_reason : r.error}</div>` : '',
+      select: anySelectable ? { value: `gh:${r.repo_id}:${r.number}`, match: matches(r) } : null,
+    })), { select: anySelectable });
+
     const body = html`
       ${await ticketsHeader(web, ctx, 'issues')}
       ${issuesNav(ctx, 'triage', count('review'))}
@@ -165,8 +229,8 @@ export function registerIssueTriageRoutes(app: FastifyInstance, web: Web): void 
               <button type="submit" class="btn sm nojs">Show</button></form></div>
           ${act ? await bulkBanner(web, ctx) : ''}
           ${anySelectable ? bulkBar(ctx, { matcher, selectable: shownRows.length, matching: Number(total[0]?.n ?? 0), from: 'issues', hidden: { show: show.key, f: extra?.value, conf: confSpec?.value }, back: link({ page }) }) : ''}
-          <div class="card-b flush">${list.length
-            ? html`<ul class="list issues">${anySelectable ? html`<li class="issue-row select-all-row"><span class="check-cell"><input type="checkbox" class="rule-check" data-select-all="bulk-triage" aria-label="Select every issue on this page"></span><span class="small muted">Select all on this page</span></li>` : ''}${list}</ul>`
+          <div class="card-b flush">${shownRows.length
+            ? table
             : empty('inbox', show.key === 'review' ? 'Nothing to review' : 'No issues here', show.key === 'review' ? 'Triage suggestions for issues opened on GitHub show up here.' : 'Nothing matches this filter.')}</div>
           ${page > 1 || hasMore ? html`<div class="pager"><span>Page ${String(page)}</span><div class="row">
             ${page > 1 ? linkBtn(link({ page: page - 1 }), 'Previous', { size: 'sm', icon: 'chevron-left' }) : ''}${hasMore ? linkBtn(link({ page: page + 1 }), 'Next', { size: 'sm', trail: 'chevron-right' }) : ''}</div></div>` : ''}

@@ -35,6 +35,9 @@ export interface IndexedIssue {
   closed_at: Date | null;
   gone: number;
   indexed_at: Date;
+  /** Who opened it on GitHub. */
+  author: string | null;
+  author_avatar: string | null;
 }
 
 export interface IndexRepo {
@@ -78,12 +81,13 @@ export function appOf(title: string, body: string): string | null {
 export async function upsertIssues(q: Queryable, repoId: number, issues: IssueDetail[]): Promise<void> {
   for (const i of issues) {
     await q.query(
-      `INSERT INTO issue_index (repo_id, number, title, excerpt, state, state_reason, labels, app_name, html_url, created_at, updated_at, closed_at, gone, indexed_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 0, now_ms())
+      `INSERT INTO issue_index (repo_id, number, title, excerpt, state, state_reason, labels, app_name, html_url, created_at, updated_at, closed_at, gone, indexed_at, author, author_avatar)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 0, now_ms(), $13, $14)
        ON CONFLICT (repo_id, number) DO UPDATE SET title = excluded.title, excerpt = excluded.excerpt, state = excluded.state,
          state_reason = excluded.state_reason, labels = excluded.labels, app_name = excluded.app_name, html_url = excluded.html_url,
-         created_at = excluded.created_at, updated_at = excluded.updated_at, closed_at = excluded.closed_at, gone = 0, indexed_at = now_ms()`,
-      [repoId, i.number, i.title.slice(0, 300), excerptOf(i.body), i.state, i.stateReason, i.labels, appOf(i.title, i.body), i.url, i.createdAt, i.updatedAt, i.closedAt],
+         created_at = excluded.created_at, updated_at = excluded.updated_at, closed_at = excluded.closed_at, gone = 0, indexed_at = now_ms(),
+         author = COALESCE(excluded.author, issue_index.author), author_avatar = COALESCE(excluded.author_avatar, issue_index.author_avatar)`,
+      [repoId, i.number, i.title.slice(0, 300), excerptOf(i.body), i.state, i.stateReason, i.labels, appOf(i.title, i.body), i.url, i.createdAt, i.updatedAt, i.closedAt, i.author ?? null, i.authorAvatar ?? null],
     );
   }
 }
@@ -389,6 +393,8 @@ export class IssueIndexer {
         for (let p = 1; p <= 1000; p++) {
           const page = await github.listIssuesPage(repo.installation_id, repo.owner, repo.name, { sort: 'created', direction: 'asc', page: p });
           seen.push(...page.issues.map((i) => i.number));
+          // The full list also refreshes every copy (and fills in details added later, like the author).
+          await upsertIssues(db, repoId, page.issues);
           if (!page.more) break;
         }
         await db.query('DELETE FROM issue_index WHERE repo_id = $1 AND number NOT IN (SELECT value FROM json_each($2))', [repoId, JSON.stringify(seen)]);

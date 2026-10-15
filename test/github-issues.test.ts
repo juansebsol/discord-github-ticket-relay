@@ -128,6 +128,12 @@ describe('triage of issues opened on GitHub', () => {
     expect(list.statusCode).toBe(200);
     expect(list.body).toContain(`/tickets/issues/${ws.repoIds[0]}/${num}`);
     expect(list.body).toContain('To review');
+    // A table like the inbox: who opened it on GitHub, the GitHub link, when it changed.
+    expect(list.body).toContain('<th>Reporter</th>');
+    expect(list.body).toContain('<span class="small">someone</span>');
+    expect(list.body).toContain(`/issues/${num}" target="_blank"`);
+    const all = await env.server.inject({ method: 'GET', url: `${w()}/tickets/issues`, ...get(ws.owner) });
+    expect(all.body).toContain('<span class="small">someone</span>');
 
     const page = await env.server.inject({ method: 'GET', url: `${w()}/tickets/issues/${ws.repoIds[0]}/${num}`, ...get(ws.owner) });
     expect(page.statusCode).toBe(200);
