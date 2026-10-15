@@ -442,6 +442,8 @@ export interface RunItemRow {
   apply_note: string | null;
   /** Applying also applies the suggestions (someone approved them in bulk). */
   apply_suggestions: boolean;
+  /** Applying only updates the inbox: every action becomes a suggestion, nothing goes to GitHub. */
+  apply_inbox_only: boolean;
   apply_done_at: Date | null;
   /** Compared with the ticket's triage before the run, once the ticket is done. */
   change: RunChange | null;
@@ -456,6 +458,8 @@ export const MAX_RERUN = 10_000;
 
 export type RunChange = 'changed' | 'new' | 'same';
 export type RunFilter = 'all' | 'changed' | 'same' | 'skipped';
+/** What applying a preview does: inbox only (all suggestions), the automatic actions on GitHub, or everything on GitHub. */
+export type ApplyMode = 'inbox' | 'auto' | 'all';
 type Decisions = { auto: TriageAction[]; suggested: TriageAction[] };
 
 /** The decisions in a result, ignoring wording: what is done automatically and what is suggested. */
@@ -1000,7 +1004,7 @@ export class TriageEngine {
   /** Stops applying a preview: tickets not reached yet go back to not applied, so they can be applied later. */
   async stopApplying(workspaceId: string, runId: string): Promise<number> {
     if (!(await this.getRun(workspaceId, runId))) throw new UserFacingError('That re-run wasn’t found.', 404);
-    const res = await this.deps.db.query(`UPDATE triage_run_items SET apply_status = NULL, apply_suggestions = 0 WHERE run_id = $1 AND apply_status = 'pending' AND (lease_until_at IS NULL OR lease_until_at < now_ms())`, [runId]);
+    const res = await this.deps.db.query(`UPDATE triage_run_items SET apply_status = NULL, apply_suggestions = 0, apply_inbox_only = 0 WHERE run_id = $1 AND apply_status = 'pending' AND (lease_until_at IS NULL OR lease_until_at < now_ms())`, [runId]);
     return res.rowCount;
   }
 
@@ -1024,19 +1028,19 @@ export class TriageEngine {
    * result replaces its old one and its automatic actions (and, if asked, its suggestions) are
    * applied on GitHub. Queued: the worker applies them one at a time.
    */
-  async applyPreview(workspaceId: string, runId: string, userId: string, o: { ids?: string[]; filter?: RunFilter; withSuggestions?: boolean }): Promise<number> {
+  async applyPreview(workspaceId: string, runId: string, userId: string, o: { ids?: string[]; filter?: RunFilter; mode: ApplyMode }): Promise<number> {
     const { db } = this.deps;
     const run = await this.getRun(workspaceId, runId);
     if (!run || run.mode !== 'preview') throw new UserFacingError('That re-run wasn’t found.', 404);
     if (run.status === 'running') throw new UserFacingError('Wait for the preview to finish, or stop it, first.', 409);
     const settings = await getTriageSettings(db, workspaceId);
-    if (!settings.enabled) throw new UserFacingError('Turn triage on to apply results.');
+    if (o.mode !== 'inbox' && !settings.enabled) throw new UserFacingError('Turn triage on to apply results on GitHub.');
     if (!o.ids?.length && !o.filter) throw new UserFacingError('Select the results to apply.');
     const res = await db.query(
-      `UPDATE triage_run_items AS i SET apply_status = 'pending', apply_note = NULL, apply_suggestions = $3, lease_until_at = NULL
+      `UPDATE triage_run_items AS i SET apply_status = 'pending', apply_note = NULL, apply_suggestions = $3, apply_inbox_only = $4, lease_until_at = NULL
        WHERE i.run_id = $1 AND i.status = 'done' AND (i.apply_status IS NULL OR i.apply_status = 'failed')
          AND ${o.ids?.length ? 'i.submission_id IN (SELECT value FROM json_each($2))' : `$2 IS NULL AND ${FILTER_SQL[o.filter ?? 'all']}`}`,
-      [runId, o.ids?.length ? JSON.stringify(o.ids) : null, o.withSuggestions ? 1 : 0],
+      [runId, o.ids?.length ? JSON.stringify(o.ids) : null, o.mode === 'all' ? 1 : 0, o.mode === 'inbox' ? 1 : 0],
     );
     if (!res.rowCount) throw new UserFacingError('There’s nothing left to apply here.', 409);
     await db.query('UPDATE triage_runs SET applied_at = now_ms(), applied_by = $2 WHERE id = $1', [runId, userId]);
@@ -1096,7 +1100,8 @@ export class TriageEngine {
     try {
       // Filing and normal triage share GitHub's hourly budget: leave them room.
       const conn = await getGitHubConnection(db, run.workspace_id);
-      const githubWait = conn ? this.githubWait(conn.installation_id) : null;
+      const needsGitHub = !(job === 'apply' && item.apply_inbox_only);
+      const githubWait = conn && needsGitHub ? this.githubWait(conn.installation_id) : null;
       if (githubWait) return await this.waitRun(run, item, githubWait, 'github', job === 'evaluate');
       if (run.waiting_until_at) await db.query('UPDATE triage_runs SET waiting_until_at = NULL, waiting_reason = NULL WHERE id = $1', [run.id]);
 
@@ -1157,10 +1162,12 @@ export class TriageEngine {
     const current = await this.getResult(run.workspace_id, item.submission_id);
     if (current?.status === 'pending') return { status: 'skipped', note: 'Triage is running on this ticket' };
     if ((current?.applied_actions ?? []).length) return { status: 'skipped', note: 'Actions were applied to this ticket since the run started' };
-    // Approved in bulk: the suggestions are applied too.
-    const withSuggestions = !fresh && item.apply_suggestions;
-    const auto = [...(item.auto_actions ?? []), ...(withSuggestions ? item.suggestions ?? [] : [])];
-    const suggestedIn = withSuggestions ? [] : item.suggestions ?? [];
+    // Approved in bulk: the suggestions are applied too. Inbox only: everything is a suggestion.
+    const inboxOnly = !fresh && item.apply_inbox_only;
+    const withSuggestions = !fresh && item.apply_suggestions && !inboxOnly;
+    const all = [...(item.auto_actions ?? []), ...(item.suggestions ?? [])];
+    const auto = inboxOnly ? [] : withSuggestions ? all : item.auto_actions ?? [];
+    const suggestedIn = inboxOnly ? all : withSuggestions ? [] : item.suggestions ?? [];
     if (!fresh && auto.length && deps.github) {
       // A preview may be old: don't act on an issue closed since.
       try {

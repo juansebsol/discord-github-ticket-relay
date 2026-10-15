@@ -639,6 +639,21 @@
     });
     show();
   });
+  // A select can set its form's confirmation (Re-run: what applying the results does).
+  $$('select[data-confirm-options]').forEach(function (sel) {
+    function sync() {
+      var form = sel.form;
+      var option = sel.options[sel.selectedIndex];
+      if (!form || !option) return;
+      ['title', 'body', 'label'].forEach(function (k) {
+        var v = option.getAttribute('data-confirm-' + k);
+        if (v !== null) form.setAttribute('data-confirm-' + k, v);
+      });
+    }
+    sel.addEventListener('change', sync);
+    sync();
+  });
+
   // ---- Re-run estimate (Triage › Re-run): how many tickets, cost and time, as the form changes ----
 
   $$('form[data-estimate]').forEach(function (form) {

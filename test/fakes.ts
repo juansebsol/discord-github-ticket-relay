@@ -58,6 +58,8 @@ export class FakeGitHub {
   createDelayMs = 0;
   /** GET /repos/:o/:r/issues calls (the issue index syncs with these). */
   listCalls = 0;
+  /** Every request made to the fake GitHub. */
+  requests = 0;
   /** Simulates a wrong/rotated private key: every app-JWT call is rejected. */
   rejectAppJwt = false;
   /** GitHub account returned for the user access token from code `good-code`. */
@@ -117,6 +119,7 @@ export class FakeGitHub {
   }
 
   async handle(url: URL, init: RequestInit): Promise<Response> {
+    this.requests++;
     const method = init.method ?? 'GET';
     const path = url.pathname;
     const auth = String((init.headers as Record<string, string>)?.Authorization ?? '');

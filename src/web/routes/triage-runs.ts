@@ -379,7 +379,8 @@ export function registerTriageRunRoutes(app: FastifyInstance, web: Web): void {
     const pages = Math.max(1, Math.ceil(matching / PAGE));
     const applying = counts.applying > 0;
     const live = run.status === 'running' || applying;
-    const canApply = run.mode === 'preview' && run.status !== 'running' && !applying && settings.enabled && !vsRun;
+    // Updating the inbox works while triage is off; applying on GitHub needs it on.
+    const canApply = run.mode === 'preview' && run.status !== 'running' && !applying && !vsRun;
     const applicable = (i: RunItemView) => i.status === 'done' && (i.apply_status === null || i.apply_status === 'failed');
     const anyApply = items.some((i) => i.apply_status !== null) || counts.applied + counts.notApplied + counts.applying > 0;
     const link = (o: { show?: RunFilter; vs?: string | null; page?: number }) => {
@@ -423,8 +424,9 @@ export function registerTriageRunRoutes(app: FastifyInstance, web: Web): void {
 
     const applyCell = (i: RunItemView) => {
       if (!i.apply_status) return html`<span class="em">—</span>`;
-      const [label, tone] = ({ pending: ['Queued', 'neutral'], done: ['Applied', 'ok'], skipped: ['Not applied', 'closed'], failed: ['Failed', 'danger'] } as const)[i.apply_status];
-      return html`${pill(label, tone)}${i.apply_status === 'pending' && i.apply_suggestions ? html`<div class="sub">With suggestions</div>` : ''}${i.apply_note ? html`<div class="sub">${i.apply_note}</div>` : ''}`;
+      const [label, tone] = ({ pending: ['Queued', 'neutral'], done: [i.apply_inbox_only ? 'In the inbox' : 'Applied', 'ok'], skipped: ['Not applied', 'closed'], failed: ['Failed', 'danger'] } as const)[i.apply_status];
+      const how = i.apply_status === 'pending' ? (i.apply_inbox_only ? 'Inbox only' : i.apply_suggestions ? 'With suggestions' : null) : i.apply_status === 'done' && i.apply_inbox_only ? 'As suggestions' : null;
+      return html`${pill(label, tone)}${how ? html`<div class="sub">${how}</div>` : ''}${i.apply_note ? html`<div class="sub">${i.apply_note}</div>` : ''}`;
     };
 
     // Checkboxes only while something on this page can still be applied.
@@ -452,21 +454,30 @@ export function registerTriageRunRoutes(app: FastifyInstance, web: Web): void {
     // Applying everything in the filter (not just this page).
     const bulkCount = counts.applicable[show];
     const bulkLabel = show === 'changed' ? 'changed results' : show === 'same' ? 'unchanged results' : 'results';
+    const threshold = String(run.config_used.threshold);
+    // Each choice brings its own confirmation (app.js copies it onto the form).
+    const modes = [
+      { value: 'inbox', label: 'Update the inbox only (nothing on GitHub)', title: 'Update the inbox with these results?', body: 'Each ticket’s triage is replaced with this run’s result, and every action becomes a suggestion you can apply or dismiss on its own. Nothing is sent to GitHub.', confirm: 'Update the inbox' },
+      ...(settings.enabled ? [
+        { value: 'auto', label: 'Apply automatic actions on GitHub', title: 'Apply these results on GitHub?', body: `Each ticket’s triage is replaced with this run’s result. The actions Claude was at least ${threshold}% sure of happen on GitHub (labels, comments, closing); the rest become suggestions. Tickets closed or acted on since are skipped. It runs in the background, one ticket at a time, and you can stop it.`, confirm: 'Apply on GitHub' },
+        { value: 'all', label: 'Apply everything on GitHub (suggestions too)', title: 'Apply everything on GitHub?', body: 'Each ticket’s triage is replaced with this run’s result, and all its actions happen on GitHub, suggestions included: labels, comments and closing. Tickets closed or acted on since are skipped. It runs in the background, one ticket at a time, and you can stop it.', confirm: 'Apply everything' },
+      ] : []),
+    ];
     const bulkBar = canApply && (bulkCount > 0 || items.some(applicable)) ? html`<div class="bulk-bar">
-        <span class="small muted" data-selected-text="apply-run" data-empty-text="Select results on this page, or apply them all.">Select results on this page, or apply them all.</span>
+        <span class="small muted" data-selected-text="apply-run" data-empty-text="Select results on this page, or use them all.">Select results on this page, or use them all.</span>
         <div class="row">
-          ${selectWrap(html`<select name="include" form="apply-run" aria-label="What to apply"><option value="auto">Automatic actions only</option><option value="all">Automatic actions and suggestions</option></select>`, { sm: true })}
-          ${submitBtn('Apply selected', { size: 'sm', name: 'scope', value: 'selected', form: 'apply-run', attrs: raw('data-needs-selection="apply-run"') })}
-          ${bulkCount ? submitBtn(`Apply all ${n(bulkCount)} ${bulkLabel}`, { variant: 'primary', size: 'sm', icon: 'play', name: 'scope', value: 'filter', form: 'apply-run' }) : ''}
+          ${selectWrap(html`<select name="include" form="apply-run" aria-label="What to do with the results" data-confirm-options>${modes.map((m) => html`<option value="${m.value}" data-confirm-title="${m.title}" data-confirm-body="${m.body}" data-confirm-label="${m.confirm}">${m.label}</option>`)}</select>`, { sm: true })}
+          ${submitBtn('Selected', { size: 'sm', name: 'scope', value: 'selected', form: 'apply-run', attrs: raw('data-needs-selection="apply-run"') })}
+          ${bulkCount ? submitBtn(`All ${n(bulkCount)} ${bulkLabel}`, { variant: 'primary', size: 'sm', icon: 'play', name: 'scope', value: 'filter', form: 'apply-run' }) : ''}
         </div>
       </div>
-      <p class="card-note">Automatic actions are the calls Claude was at least ${String(run.config_used.threshold)}% sure of. Choose “and suggestions” to approve everything shown. Applying runs in the background, one ticket at a time, and you can stop it.</p>` : '';
+      <p class="card-note"><strong>Update the inbox only</strong> replaces each ticket’s triage with this run’s result as suggestions, so the inbox shows the new calls and you approve them ticket by ticket. Nothing is sent to GitHub.${settings.enabled ? ` The GitHub options also do the actions: automatic ones are the calls Claude was at least ${threshold}% sure of.` : ' Turn triage on to also apply results on GitHub.'} It all runs in the background, and you can stop it.</p>` : '';
 
     const progress = live ? html`<div class="card-b tight">
         ${run.status === 'running'
           ? html`<div class="row"><span class="small"><strong>${n(finished)}</strong> of ${n(counts.total)} tickets done${waiting ? '' : ` · ${duration(counts.pending * evalPace)} left`}</span></div>
             <progress class="bar wide" max="${String(counts.total || 1)}" value="${String(finished)}"></progress>`
-          : html`<div class="row"><span class="small">Applying on GitHub: <strong>${n(counts.applying)}</strong> to go${waiting ? '' : ` · ${duration(counts.applying * applyPace)} left`}</span></div>
+          : html`<div class="row"><span class="small">Applying results: <strong>${n(counts.applying)}</strong> to go${waiting ? '' : ` · ${duration(counts.applying * applyPace)} left`}</span></div>
             <progress class="bar wide" max="${String(counts.applying + counts.appliedSince || 1)}" value="${String(counts.appliedSince)}"></progress>`}
         <p class="xs muted mt-8">${waiting ?? 'This runs in the background between new tickets, so filing and normal triage are never delayed. You can leave this page.'}</p>
       </div>` : '';
@@ -513,7 +524,6 @@ export function registerTriageRunRoutes(app: FastifyInstance, web: Web): void {
         ],
       })}
       <div class="stack">
-        ${run.mode === 'preview' && !settings.enabled && run.status !== 'running' ? notice('info', null, 'Turn triage on to apply these results.') : ''}
         <details class="card">
           <summary>${icon('sliders-horizontal', 16)}<span>Settings used</span><span class="small muted">${diff.length ? `${plural(diff.length, 'difference')} from your current settings` : 'Same as your current settings'}</span>${icon('chevron-down', 16, 'chev')}</summary>
           <div class="card-b tight">${diff.length ? html`<ul class="tri-effects">${diff.map((d) => html`<li>${icon('arrow-right', 14)}<span>${d}</span></li>`)}</ul>` : html`<p class="small muted">This run used the settings you have now.</p>`}</div>
@@ -523,7 +533,7 @@ export function registerTriageRunRoutes(app: FastifyInstance, web: Web): void {
             ${others.length ? html`<form method="get" action="${b}" class="row">${show !== 'all' ? html`<input type="hidden" name="show" value="${show}">` : ''}
               ${selectWrap(html`<select name="vs" aria-label="Compare with"><option value="">Compare with before</option>${others.map((r) => html`<option value="${r.id}" ${r.id === vsRun?.id ? raw('selected') : ''}>Compare with ${runName(r)}</option>`)}</select>`, { sm: true })}
               ${submitBtn('Compare', { size: 'sm', icon: 'git-compare-arrows' })}</form>` : ''}</div>
-          ${canApply ? html`<form id="apply-run" method="post" action="${b}/apply" data-confirm-title="Apply these results on GitHub?" data-confirm-body="Each ticket’s result replaces its old triage, and its actions happen on GitHub: labels, comments and closing (suggestions too, if you chose them). Tickets closed or acted on since are skipped. It runs in the background, one ticket at a time, and you can stop it." data-confirm-label="Apply on GitHub">${csrfField(ctx.csrf)}<input type="hidden" name="show" value="${show}"></form>` : ''}
+          ${canApply ? html`<form id="apply-run" method="post" action="${b}/apply" data-confirm-title="${modes[0]!.title}" data-confirm-body="${modes[0]!.body}" data-confirm-label="${modes[0]!.confirm}">${csrfField(ctx.csrf)}<input type="hidden" name="show" value="${show}"></form>` : ''}
           <div ${live ? raw(`data-live="4000" data-live-src="${link({}).includes('?') ? `${link({})}&partial=1` : `${link({})}?partial=1`}"`) : ''}>${results}</div>
         </div>
       </div>`;
@@ -554,9 +564,12 @@ export function registerTriageRunRoutes(app: FastifyInstance, web: Web): void {
     try {
       const count = await web.triage.applyPreview(ctx.workspace.id, rid, ctx.user.id, {
         ...(f.scope === 'filter' ? { filter } : { ids }),
-        withSuggestions: f.include === 'all',
+        mode: f.include === 'all' ? 'all' : f.include === 'auto' ? 'auto' : 'inbox',
       });
-      setFlash(reply, 'success', `Applying ${plural(count, 'result').replace(/^\d+/, n(count))} on GitHub, one at a time. This page shows the progress, and you can leave it.`);
+      const tickets = plural(count, 'ticket').replace(/^\d+/, n(count));
+      setFlash(reply, 'success', f.include === 'all' || f.include === 'auto'
+        ? `Applying ${tickets} on GitHub, one at a time. This page shows the progress, and you can leave it.`
+        : `Updating the inbox for ${tickets}. Nothing is sent to GitHub; approve each suggestion on its ticket.`);
     } catch (err) {
       if (!(err instanceof UserFacingError)) throw err;
       setFlash(reply, 'error', err.message);

@@ -234,7 +234,7 @@ describe('re-running triage', () => {
     expect(page.body).toContain('Automatic:');
 
     // Apply one ticket's result.
-    await env.server.inject({ method: 'POST', url: `${runUrl}/apply`, ...form(ws.owner, { ticket: b.id }) });
+    await env.server.inject({ method: 'POST', url: `${runUrl}/apply`, ...form(ws.owner, { ticket: b.id, include: 'auto' }) });
     await env.triage.drain();
     expect(issue(b.issue_number).labels).toEqual(['priority: high']);
     expect(issue(a.issue_number).labels).toEqual([]);
@@ -375,7 +375,7 @@ describe('re-running at scale', () => {
     await env.server.inject({ method: 'POST', url: `/w/${wid()}/tickets/triage/runs/${run.id}/apply`, ...form(ws.owner, { scope: 'filter', show: 'all', include: 'all' }) });
     const page = await env.server.inject({ method: 'GET', url: `${w()}/tickets/triage/runs/${run.id}`, ...get(ws.owner) });
     expect(page.body).toContain('Stop applying');
-    expect(page.body).toContain('Applying on GitHub');
+    expect(page.body).toContain('Applying results');
     await env.server.inject({ method: 'POST', url: `/w/${wid()}/tickets/triage/runs/${run.id}/stop-applying`, ...form(ws.owner) });
     await env.triage.drain();
     expect(issue(a.issue_number).labels).toEqual([]);
@@ -406,5 +406,37 @@ describe('re-running at scale', () => {
     await env.db.query('UPDATE triage_runs SET waiting_until_at = now_ms() - 1000 WHERE id = $1', [run.id]);
     await env.triage.drain();
     expect(await latestRun()).toMatchObject({ status: 'done', waiting_reason: null });
+  });
+
+  it('can update the inbox only: every call becomes a suggestion and nothing goes to GitHub', async () => {
+    const a = await file('Login fails');
+    await enable({ priority: { mode: 'auto' }, spam: { mode: 'suggest' } });
+    await start({ count: 'all' });
+    env.anthropic.queue.push({ ...env.anthropic.verdict, priority: 'high', priority_confidence: 97, spam: true, spam_confidence: 40 });
+    await env.triage.drain();
+    const run = await latestRun();
+    // Even with GitHub's budget low, the inbox is updated (no GitHub calls needed).
+    env.triage.engine.deps.github!.rateLimits.set(ws.installationId, { limit: 5000, remaining: 10, resetAt: new Date(Date.now() + 30 * 60_000), at: new Date() });
+    const page = await env.server.inject({ method: 'GET', url: `${w()}/tickets/triage/runs/${run.id}`, ...get(ws.owner) });
+    expect(page.body).toContain('Update the inbox only (nothing on GitHub)');
+    expect(page.body).toContain('data-confirm-title="Update the inbox with these results?"');
+    await env.server.inject({ method: 'POST', url: `/w/${wid()}/tickets/triage/runs/${run.id}/apply`, ...form(ws.owner, { scope: 'filter', show: 'all', include: 'inbox' }) });
+    const githubCalls = env.github.requests;
+    await env.triage.drain();
+    expect(issue(a.issue_number).labels).toEqual([]);
+    expect(issue(a.issue_number).comments ?? []).toEqual([]);
+    expect(env.github.requests).toBe(githubCalls);
+    const r = await result(a.id);
+    expect(r).toMatchObject({ status: 'done', priority: 'high', applied_actions: [], suggestion_count: 2 });
+    expect(r.suggestions.map((x: { kind: string }) => x.kind)).toEqual(['priority', 'spam']);
+    expect((await items(run.id))[0]).toMatchObject({ apply_status: 'done', apply_inbox_only: true });
+    const after = await env.server.inject({ method: 'GET', url: `${w()}/tickets/triage/runs/${run.id}`, ...get(ws.owner) });
+    expect(after.body).toContain('In the inbox');
+
+    // Each suggestion is then approved on its own ticket.
+    env.triage.engine.deps.github!.rateLimits.delete(ws.installationId);
+    await env.server.inject({ method: 'POST', url: `${w()}/tickets/${a.id}/triage/apply`, ...form(ws.owner, { kind: 'priority' }) });
+    expect(issue(a.issue_number).labels).toEqual(['priority: high']);
+    expect((await result(a.id)).suggestion_count).toBe(1);
   });
 });
