@@ -6,7 +6,8 @@ import { getDiscordConnection, getGitHubConnection, listApps } from '../../domai
 import { GitHubApiError } from '../../github/client.js';
 import { parseIssueBody, type IssueText } from '../../github/issue-content.js';
 import { countByStatus, decryptPayload, getSubmission, listEvents, listSubmissions, type SubmissionFilter } from '../../domain/submissions.js';
-import { CONFIDENCE_STEPS, confidenceFilter, TRIAGE_STATES, triageFilter as parseTriageFilter, triageFilterGroups, triageState } from '../../triage/state.js';
+import { actionMatcher, CONFIDENCE_STEPS, confidenceFilter, TRIAGE_STATES, triageFilter as parseTriageFilter, triageFilterGroups, triageState } from '../../triage/state.js';
+import { bulkBanner, bulkBar } from './triage-bulk.js';
 import { describeAction, triageSummaries, type TriageAction, type TriageResultRow } from '../../triage/engine.js';
 import { actionEffects, actionEffectsShort, actionTitle, priorityTag } from '../triage-view.js';
 import { getTriageSettings, type Priority } from '../../triage/settings.js';
@@ -149,15 +150,18 @@ function issueRef(s: SubmissionRow): SafeHtml {
  * Ticket list: a table on desktop and stacked rows on phones. Rows carry `data-search`
  * (title, reporter, reference, app) for the inbox's instant filter.
  */
-export function ticketList(base: string, rows: SubmissionRow[], titleOf: (s: SubmissionRow) => string | null, names: Map<string, string>, o: { compact?: boolean; triage?: Map<string, TriageSummary> } = {}): SafeHtml {
+export function ticketList(base: string, rows: SubmissionRow[], titleOf: (s: SubmissionRow) => string | null, names: Map<string, string>, o: { compact?: boolean; triage?: Map<string, TriageSummary>; select?: (s: SubmissionRow) => boolean } = {}): SafeHtml {
   const view = rows.map((s) => {
     const title = titleOf(s) ?? s.ref;
     return { s, title, href: `${base}/tickets/${s.id}`, search: [title, s.reporter_display_name, s.reporter_username, s.ref, s.app_name].filter(Boolean).join(' ').toLowerCase(), reason: statusReason(s, names) };
   });
   const test = (s: SubmissionRow) => (s.source === 'admin_test' ? html` ${tag('Test')}` : '');
+  // Bulk Apply/Dismiss: tickets with a matching suggestion can be ticked (desktop table).
+  const selectable = o.select && rows.some(o.select) ? o.select : null;
   return html`<div class="table-wrap only-desktop" data-search-wrap><table>
-      <thead><tr><th>Ticket</th>${o.compact ? '' : html`<th>Reporter</th>`}<th>Status</th>${o.triage ? html`<th>Triage</th>` : ''}${o.compact ? '' : html`<th>GitHub issue</th>`}<th class="num">Updated</th></tr></thead>
+      <thead><tr>${selectable ? html`<th class="check-col"><input type="checkbox" class="rule-check" data-select-all="bulk-triage" aria-label="Select every ticket on this page"></th>` : ''}<th>Ticket</th>${o.compact ? '' : html`<th>Reporter</th>`}<th>Status</th>${o.triage ? html`<th>Triage</th>` : ''}${o.compact ? '' : html`<th>GitHub issue</th>`}<th class="num">Updated</th></tr></thead>
       <tbody>${view.map((v) => html`<tr class="click" data-search="${v.search}">
+        ${selectable ? html`<td class="check-col">${selectable(v.s) ? html`<input type="checkbox" class="rule-check" name="ticket" value="sub:${v.s.id}" form="bulk-triage" aria-label="Select ${v.title}">` : ''}</td>` : ''}
         <td><a class="cell-title" href="${v.href}">${v.title}</a>${test(v.s)}<div class="sub">${appLine(v.s)}</div></td>
         ${o.compact ? '' : html`<td><span class="who-cell">${avatar(v.s.reporter_display_name, 20)}<span class="small">${v.s.reporter_display_name}</span></span></td>`}
         <td>${statusPill(v.s.status)}${v.reason && !o.compact ? html`<div class="sub">${v.reason}</div>` : ''}</td>
@@ -382,6 +386,37 @@ const CLOSE_REASONS = [
   { value: 'Other', title: 'Other', desc: 'Add a note below.' },
 ];
 
+/** The inbox's filters, from its query string. */
+export type InboxQuery = { status?: string; q?: string; app?: string; type?: string; triage?: string; conf?: string };
+
+/** The inbox's filters, read once for the list and for "Select all in this list" (bulk Apply). */
+export async function inboxFilters(deps: Web['deps'], wid: string, q: InboxQuery) {
+  const [counts, apps, types, triageSettings] = await Promise.all([countByStatus(deps.db, wid), listApps(deps.db, wid), listTicketTypes(deps.db, wid), getTriageSettings(deps.db, wid)]);
+  const n = {
+    attention: counts.failed + counts.uncertain,
+    open: counts.pending + counts.processing,
+    filed: counts.created,
+    closed: counts.dismissed,
+    all: Object.values(counts).reduce((x, y) => x + y, 0),
+  } as Record<string, number>;
+  const requested = q.status === undefined ? undefined : LEGACY_FILTERS[q.status] ?? q.status;
+  const filter = FILTERS.find((f) => f.key === requested) ?? (n.attention ? FILTERS[0]! : FILTERS[4]!);
+  const search = (q.q ?? '').trim().slice(0, 100);
+  const appId = apps.some((a) => a.id === q.app) ? q.app : undefined;
+  const typeName = types.some((t) => t.name === q.type) ? q.type : undefined;
+  const triageOn = triageSettings.enabled || (await deps.db.query('SELECT 1 FROM triage_results WHERE workspace_id = $1 LIMIT 1', [wid])).rows.length > 0;
+  const triageSpec = triageOn ? parseTriageFilter(q.triage, triageSettings.config) : null;
+  const confSpec = triageOn ? confidenceFilter(q.conf) : null;
+  const list = {
+    triage: [triageSpec, confSpec].filter((x) => x !== null),
+    status: filter.status,
+    search: search || undefined,
+    appId,
+    ticketType: typeName,
+  };
+  return { n, filter, search, appId, typeName, triageSettings, triageOn, triageSpec, confSpec, apps, types, list };
+}
+
 export function registerTicketRoutes(app: FastifyInstance, web: Web): void {
   const { deps, processor } = web;
 
@@ -402,38 +437,22 @@ export function registerTicketRoutes(app: FastifyInstance, web: Web): void {
     if (!ctx) return reply;
     const wid = ctx.workspace.id;
     const b = ctx.base;
-    const q = req.query as { status?: string; q?: string; page?: string; app?: string; type?: string; triage?: string; conf?: string };
-    const [counts, apps, types] = await Promise.all([countByStatus(deps.db, wid), listApps(deps.db, wid), listTicketTypes(deps.db, wid)]);
-    const n = {
-      attention: counts.failed + counts.uncertain,
-      open: counts.pending + counts.processing,
-      filed: counts.created,
-      closed: counts.dismissed,
-      all: Object.values(counts).reduce((x, y) => x + y, 0),
-    } as Record<string, number>;
-    const requested = q.status === undefined ? undefined : LEGACY_FILTERS[q.status] ?? q.status;
-    const filter = FILTERS.find((f) => f.key === requested) ?? (n.attention ? FILTERS[0]! : FILTERS[4]!);
-    const search = (q.q ?? '').trim().slice(0, 100);
-    const appId = apps.some((a) => a.id === q.app) ? q.app : undefined;
-    const typeName = types.some((t) => t.name === q.type) ? q.type : undefined;
-    const page = Math.max(1, Number(q.page) || 1);
-    const triageSettings = await getTriageSettings(deps.db, wid);
-    const triageOn = triageSettings.enabled || (await deps.db.query('SELECT 1 FROM triage_results WHERE workspace_id = $1 LIMIT 1', [wid])).rows.length > 0;
-    const triageSpec = triageOn ? parseTriageFilter(q.triage, triageSettings.config) : null;
+    const q = req.query as InboxQuery & { page?: string };
+    const { n, filter, search, appId, typeName, triageSettings, triageOn, triageSpec, confSpec, apps, types, list } = await inboxFilters(deps, wid, q);
     const triageFilter = triageSpec?.value;
-    const confSpec = triageOn ? confidenceFilter(q.conf) : null;
     const conf = confSpec?.value;
-    const { rows, total } = await listSubmissions(deps.db, wid, {
-      triage: [triageSpec, confSpec].filter((x) => x !== null),
-      status: filter.status,
-      search: search || undefined,
-      appId,
-      ticketType: typeName,
-      limit: PAGE_SIZE,
-      offset: (page - 1) * PAGE_SIZE,
-    });
+    const page = Math.max(1, Number(q.page) || 1);
+    const { rows, total } = await listSubmissions(deps.db, wid, { ...list, limit: PAGE_SIZE, offset: (page - 1) * PAGE_SIZE });
     const names = await userNames(deps.db, rows.map((r) => r.resolved_by));
     const triage = triageOn ? await triageSummaries(deps.db, wid, rows.map((r) => r.id)) : undefined;
+    // Bulk Apply/Dismiss of the suggestions these filters are about.
+    const act = triageOn && can(ctx.membership, 'tickets.act');
+    const matcher = actionMatcher({ triage: triageSpec?.value, conf: confSpec?.value }, triageSettings.config);
+    const selectable = (s: SubmissionRow) => {
+      const t = triage?.get(s.id);
+      return act && t?.status === 'done' && (t.suggestions ?? []).some(matcher.test);
+    };
+    const selectableCount = rows.filter(selectable).length;
     const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
     const link = (p: Record<string, string | number | undefined>) => {
       const params = new URLSearchParams();
@@ -470,8 +489,10 @@ export function registerTicketRoutes(app: FastifyInstance, web: Web): void {
             <button type="submit" class="btn sm nojs">Apply</button>
           </form>
         </div>
+        ${act ? await bulkBanner(web, ctx) : ''}
+        ${selectableCount ? bulkBar(ctx, { matcher, selectable: selectableCount, matching: total, from: 'inbox', hidden: { status: filter.key, q: search || undefined, app: appId, type: typeName, triage: triageFilter, conf }, back: link({ page }) }) : ''}
         <div class="card-b flush" id="ticket-rows">
-          ${rows.length ? ticketList(b, rows, (s) => decryptPayload(deps.box, s)?.title ?? null, names, { triage }) : emptyState}
+          ${rows.length ? ticketList(b, rows, (s) => decryptPayload(deps.box, s)?.title ?? null, names, { triage, select: selectableCount ? selectable : undefined }) : emptyState}
           <div id="no-match" hidden>${empty('search-x', 'No tickets match', html`Nothing on this page matches “<span data-term></span>”. Press Enter to search all tickets by reporter or reference.`, html`<button type="button" class="btn" data-clear-search>Clear search</button>`)}</div>
         </div>
         ${pages > 1 ? html`<div class="pager"><span>Page ${String(page)} of ${String(pages)} · ${plural(total, 'ticket')}</span><div class="row">

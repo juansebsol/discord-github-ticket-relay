@@ -18,6 +18,7 @@ import { labelColor } from '../domain/ticket-types.js';
 import { UserFacingError, type AppRow, type Deps, type SubmissionRow } from '../domain/types.js';
 import { GitHubApiError, type IssueDetail } from '../github/client.js';
 import { normalizeVerdict, TriageAiError, verdictSchema, type TriageAi, type Verdict } from './ai.js';
+import { actionMatcher } from './state.js';
 import { buildSystemPrompt, buildUserPrompt, extractDescription, searchTerms, type Candidate } from './prompt.js';
 import {
   appOf,
@@ -663,6 +664,8 @@ export interface LogDetail {
   /** Applied to the inbox only (everything became a suggestion). */
   inbox?: boolean;
   toldMember?: boolean;
+  /** Part of a bulk Apply or Dismiss. */
+  bulk?: boolean;
 }
 
 export interface LogEntry {
@@ -674,6 +677,7 @@ export interface LogEntry {
   number?: number | null;
   ref?: string | null;
   runId?: string | null;
+  bulkId?: string | null;
   by?: string | null;
   message?: string | null;
   detail?: LogDetail;
@@ -686,9 +690,9 @@ export const LOG_DAYS = 90;
 export async function writeTriageLog(q: Queryable, e: LogEntry): Promise<void> {
   try {
     await q.query(
-      `INSERT INTO triage_log (workspace_id, source, result, submission_id, repo_id, number, ref, run_id, by_user, message, detail)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-      [e.workspaceId, e.source, e.result, e.submissionId ?? null, e.repoId ?? null, e.number ?? null, e.ref ?? null, e.runId ?? null, e.by ?? null, e.message ? e.message.slice(0, 500) : null, e.detail ?? {}],
+      `INSERT INTO triage_log (workspace_id, source, result, submission_id, repo_id, number, ref, run_id, bulk_id, by_user, message, detail)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+      [e.workspaceId, e.source, e.result, e.submissionId ?? null, e.repoId ?? null, e.number ?? null, e.ref ?? null, e.runId ?? null, e.bulkId ?? null, e.by ?? null, e.message ? e.message.slice(0, 500) : null, e.detail ?? {}],
     );
   } catch {
     // Best effort.
@@ -700,11 +704,41 @@ function aboutSubject(subject: Subject): Pick<LogEntry, 'submissionId' | 'repoId
   return subject.kind === 'ticket' ? { submissionId: subject.submissionId } : { repoId: subject.repoId, number: subject.number };
 }
 
+/** A bulk Apply started from a list. */
+export interface BulkRow {
+  id: string;
+  workspace_id: string;
+  filter: { triage?: string; conf?: string };
+  description: string;
+  status: 'running' | 'done' | 'stopped';
+  waiting_until_at: Date | null;
+  waiting_reason: 'github' | null;
+  created_by: string | null;
+  created_at: Date;
+  finished_at: Date | null;
+}
+
+export type BulkProgress = BulkRow & { total: number; pending: number; done: number; skipped: number; failed: number };
+
+/** A ticket or GitHub issue from its list value ('sub:<id>' or 'gh:<repo id>:<number>'). */
+export function parseSubject(value: string): Subject | null {
+  const t = /^sub:([0-9a-f-]{36})$/i.exec(value);
+  if (t) return { kind: 'ticket', submissionId: t[1]! };
+  const g = /^gh:(\d+):(\d+)$/.exec(value);
+  return g ? { kind: 'issue', repoId: Number(g[1]), number: Number(g[2]) } : null;
+}
+
+export function subjectValue(s: Subject): string {
+  return s.kind === 'ticket' ? `sub:${s.submissionId}` : `gh:${s.repoId}:${s.number}`;
+}
+
 /** What triage is doing now (Triage › Activity). */
 export interface ActivityNow {
+  /** apply: re-run results and bulk Apply. */
   queued: { tickets: number; issues: number; evaluate: number; apply: number };
   working: { kind: 'ticket' | 'issue' | 'rerun'; submission_id: string | null; repo_id: number | null; number: number | null; run_id: string | null; job: string | null }[];
   runs: (TriageRunRow & { pending: number; applying: number })[];
+  bulks: BulkProgress[];
   /** When the triage worker process last reported in (null if never). */
   workerSeenAt: Date | null;
 }
@@ -721,6 +755,7 @@ export interface LogRow {
   number: number | null;
   ref: string | null;
   run_id: string | null;
+  bulk_id: string | null;
   by_user: string | null;
   message: string | null;
   detail: LogDetail;
@@ -1585,7 +1620,8 @@ export class TriageEngine {
            (SELECT count(*) FROM triage_results WHERE workspace_id = $1 AND status = 'pending') AS tickets,
            (SELECT count(*) FROM issue_triage WHERE workspace_id = $1 AND status = 'pending') AS issues,
            (SELECT count(*) FROM triage_run_items i JOIN triage_runs r ON r.id = i.run_id WHERE r.workspace_id = $1 AND r.status = 'running' AND i.status = 'pending') AS evaluate,
-           (SELECT count(*) FROM triage_run_items i JOIN triage_runs r ON r.id = i.run_id WHERE r.workspace_id = $1 AND i.apply_status = 'pending') AS apply`,
+           (SELECT count(*) FROM triage_run_items i JOIN triage_runs r ON r.id = i.run_id WHERE r.workspace_id = $1 AND i.apply_status = 'pending')
+             + (SELECT count(*) FROM triage_bulk_items i JOIN triage_bulk b ON b.id = i.bulk_id WHERE b.workspace_id = $1 AND b.status = 'running' AND i.status = 'pending') AS apply`,
         [workspaceId],
       ),
       db.query<{ kind: 'ticket' | 'issue' | 'rerun'; submission_id: string | null; repo_id: number | null; number: number | null; run_id: string | null; job: string | null }>(
@@ -1612,11 +1648,12 @@ export class TriageEngine {
       working: working.rows,
       runs: runs.rows.map(withParsedConfig),
       workerSeenAt: worker.rows[0]?.seen_at ?? null,
+      bulks: await this.activeBulks(workspaceId),
     };
   }
 
   /** A page of the activity log, newest first (before: an entry id, for the next page). */
-  async activityLog(workspaceId: string, o: { result?: LogResult | null; source?: LogSource | null; runId?: string | null; before?: number | null; limit: number }): Promise<LogRow[]> {
+  async activityLog(workspaceId: string, o: { result?: LogResult | null; source?: LogSource | null; runId?: string | null; bulkId?: string | null; before?: number | null; limit: number }): Promise<LogRow[]> {
     const params: unknown[] = [workspaceId];
     const bind = (v: unknown) => {
       params.push(v);
@@ -1626,6 +1663,7 @@ export class TriageEngine {
     if (o.result) where.push(`l.result = ${bind(o.result)}`);
     if (o.source) where.push(`l.source = ${bind(o.source)}`);
     if (o.runId) where.push(`l.run_id = ${bind(o.runId)}`);
+    if (o.bulkId) where.push(`l.bulk_id = ${bind(o.bulkId)}`);
     if (o.before) where.push(`l.id < ${bind(o.before)}`);
     const { rows } = await this.deps.db.query<LogRow>(
       `SELECT l.*, s.ref AS ticket_ref, s.repo_id AS ticket_repo_id, COALESCE(x1.title, x2.title) AS title,
@@ -1640,6 +1678,187 @@ export class TriageEngine {
       params,
     );
     return rows;
+  }
+
+  // ---- Bulk Apply and Dismiss (inbox and Issues › Triage) -----------------------------------------
+
+  /** The current triage result of a ticket or GitHub issue in this workspace. */
+  private async resultOf(workspaceId: string, subject: Subject): Promise<{ row: AnyResultRow; store: StoreName } | null> {
+    if (subject.kind === 'ticket') {
+      const row = await this.getResult(workspaceId, subject.submissionId);
+      return row ? { row, store: 'tickets' } : null;
+    }
+    const row = await this.getIssueResult(workspaceId, subject.repoId, subject.number);
+    return row ? { row, store: 'issues' } : null;
+  }
+
+  /** Which of these have a waiting suggestion the matcher takes. */
+  async withMatchingSuggestions(workspaceId: string, subjects: Subject[], test: (a: TriageAction) => boolean): Promise<Subject[]> {
+    const out: Subject[] = [];
+    for (const subject of subjects) {
+      const r = await this.resultOf(workspaceId, subject);
+      if (r?.row.status === 'done' && (r.row.suggestions ?? []).some(test)) out.push(subject);
+    }
+    return out;
+  }
+
+  /**
+   * Starts applying the matching suggestions on these tickets or issues, one at a time in the
+   * background. Only suggestions the list's filters are about are applied; others stay.
+   */
+  async startBulk(workspaceId: string, userId: string, o: { subjects: Subject[]; filter: { triage?: string; conf?: string } }): Promise<{ id: string; count: number }> {
+    const { db } = this.deps;
+    const settings = await getTriageSettings(db, workspaceId);
+    const m = actionMatcher(o.filter, settings.config);
+    const subjects = await this.withMatchingSuggestions(workspaceId, o.subjects, m.test);
+    if (!subjects.length) throw new UserFacingError('None of these have a matching suggestion waiting.');
+    const id = randomUUID();
+    await db.transaction(async (tx) => {
+      await tx.query('INSERT INTO triage_bulk (id, workspace_id, filter, description, created_by) VALUES ($1, $2, $3, $4, $5)', [id, workspaceId, o.filter, m.describe, userId]);
+      for (const [i, subject] of subjects.entries()) {
+        await tx.query('INSERT INTO triage_bulk_items (bulk_id, subject, position) VALUES ($1, $2, $3)', [id, subjectValue(subject), i]);
+      }
+    });
+    await writeTriageLog(db, { workspaceId, source: 'review', result: 'info', bulkId: id, by: userId, message: `Bulk apply started: ${m.describe} on ${subjects.length} ticket${subjects.length === 1 ? '' : 's'}, one at a time` });
+    return { id, count: subjects.length };
+  }
+
+  /** Dismisses the matching suggestions on these tickets or issues right away (nothing goes to GitHub). */
+  async dismissBulk(workspaceId: string, userId: string, o: { subjects: Subject[]; filter: { triage?: string; conf?: string } }): Promise<{ tickets: number; suggestions: number }> {
+    const { db } = this.deps;
+    const settings = await getTriageSettings(db, workspaceId);
+    const m = actionMatcher(o.filter, settings.config);
+    let tickets = 0;
+    let suggestions = 0;
+    for (const subject of o.subjects) {
+      const r = await this.resultOf(workspaceId, subject);
+      if (r?.row.status !== 'done') continue;
+      const matched = (r.row.suggestions ?? []).filter(m.test);
+      if (!matched.length) continue;
+      const rest = (r.row.suggestions ?? []).filter((a) => !matched.includes(a));
+      await this.saveReview(r.row, rest, r.row.applied_actions ?? [], r.store, matched.length);
+      const event = { by: userId, actions: matched.map(describeAction) };
+      if (subject.kind === 'ticket') await addEvent(db, subject.submissionId, 'triage_dismissed', event);
+      else await addIssueEvent(db, (r.row as IssueTriageRow).id, 'triage_dismissed', event);
+      await writeTriageLog(db, { workspaceId, source: 'review', result: 'ok', ...aboutSubject(subject), by: userId, detail: { dismissed: matched, bulk: true } });
+      tickets++;
+      suggestions += matched.length;
+    }
+    return { tickets, suggestions };
+  }
+
+  async activeBulks(workspaceId: string): Promise<BulkProgress[]> {
+    const { rows } = await this.deps.db.query<BulkProgress>(
+      `SELECT b.*, count(i.subject) AS total, sum(i.status = 'pending') AS pending, sum(i.status = 'done') AS done, sum(i.status = 'skipped') AS skipped, sum(i.status = 'failed') AS failed
+       FROM triage_bulk b JOIN triage_bulk_items i ON i.bulk_id = b.id
+       WHERE b.workspace_id = $1 AND (b.status = 'running' OR b.finished_at > $2)
+       GROUP BY b.id ORDER BY b.created_at DESC LIMIT 5`,
+      // Finished ones stay visible for a few minutes, so you see how it went.
+      [workspaceId, new Date(Date.now() - 10 * 60_000)],
+    );
+    return rows.map((r) => ({ ...r, pending: Number(r.pending ?? 0), done: Number(r.done ?? 0), skipped: Number(r.skipped ?? 0), failed: Number(r.failed ?? 0) }));
+  }
+
+  /** Stops a bulk apply: what's applied stays applied, the rest stays suggested. */
+  async stopBulk(workspaceId: string, bulkId: string, userId: string): Promise<number> {
+    const { db } = this.deps;
+    const res = await db.query(`UPDATE triage_bulk SET status = 'stopped', finished_at = now_ms() WHERE workspace_id = $1 AND id = $2 AND status = 'running'`, [workspaceId, bulkId]);
+    if (!res.rowCount) throw new UserFacingError('That bulk apply already finished.', 409);
+    const items = await db.query(`UPDATE triage_bulk_items SET status = 'skipped', note = 'Stopped before this ticket', lease_until_at = NULL WHERE bulk_id = $1 AND status = 'pending'`, [bulkId]);
+    await writeTriageLog(db, { workspaceId, source: 'review', result: 'info', bulkId, by: userId, message: `Bulk apply stopped: ${items.rowCount} not applied (their suggestions are still there)` });
+    return items.rowCount;
+  }
+
+  /** Claims the next ticket of a bulk apply (paused workspaces and waiting bulks wait). */
+  async claimBulkItem(): Promise<{ bulk_id: string; subject: string } | null> {
+    const { rows } = await this.deps.db.query<{ bulk_id: string; subject: string }>(
+      `UPDATE triage_bulk_items SET lease_until_at = now_ms() + ($1 * 1000)
+       WHERE rowid = (
+         SELECT i.rowid FROM triage_bulk_items i JOIN triage_bulk b ON b.id = i.bulk_id
+         LEFT JOIN triage_settings t ON t.workspace_id = b.workspace_id
+         WHERE i.status = 'pending' AND b.status = 'running' AND (i.lease_until_at IS NULL OR i.lease_until_at < now_ms())
+           AND t.paused_reason IS NULL AND (b.waiting_until_at IS NULL OR b.waiting_until_at <= now_ms())
+         ORDER BY b.created_at, i.position LIMIT 1
+       )
+       RETURNING bulk_id, subject`,
+      [LEASE_SECONDS],
+    );
+    return rows[0] ?? null;
+  }
+
+  async processBulkItem(item: { bulk_id: string; subject: string }): Promise<void> {
+    const { db } = this.deps;
+    const { rows } = await db.query<BulkRow>('SELECT * FROM triage_bulk WHERE id = $1', [item.bulk_id]);
+    const bulk = rows[0];
+    const subject = parseSubject(item.subject);
+    if (!bulk || !subject) return;
+    const wid = bulk.workspace_id;
+    const about = { workspaceId: wid, source: 'review' as const, bulkId: bulk.id, by: bulk.created_by, ...aboutSubject(subject) };
+    const finish = async (status: 'done' | 'skipped' | 'failed', note: string | null) => {
+      await db.query('UPDATE triage_bulk_items SET status = $3, note = $4, lease_until_at = NULL, done_at = now_ms() WHERE bulk_id = $1 AND subject = $2', [bulk.id, item.subject, status, note]);
+    };
+    const wait = async (until: Date) => {
+      await db.query('UPDATE triage_bulk SET waiting_until_at = $2, waiting_reason = $3 WHERE id = $1', [bulk.id, until, 'github']);
+      await db.query('UPDATE triage_bulk_items SET lease_until_at = NULL WHERE bulk_id = $1 AND subject = $2', [bulk.id, item.subject]);
+      if (!bulk.waiting_until_at || bulk.waiting_until_at.getTime() <= Date.now()) {
+        await writeTriageLog(db, { ...about, submissionId: null, repoId: null, number: null, result: 'info', message: `Waiting until ${until.toISOString().slice(11, 16)} UTC for GitHub’s hourly limit, so new tickets can still be filed` });
+      }
+    };
+    try {
+      const conn = await getGitHubConnection(db, wid);
+      const githubWait = conn ? this.githubWait(conn.installation_id) : null;
+      if (githubWait) return await wait(githubWait);
+      if (bulk.waiting_until_at) await db.query('UPDATE triage_bulk SET waiting_until_at = NULL, waiting_reason = NULL WHERE id = $1', [bulk.id]);
+
+      const settings = await getTriageSettings(db, wid);
+      const m = actionMatcher(bulk.filter, settings.config);
+      const r = await this.resultOf(wid, subject);
+      const matched = r?.row.status === 'done' ? (r.row.suggestions ?? []).filter(m.test) : [];
+      if (!r || !matched.length) {
+        await finish('skipped', 'Nothing matching is waiting any more');
+        await writeTriageLog(db, { ...about, result: 'skipped', message: 'Nothing matching is waiting any more' });
+        return;
+      }
+      const target: Target | null = subject.kind === 'ticket' ? await getSubmission(db, wid, subject.submissionId) : await this.issueTarget(wid, subject.repoId, subject.number);
+      const ticket = target ? ticketOf(target) : null;
+      if (!target || !target.issue_number || (ticket && ticket.status !== 'created')) {
+        await finish('skipped', 'It’s no longer on GitHub');
+        await writeTriageLog(db, { ...about, result: 'skipped', message: 'It’s no longer on GitHub' });
+        return;
+      }
+      try {
+        await applyToGitHub(this.deps, target, matched);
+      } catch (err) {
+        if (isGitHubRateLimit(err)) return await wait(new Date(Date.now() + (err.retryAfterSeconds ?? 60) * 1000));
+        const note = `GitHub didn’t accept the change: ${githubMessage(err)}. The suggestions are still there.`;
+        await finish('failed', note);
+        await writeTriageLog(db, { ...about, ref: target.ref, result: 'failed', message: note, detail: { suggested: matched, bulk: true } });
+        return;
+      }
+      const rest = (r.row.suggestions ?? []).filter((a) => !matched.includes(a));
+      await this.saveReview(r.row, rest, [...(r.row.applied_actions ?? []), ...matched], r.store);
+      const told = ticket ? await tellMember(this.deps, ticket, matched) : false;
+      const event = { by: bulk.created_by, actions: matched.map(describeAction), told_member: told };
+      if (ticket) await addEvent(db, ticket.id, 'triage_applied', event);
+      else await addIssueEvent(db, (r.row as IssueTriageRow).id, 'triage_applied', event);
+      await finish('done', null);
+      await writeTriageLog(db, { ...about, ref: target.ref, result: 'ok', detail: { applied: matched, toldMember: told, bulk: true } });
+    } catch (err) {
+      this.deps.log.error({ err: (err as Error).message, bulk: bulk.id, subject: item.subject }, 'bulk apply failed unexpectedly');
+      await finish('failed', 'Unexpected error');
+      await writeTriageLog(db, { ...about, result: 'failed', message: 'Unexpected error' });
+    } finally {
+      const done = await db.query(
+        `UPDATE triage_bulk SET status = 'done', finished_at = now_ms(), waiting_until_at = NULL WHERE id = $1 AND status = 'running'
+           AND NOT EXISTS (SELECT 1 FROM triage_bulk_items WHERE bulk_id = $1 AND status = 'pending')`,
+        [bulk.id],
+      );
+      if (done.rowCount) {
+        const { rows: c } = await db.query<{ done: number; skipped: number; failed: number }>(`SELECT sum(status = 'done') AS done, sum(status = 'skipped') AS skipped, sum(status = 'failed') AS failed FROM triage_bulk_items WHERE bulk_id = $1`, [bulk.id]);
+        const x = c[0];
+        await writeTriageLog(db, { workspaceId: wid, source: 'review', result: x?.failed ? 'failed' : 'info', bulkId: bulk.id, by: bulk.created_by, message: `Bulk apply finished: ${Number(x?.done ?? 0)} applied${x?.skipped ? `, ${x.skipped} skipped` : ''}${x?.failed ? `, ${x.failed} failed` : ''}` });
+      }
+    }
   }
 }
 

@@ -79,6 +79,13 @@ export class TriageWorker {
         processed++;
         continue;
       }
+      // Then bulk Apply someone started, then re-runs.
+      const bulk = await this.engine.claimBulkItem();
+      if (bulk) {
+        await this.engine.processBulkItem(bulk);
+        processed++;
+        continue;
+      }
       const item = await this.engine.claimRunItem();
       if (!item) return processed;
       await this.engine.processRunItem(item);

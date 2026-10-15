@@ -1037,3 +1037,9 @@ progress.bar.wide { max-width: none; }
 .dot.s-queued, .dot.s-nothing, .dot.s-reviewed, .dot.s-skipped { background: var(--faint); }
 @media (max-width: 640px) { .log-row { padding: 12px 16px; flex-wrap: wrap; } .log-row .when { order: -1; margin-left: auto; } }
 .log-d .tags { display: inline-flex; vertical-align: middle; }
+/* Bulk triage */
+.bulk-status { display: flex; flex-direction: column; gap: 12px; border-bottom: 1px solid var(--border); }
+.bulk-line { display: flex; align-items: center; gap: 12px; }
+.bulk-line > .ic { flex: none; }
+.issue-row .check-cell { flex: none; display: flex; align-items: center; padding-top: 2px; }
+.select-all-row { min-height: 40px; align-items: center; }

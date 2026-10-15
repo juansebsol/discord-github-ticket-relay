@@ -3,7 +3,8 @@
  * lists: by status, priority, what triage flagged, and label-group labels. Separate from a
  * ticket's filing status (Filed means the GitHub issue exists; triage is the step after).
  */
-import { FLAGS, PRIORITIES, groupKind, type Flag, type TriageConfig } from './settings.js';
+import type { TriageAction } from './engine.js';
+import { FLAGS, NO_CLOSE, PRIORITIES, CLOSE_ONLY_COMMENT, groupKind, type Flag, type TriageConfig } from './settings.js';
 
 export type TriageState = 'queued' | 'review' | 'partial' | 'applied' | 'reviewed' | 'nothing' | 'skipped' | 'failed';
 
@@ -159,5 +160,63 @@ export function confidenceFilter(raw: string | undefined): TriageFilter | null {
     where: () => `(${['suggestions', 'applied_actions']
       .map((col) => `EXISTS (SELECT 1 FROM json_each(COALESCE(t.${col}, '[]')) a WHERE json_extract(a.value, '$.confidence') >= ${min})`)
       .join(' OR ')})`,
+  };
+}
+
+/** Which suggestions a bulk Apply or Dismiss takes: the ones the list's filters are about. */
+export interface ActionMatcher {
+  test: (a: TriageAction) => boolean;
+  /** In words, for the confirmation: "duplicate suggestions at 80%+ confidence". */
+  describe: string;
+  /** What applying them does, from the settings: "adds “duplicate” · posts your comment · closes the issue". */
+  effects: string;
+  /** False when the filters don't narrow it to one kind: every waiting suggestion. */
+  narrowed: boolean;
+}
+
+export function actionMatcher(f: { triage?: string; conf?: string }, c: TriageConfig): ActionMatcher {
+  const spec = triageFilter(f.triage, c);
+  const min = confidenceFilter(f.conf) ? Number(f.conf) : 0;
+  const value = spec?.value ?? '';
+  const [type, ...rest] = value.split(':');
+  const arg = rest.join(':');
+  let test: (a: TriageAction) => boolean = () => true;
+  let describe = 'every waiting suggestion';
+  let effects = 'each suggestion’s own label, comment and closing';
+  let narrowed = false;
+  const flagEffects = (fl: Flag) => {
+    const x = c[fl];
+    return [
+      x.label ? `adds “${x.label}”` : '',
+      x.comment.trim() && (!CLOSE_ONLY_COMMENT.has(fl) || x.close) ? 'posts your comment' : '',
+      x.close && !NO_CLOSE.has(fl) ? 'closes the issue' : '',
+    ].filter(Boolean).join(' · ') || 'nothing on GitHub (no label, comment or closing set)';
+  };
+  if (type === 'f' && spec) {
+    test = (a) => a.kind === arg;
+    describe = `“${FLAG_FILTER_NAMES[arg as Flag]}” suggestions`;
+    effects = flagEffects(arg as Flag);
+    narrowed = true;
+  } else if (type === 'p' && spec) {
+    const levels = arg === 'urgent' ? ['critical', 'high'] : [arg];
+    test = (a) => a.kind === 'priority' && levels.includes(a.priority ?? '');
+    describe = arg === 'urgent' ? 'critical and high priority suggestions' : `${PRIORITY_NAMES[arg as keyof typeof PRIORITY_NAMES]} priority suggestions`;
+    effects = `adds ${levels.map((l) => `“${c.priority.labels[l as keyof typeof c.priority.labels]}”`).join(' or ')}`;
+    narrowed = true;
+  } else if (type === 'l' && spec) {
+    const [groupId, ...labelParts] = arg.split(':');
+    const label = labelParts.join(':');
+    const g = c.labelGroups.find((x) => x.id === groupId)!;
+    test = (a) => a.kind === groupKind(g.id) && (a.labels ?? []).includes(label);
+    describe = `${g.name} suggestions with “${label}”`;
+    effects = 'adds the group’s suggested labels';
+    narrowed = true;
+  }
+  const base = test;
+  return {
+    test: min ? (a) => base(a) && a.confidence >= min : base,
+    describe: `${describe}${min ? ` at ${min}%+ confidence` : ''}`,
+    effects,
+    narrowed: narrowed || min > 0,
   };
 }

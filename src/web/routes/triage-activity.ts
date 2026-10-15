@@ -65,8 +65,12 @@ function sourceTag(l: LogRow, names: Map<string, string>, b: string): SafeHtml {
       return html`${tag('Re-run preview', { icon: 'flask-conical' })}${run}`;
     case 'rerun':
       return html`${tag('Re-run', { icon: 'play' })}${run}`;
-    default:
-      return html`${tag(`${l.by_user ? names.get(l.by_user) ?? 'An admin' : 'Someone'} reviewed`, { icon: 'user-cog' })}`;
+    default: {
+      const who = l.by_user ? names.get(l.by_user) ?? 'An admin' : 'Someone';
+      return l.bulk_id || l.detail?.bulk
+        ? html`${tag(`Bulk by ${who}`, { icon: 'list-filter' })}${l.bulk_id ? html` · <a href="${b}/tickets/triage/activity?bulk=${l.bulk_id}">this bulk</a>` : ''}`
+        : html`${tag(`${who} reviewed`, { icon: 'user-cog' })}`;
+    }
   }
 }
 
@@ -74,6 +78,7 @@ function subject(l: LogRow, b: string): SafeHtml {
   if (l.submission_id) return html`<a class="cell-title" href="${b}/tickets/${l.submission_id}">${l.title ?? l.ticket_ref ?? l.ref ?? 'Ticket'}</a> <span class="muted nowrap">${l.ticket_ref ?? ''}</span>`;
   if (l.repo_id && l.number) return html`<a class="cell-title" href="${b}/tickets/issues/${String(l.repo_id)}/${String(l.number)}">${l.title ?? `Issue #${l.number}`}</a> <span class="muted nowrap">${l.owner && l.name ? `${l.owner}/${l.name}` : ''}#${String(l.number)}</span>`;
   if (l.run_id) return html`<a class="cell-title" href="${b}/tickets/triage/runs/${l.run_id}">${l.run_name || 'Re-run'}</a>`;
+  if (l.bulk_id) return html`<span class="cell-title">Bulk apply</span>`;
   return html`<span class="cell-title">Triage</span>`;
 }
 
@@ -99,12 +104,13 @@ export function registerTriageActivityRoutes(app: FastifyInstance, web: Web): vo
         <div class="stat"><div class="l">${icon('message-circle', 14)}New Discord tickets</div><div class="v">${String(now.queued.tickets)}</div><div class="sub">${settings.enabled ? 'waiting' : 'triage off'}</div></div>
         <div class="stat"><div class="l">${icon('github', 14)}New GitHub issues</div><div class="v">${String(now.queued.issues)}</div><div class="sub">${settings.githubEnabled ? 'waiting' : 'triage off'}</div></div>
         <div class="stat"><div class="l">${icon('flask-conical', 14)}Re-run: to triage</div><div class="v">${String(now.queued.evaluate)}</div><div class="sub">waiting</div></div>
-        <div class="stat"><div class="l">${icon('play', 14)}Re-run: to apply</div><div class="v">${String(now.queued.apply)}</div><div class="sub">waiting</div></div>
+        <div class="stat"><div class="l">${icon('play', 14)}To apply (re-runs, bulk)</div><div class="v">${String(now.queued.apply)}</div><div class="sub">waiting</div></div>
       </div>
       <div class="card-b tight">
         <ul class="tri-effects">
           <li>${icon(workerOk === false ? 'circle-x' : 'circle-check', 14, workerOk === false ? 'danger' : 'ok')}<span>Triage worker: ${workerOk === null ? 'no check-in recorded yet' : workerOk ? html`running, checked in ${timeAgo(now.workerSeenAt!)}` : 'not running'}</span></li>
           ${now.working.length ? now.working.map(workingLink) : html`<li>${icon('clock', 14)}<span class="muted">${busy ? 'Between items.' : 'Idle.'}</span></li>`}
+          ${now.bulks.filter((x) => x.status === 'running').map((x) => html`<li>${icon('list-filter', 14)}<span><a href="${b}/tickets/triage/activity?bulk=${x.id}">Bulk apply</a> of ${x.description}: ${plural(x.pending, 'ticket')} to go${x.waiting_until_at && x.waiting_until_at.getTime() > Date.now() ? ` · waiting for GitHub’s hourly limit until ${x.waiting_until_at.toISOString().slice(11, 16)} UTC` : ''}</span></li>`)}
           ${now.runs.map((r) => {
             const waiting = r.waiting_until_at && r.waiting_until_at.getTime() > Date.now()
               ? (r.waiting_reason === 'github' ? ` · waiting for GitHub’s hourly limit until ${r.waiting_until_at.toISOString().slice(11, 16)} UTC, so new tickets can still be filed` : ` · Claude asked to slow down, carrying on ${timeAgo(r.waiting_until_at)}`)
@@ -121,23 +127,26 @@ export function registerTriageActivityRoutes(app: FastifyInstance, web: Web): vo
     if (!ctx) return reply;
     const wid = ctx.workspace.id;
     const b = ctx.base;
-    const q = req.query as { result?: string; source?: string; run?: string; before?: string; partial?: string };
+    const q = req.query as { result?: string; source?: string; run?: string; bulk?: string; before?: string; partial?: string };
     const result = (['ok', 'failed', 'skipped', 'info'] as const).find((r) => r === q.result) ?? null;
     const source = SOURCES.find((s) => s.value === q.source)?.value ?? null;
     const runId = q.run && /^[0-9a-f-]{36}$/i.test(q.run) ? q.run : null;
+    const bulkId = q.bulk && /^[0-9a-f-]{36}$/i.test(q.bulk) ? q.bulk : null;
     const before = Number.parseInt(q.before ?? '', 10) || null;
     const [now, settings, usage, rows, run] = await Promise.all([
       web.triage.activityNow(wid),
       getTriageSettings(deps.db, wid),
       monthlyUsage(deps.db, wid),
-      web.triage.activityLog(wid, { result, source, runId, before, limit: PAGE + 1 }),
+      web.triage.activityLog(wid, { result, source, runId, bulkId, before, limit: PAGE + 1 }),
       runId ? web.triage.getRun(wid, runId) : Promise.resolve(null),
     ]);
     const more = rows.length > PAGE;
     const entries = rows.slice(0, PAGE);
     const names = await userNames(deps.db, entries.map((l) => l.by_user));
-    const link = (o: { result?: LogResult | null; source?: LogSource | null; run?: string | null; before?: number | null }) => {
+    const link = (o: { result?: LogResult | null; source?: LogSource | null; run?: string | null; bulk?: string | null; before?: number | null }) => {
       const p = new URLSearchParams();
+      const bk = o.bulk === undefined ? bulkId : o.bulk;
+      if (bk) p.set('bulk', bk);
       const r = o.result === undefined ? result : o.result;
       const s = o.source === undefined ? source : o.source;
       const rn = o.run === undefined ? runId : o.run;
@@ -169,13 +178,14 @@ export function registerTriageActivityRoutes(app: FastifyInstance, web: Web): vo
           { href: link({ result: 'skipped', before: null }), label: 'Skipped', current: result === 'skipped' },
         ])}
         <form method="get" action="${b}/tickets/triage/activity" class="tools">
-          ${result ? html`<input type="hidden" name="result" value="${result}">` : ''}${runId ? html`<input type="hidden" name="run" value="${runId}">` : ''}
+          ${result ? html`<input type="hidden" name="result" value="${result}">` : ''}${runId ? html`<input type="hidden" name="run" value="${runId}">` : ''}${bulkId ? html`<input type="hidden" name="bulk" value="${bulkId}">` : ''}
           ${selectWrap(html`<select name="source" aria-label="Where from" data-autosubmit><option value="">Everything</option>${SOURCES.map((s) => html`<option value="${s.value}" ${s.value === source ? raw('selected') : ''}>${s.label}</option>`)}</select>`, { sm: true })}
           <button type="submit" class="btn sm nojs">Show</button>
         </form>
       </div>
       ${run ? html`<div class="card-b tight"><div class="row"><span class="small">Showing <a href="${b}/tickets/triage/runs/${run.id}">${run.name || 'this re-run'}</a> only.</span>${linkBtn(link({ run: null, before: null }), 'Show everything', { size: 'sm', variant: 'ghost' })}</div></div>` : ''}
-      <div class="card-b flush">${entries.length ? log : empty('history', 'Nothing here yet', result || source || runId ? 'No entries match these filters.' : 'What triage does shows up here as it happens.')}</div>
+      ${bulkId ? html`<div class="card-b tight"><div class="row"><span class="small">Showing one bulk apply only.</span>${linkBtn(link({ bulk: null, before: null }), 'Show everything', { size: 'sm', variant: 'ghost' })}</div></div>` : ''}
+      <div class="card-b flush">${entries.length ? log : empty('history', 'Nothing here yet', result || source || runId || bulkId ? 'No entries match these filters.' : 'What triage does shows up here as it happens.')}</div>
       ${more || before ? html`<div class="pager"><span>${before ? 'Older entries' : 'Newest entries'}</span><div class="row">
         ${before ? linkBtn(link({ before: null }), 'Newest', { size: 'sm', icon: 'arrow-up' }) : ''}${more ? linkBtn(link({ before: entries.at(-1)!.id }), 'Older', { size: 'sm', trail: 'chevron-right' }) : ''}</div></div>` : ''}
     </div>`;

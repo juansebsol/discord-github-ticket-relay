@@ -146,16 +146,18 @@
   }
   document.addEventListener('submit', function (e) {
     var form = e.target;
-    if (form.hasAttribute('data-confirm-title') && !form.hasAttribute('data-confirmed') && confirmDialog && confirmDialog.showModal) {
+    // A button can bring its own confirmation (bulk Apply and Dismiss share one form).
+    var src = e.submitter && e.submitter.hasAttribute('data-confirm-title') ? e.submitter : form;
+    if (src.hasAttribute('data-confirm-title') && !form.hasAttribute('data-confirmed') && confirmDialog && confirmDialog.showModal) {
       e.preventDefault();
       closeMenu(false);
       pending = { form: form, submitter: e.submitter };
-      $('#confirm-title', confirmDialog).textContent = form.getAttribute('data-confirm-title');
-      $('#confirm-body', confirmDialog).textContent = form.getAttribute('data-confirm-body') || '';
+      $('#confirm-title', confirmDialog).textContent = src.getAttribute('data-confirm-title');
+      $('#confirm-body', confirmDialog).textContent = src.getAttribute('data-confirm-body') || '';
       var ok = $('#confirm-ok', confirmDialog);
-      ok.textContent = form.getAttribute('data-confirm-label') || 'Confirm';
-      ok.className = 'btn ' + (form.hasAttribute('data-confirm-danger') ? 'danger-solid' : 'primary');
-      if (form.hasAttribute('data-confirm-danger')) confirmDialog.setAttribute('data-destructive', ''); else confirmDialog.removeAttribute('data-destructive');
+      ok.textContent = src.getAttribute('data-confirm-label') || 'Confirm';
+      ok.className = 'btn ' + (src.hasAttribute('data-confirm-danger') ? 'danger-solid' : 'primary');
+      if (src.hasAttribute('data-confirm-danger')) confirmDialog.setAttribute('data-destructive', ''); else confirmDialog.removeAttribute('data-destructive');
       openDialog(confirmDialog);
       return;
     }
@@ -587,9 +589,24 @@
   function selection(formId) {
     return $$('input[type="checkbox"][form="' + formId + '"]');
   }
+  /** "Select all N in this list" (bulk triage): the whole list, not just this page. */
+  function allMatching(formId) {
+    var form = document.getElementById(formId);
+    var all = form && form.querySelector('input[name="all"]');
+    return all && all.value === '1' ? all : null;
+  }
   function updateSelection(formId) {
     var boxes = selection(formId);
     var n = boxes.filter(function (b) { return b.checked; }).length;
+    var everything = allMatching(formId);
+    if (everything) {
+      var btn = document.querySelector('[data-select-matching="' + formId + '"]');
+      var total = btn ? btn.getAttribute('data-matching') : '';
+      $$('[data-selected-text="' + formId + '"]').forEach(function (t) { t.textContent = 'All ' + Number(total).toLocaleString('en-US') + ' in this list selected'; });
+      $$('[data-needs-selection="' + formId + '"]').forEach(function (b) { b.disabled = false; });
+      $$('[data-select-all="' + formId + '"]').forEach(function (all) { all.checked = true; all.indeterminate = false; });
+      return;
+    }
     $$('[data-select-all="' + formId + '"]').forEach(function (all) {
       all.checked = n > 0 && n === boxes.length;
       all.indeterminate = n > 0 && n < boxes.length;
@@ -603,10 +620,34 @@
     var formId = all.getAttribute('data-select-all');
     all.addEventListener('change', function () {
       selection(formId).forEach(function (b) { b.checked = all.checked; });
+      var everything = allMatching(formId);
+      if (everything && !all.checked) {
+        everything.value = '0';
+        $$('[data-select-matching="' + formId + '"]').forEach(function (btn) { btn.hidden = false; });
+      }
       updateSelection(formId);
     });
-    selection(formId).forEach(function (b) { b.addEventListener('change', function () { updateSelection(formId); }); });
+    selection(formId).forEach(function (b) {
+      b.addEventListener('change', function () {
+        // Unticking one goes back to picking tickets one by one.
+        var everything = allMatching(formId);
+        if (everything && !b.checked) everything.value = '0';
+        updateSelection(formId);
+      });
+    });
     updateSelection(formId);
+  });
+  $$('[data-select-matching]').forEach(function (btn) {
+    var formId = btn.getAttribute('data-select-matching');
+    btn.addEventListener('click', function () {
+      var form = document.getElementById(formId);
+      var all = form && form.querySelector('input[name="all"]');
+      if (!all) return;
+      all.value = '1';
+      selection(formId).forEach(function (b) { b.checked = true; });
+      btn.hidden = true;
+      updateSelection(formId);
+    });
   });
 
   // ---- File upload drop zone (ticket page) ----------------------------------------------------
