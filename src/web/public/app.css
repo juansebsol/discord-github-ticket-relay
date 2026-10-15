@@ -1003,3 +1003,21 @@ th.half { width: 38%; }
 .check-list.stacked { flex-direction: column; gap: 8px; }
 input[type="number"].narrow { width: 88px; height: 28px; margin-left: 4px; }
 progress.bar.wide { max-width: none; }
+/* Triage: modes per source (Discord tickets, issues opened on GitHub) */
+.src-modes { display: grid; grid-template-columns: auto auto; gap: 6px 10px; align-items: center; justify-items: end; flex: none; }
+.src-l { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; line-height: 16px; color: var(--muted); white-space: nowrap; }
+.src-l .ic { color: var(--faint); }
+.src-modes.gh-off .gh { opacity: 0.5; }
+.src-summary { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 8px; font-size: 12px; line-height: 16px; color: var(--muted); }
+.src-summary span { display: inline-flex; align-items: center; gap: 6px; }
+.group-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 0 0; margin-top: 12px; border-top: 1px solid var(--border); }
+.group-row .cell-title { display: inline-flex; align-items: center; gap: 6px; }
+@media (max-width: 720px) {
+  .section-h:has(.src-modes), .group-row { flex-direction: column; align-items: stretch; }
+  /* Each label above its control, full width. */
+  .src-modes { grid-template-columns: minmax(0, 1fr); justify-items: stretch; gap: 4px; }
+  .src-modes > .gh:not(.src-l) { display: block; }
+  .src-l.gh { margin-top: 6px; }
+  .src-modes .seg { display: flex; width: 100%; }
+  .src-modes .seg-item { flex: 1; justify-content: center; }
+}

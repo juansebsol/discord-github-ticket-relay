@@ -318,7 +318,7 @@ describe('re-running at scale', () => {
     await clones(t.id, 229);
     await enable({ priority: { mode: 'suggest' }, monthlyLimit: 5000 });
     const est = await env.server.inject({ method: 'GET', url: `${w()}/tickets/triage/runs/estimate?untouched=1&never=1&count=all`, ...get(ws.owner) });
-    expect(est.json()).toMatchObject({ allLabel: 'All matching tickets (230)' });
+    expect(est.json()).toMatchObject({ allLabel: 'All matching (230)' });
     expect(est.json().text).toContain('230 tickets');
     await start({ count: 'all' });
     const run = await latestRun();

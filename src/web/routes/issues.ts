@@ -18,6 +18,7 @@ import { setFlash } from '../session.js';
 import type { Web } from '../server.js';
 import { empty, icon, linkBtn, pill, plural, postBtn, segLinks, selectWrap, timeAgo, when } from '../ui.js';
 import { ticketsHeader } from './tickets.js';
+import { issuesNav, issueTriageCount } from './issue-triage.js';
 
 const PAGE_SIZE = 50;
 
@@ -102,6 +103,13 @@ export function registerIssueRoutes(app: FastifyInstance, web: Web): void {
       [wid, JSON.stringify(rows.map((r) => r.number))],
     );
     const ticketOf = new Map(tickets.map((t) => [`${t.repo_id}:${t.issue_number}`, t.id]));
+    // Issues opened on GitHub that triage looked at link to their triage page.
+    const { rows: triaged } = await deps.db.query<{ repo_id: number; number: number }>(
+      `SELECT repo_id, number FROM issue_triage WHERE workspace_id = $1 AND number IN (SELECT value FROM json_each($2))`,
+      [wid, JSON.stringify(rows.map((r) => r.number))],
+    );
+    const triagedSet = new Set(triaged.map((t) => `${t.repo_id}:${t.number}`));
+    const toReview = await issueTriageCount(web, wid);
 
     const link = (o: { state?: StateFilter; page?: number; q?: string; repo?: number | null }) => {
       const params = new URLSearchParams();
@@ -150,12 +158,13 @@ export function registerIssueRoutes(app: FastifyInstance, web: Web): void {
           <div class="sub">${[repos.size > 1 && repo ? repo.name : null, r.app_name, `opened ${timeAgo(r.created_at)}`, r.state === 'closed' && r.closed_at ? `closed ${timeAgo(r.closed_at)}` : null].filter(Boolean).join(' · ')}${r.duplicate_of ? html` · duplicate of <a href="https://github.com/${repo?.owner ?? ''}/${repo?.name ?? ''}/issues/${String(r.duplicate_of)}" target="_blank" rel="noopener noreferrer">#${String(r.duplicate_of)}</a>` : ''}</div>
           ${snippet ? html`<p class="issue-snip">${snippetHtml(snippet)}</p>` : ''}
         </div>
-        <div class="issue-meta">${statePill(r)}${ticket ? linkBtn(`${b}/tickets/${ticket}`, 'Ticket', { size: 'sm', variant: 'ghost' }) : ''}</div>
+        <div class="issue-meta">${statePill(r)}${ticket ? linkBtn(`${b}/tickets/${ticket}`, 'Ticket', { size: 'sm', variant: 'ghost' }) : triagedSet.has(`${r.repo_id}:${r.number}`) ? linkBtn(`${b}/tickets/issues/${String(r.repo_id)}/${String(r.number)}`, 'Triage', { size: 'sm', variant: 'ghost', icon: 'bot' }) : ''}</div>
       </li>`;
     });
 
     const body = html`
       ${await ticketsHeader(web, ctx, 'issues')}
+      ${toReview !== null ? issuesNav(ctx, 'all', toReview) : ''}
       ${statusCard}
       <div class="card">
         <div class="toolbar">

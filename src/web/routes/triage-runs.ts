@@ -27,6 +27,7 @@ import {
   allActionKeys,
   anyActionOn,
   FLAGS,
+  forGitHub,
   formatCost,
   getTriageSettings,
   monthlyUsage,
@@ -137,7 +138,7 @@ function waitingText(r: Pick<TriageRunRow, 'waiting_until_at' | 'waiting_reason'
 /** The ticket's triage before the run (or in the run compared with). */
 function beforeSide(item: RunItemView, vs: Map<string, RunItemView> | null): Side {
   if (vs) {
-    const other = vs.get(item.submission_id);
+    const other = vs.get(item.subject);
     return other?.status === 'done' ? { auto: other.auto_actions ?? [], suggested: other.suggestions ?? [], reason: other.verdict?.reason ?? null } : null;
   }
   const b = beforeDecisions(item.before);
@@ -160,6 +161,7 @@ function parseScope(f: Record<string, string | undefined>): RerunScope {
   const newest = f.count === 'newest' || (f.count === undefined && f.limit !== undefined);
   const limit = Number.parseInt(String(f.limit ?? ''), 10);
   return {
+    source: f.source === 'github' || f.source === 'all' ? f.source : 'tickets',
     untouched: f.untouched !== undefined,
     never: f.never !== undefined,
     appId: f.app_id || null,
@@ -199,12 +201,14 @@ export function registerTriageRunRoutes(app: FastifyInstance, web: Web): void {
 
   /** What a run with this scope would cover, cost and take. */
   async function estimate(workspaceId: string, scope: RerunScope) {
-    const [settings, usage, matched, perTicket, pace] = await Promise.all([
+    const [settings, usage, matched, perTicket, pace, untouched, never] = await Promise.all([
       getTriageSettings(deps.db, workspaceId),
       monthlyUsage(deps.db, workspaceId),
       scope.untouched || scope.never ? web.triage.countRerun(workspaceId, scope) : Promise.resolve(0),
       tokensPerTicket(workspaceId),
       secondsPerTicket(workspaceId),
+      web.triage.countRerun(workspaceId, { ...scope, untouched: true, never: false }),
+      web.triage.countRerun(workspaceId, { ...scope, untouched: false, never: true }),
     ]);
     const c = settings.config;
     const left = Math.max(0, c.monthlyLimit - usage.triaged);
@@ -223,7 +227,7 @@ export function registerTriageRunRoutes(app: FastifyInstance, web: Web): void {
           : picked < matched && picked === MAX_RERUN
             ? `A run can have up to ${n(MAX_RERUN)} tickets; start another one for the rest.`
             : null;
-    return { matched, picked, left, text, warn, allLabel: `All matching tickets (${n(matched)})` };
+    return { matched, picked, left, text, warn, allLabel: `All matching (${n(matched)})`, untouched: `Triaged, nothing applied yet (${n(untouched)})`, never: `Never triaged (${n(never)})` };
   }
 
   // ---- Start a run, and the list of runs -----------------------------------------------------
@@ -241,31 +245,37 @@ export function registerTriageRunRoutes(app: FastifyInstance, web: Web): void {
       web.triage.listRuns(wid),
     ]);
     const c = settings.config;
-    const all: RerunScope = { untouched: true, never: true, appId: null, typeName: null, limit: MAX_RERUN };
-    const [untouched, never, est] = await Promise.all([
-      web.triage.countRerun(wid, { ...all, never: false }),
-      web.triage.countRerun(wid, { ...all, untouched: false }),
+    const all: RerunScope = { source: 'tickets', untouched: true, never: true, appId: null, typeName: null, limit: MAX_RERUN };
+    const [est, ticketCount, githubCount] = await Promise.all([
       estimate(wid, all),
+      web.triage.countRerun(wid, all),
+      web.triage.countRerun(wid, { ...all, source: 'github' }),
     ]);
+    const githubActions = anyActionOn(forGitHub(c));
     const running = runs.find((r) => r.status === 'running');
     const names = await userNames(deps.db, runs.map((r) => r.created_by));
-    const blocked = !key ? 'Add a Claude API key in Settings first.' : !anyActionOn(c) ? 'Turn at least one action on in Actions first.' : est.left <= 0 ? 'This month’s triage limit is used up. Raise it in Actions to re-run.' : running ? 'A re-run is going. Wait for it to finish or stop it.' : null;
+    const blocked = !key ? 'Add a Claude API key in Settings first.' : !anyActionOn(c) && !githubActions ? 'Turn at least one action on in Actions first.' : est.left <= 0 ? 'This month’s triage limit is used up. Raise it in Actions to re-run.' : running ? 'A re-run is going. Wait for it to finish or stop it.' : null;
 
     const form = html`<form method="post" action="${b}" data-estimate="${b}/estimate">
       ${csrfField(ctx.csrf)}
-      ${setting('Tickets', 'Open tickets with no triage action applied yet. Closed issues are left out.', html`<div class="check-list">
-        <label class="check"><input type="checkbox" name="untouched" value="1" checked> Triaged, nothing applied yet (${n(untouched)})</label>
-        <label class="check"><input type="checkbox" name="never" value="1" checked> Never triaged (${n(never)})</label>
+      ${setting('Source', html`Each uses its own settings from Actions.${githubActions ? '' : ' Every action is Off for issues opened on GitHub, so set some first to include them.'}`, html`<div class="check-list stacked">
+        <label class="check"><input type="radio" name="source" value="tickets" checked> ${icon('message-circle', 14, 'muted')} Discord tickets (${n(ticketCount)})</label>
+        <label class="check"><input type="radio" name="source" value="github" ${githubActions ? '' : raw('disabled')}> ${icon('github', 14, 'muted')} Issues opened on GitHub (${n(githubCount)})</label>
+        <label class="check"><input type="radio" name="source" value="all" ${githubActions ? '' : raw('disabled')}> Both</label>
+      </div>`, { stacked: true })}
+      ${setting('Which ones', 'Open, with no triage action applied yet. Closed issues are left out.', html`<div class="check-list">
+        <label class="check"><input type="checkbox" name="untouched" value="1" checked> <span data-count-untouched>${est.untouched}</span></label>
+        <label class="check"><input type="checkbox" name="never" value="1" checked> <span data-count-never>${est.never}</span></label>
       </div>`, { stacked: true })}
       ${setting('App', null, selectWrap(html`<select id="run-app" name="app_id"><option value="">All apps</option>${apps.map((a) => html`<option value="${a.id}">${a.name}</option>`)}</select>`), { for: 'run-app' })}
-      ${setting('Ticket type', null, selectWrap(html`<select id="run-type" name="type"><option value="">All types</option>${types.map((t) => html`<option value="${t.name}">${t.name}</option>`)}</select>`), { for: 'run-type' })}
+      ${setting('Ticket type', 'Discord tickets only: issues opened on GitHub have no type.', selectWrap(html`<select id="run-type" name="type"><option value="">All types</option>${types.map((t) => html`<option value="${t.name}">${t.name}</option>`)}</select>`), { for: 'run-type' })}
       ${setting('How many', `Newest first. This month’s limit has ${n(est.left)} tickets left.`, html`<div class="check-list stacked">
         <label class="check"><input type="radio" name="count" value="all" checked> <span data-count-all>${est.allLabel}</span></label>
         <label class="check"><input type="radio" name="count" value="newest"> Only the newest <input type="number" class="narrow" name="limit" value="50" min="1" max="${String(MAX_RERUN)}" aria-label="How many of the newest tickets"></label>
       </div>`, { stacked: true })}
       ${setting('Mode', null, choices('mode', [
         { value: 'preview', title: 'Preview (recommended)', desc: 'Records what triage would do. Nothing changes on GitHub. Compare it with before, then apply the results you like, all at once if you want.' },
-        { value: 'apply', title: 'Apply right away', desc: settings.enabled ? 'Works like normal triage: automatic actions happen on GitHub and the new suggestions replace the old ones.' : 'Needs triage to be on.' },
+        { value: 'apply', title: 'Apply right away', desc: settings.enabled || settings.githubEnabled ? 'Works like normal triage: automatic actions happen on GitHub and the new suggestions replace the old ones.' : 'Needs triage to be on.' },
       ], 'preview'), { stacked: true })}
       ${setting('Name (optional)', 'To tell runs apart when you compare settings.', html`<input id="run-name" type="text" name="name" maxlength="60" placeholder="Stricter duplicates">`, { for: 'run-name' })}
       <div class="card-f"><div class="small"><div data-estimate-text>${est.text}</div><div class="warn-text" data-estimate-warn ${est.warn ? '' : raw('hidden')}>${est.warn ?? ''}</div></div><div class="end">
@@ -314,7 +324,7 @@ export function registerTriageRunRoutes(app: FastifyInstance, web: Web): void {
     const ctx = await web.requireWorkspace(req, reply);
     if (!ctx) return reply;
     const e = await estimate(ctx.workspace.id, parseScope(req.query as Record<string, string | undefined>));
-    return reply.header('Cache-Control', 'no-store').send({ text: e.text, warn: e.warn, allLabel: e.allLabel });
+    return reply.header('Cache-Control', 'no-store').send({ text: e.text, warn: e.warn, allLabel: e.allLabel, untouched: e.untouched, never: e.never });
   });
 
   app.post('/w/:wid/tickets/triage/runs', async (req, reply) => {
@@ -358,13 +368,13 @@ export function registerTriageRunRoutes(app: FastifyInstance, web: Web): void {
     let matching: number;
     let page = Math.max(1, Number.parseInt(q.page ?? '1', 10) || 1);
     if (vsRun) {
-      vs = new Map((await web.triage.runItems(vsRun.id)).map((i) => [i.submission_id, i]));
+      vs = new Map((await web.triage.runItems(vsRun.id)).map((i) => [i.subject, i]));
       const allItems = await web.triage.runItems(run.id);
-      const v = new Map(allItems.map((i) => [i.submission_id, verdictOf(i, vs)]));
-      const count = (x: Verdict[]) => allItems.filter((i) => x.includes(v.get(i.submission_id)!)).length;
+      const v = new Map(allItems.map((i) => [i.subject, verdictOf(i, vs)]));
+      const count = (x: Verdict[]) => allItems.filter((i) => x.includes(v.get(i.subject)!)).length;
       tally = { changed: count(['changed']), new: count(['new']), same: count(['same']), skipped: count(['skipped']) };
       const shownAll = allItems.filter((i) => {
-        const x = v.get(i.submission_id)!;
+        const x = v.get(i.subject)!;
         return show === 'all' || (show === 'changed' ? x === 'changed' || x === 'new' : show === 'same' ? x === 'same' : x === 'skipped');
       });
       matching = shownAll.length;
@@ -438,9 +448,9 @@ export function registerTriageRunRoutes(app: FastifyInstance, web: Web): void {
             const v = verdictOf(i, vs);
             const changed = v === 'changed' || v === 'new';
             return html`<tr class="${changed ? 'changed' : ''}">
-              ${selectable ? html`<td class="check-col">${applicable(i) ? html`<input type="checkbox" class="rule-check" name="ticket" value="${i.submission_id}" form="apply-run" ${changed ? raw('checked') : ''} aria-label="Apply ${i.ref}">` : ''}</td>` : ''}
-              <td><a class="cell-title" href="${ctx.base}/tickets/${i.submission_id}">${i.issue_title ?? i.ref}</a>
-                <div class="sub">${i.issue_number ? html`<a href="https://github.com/${i.repo_owner}/${i.repo_name}/issues/${String(i.issue_number)}" target="_blank" rel="noopener noreferrer">#${String(i.issue_number)}</a> · ` : ''}${i.app_name}${i.ticket_type_name ? ` · ${i.ticket_type_name}` : ''}</div>
+              ${selectable ? html`<td class="check-col">${applicable(i) ? html`<input type="checkbox" class="rule-check" name="ticket" value="${i.subject}" form="apply-run" ${changed ? raw('checked') : ''} aria-label="Apply ${i.ref}">` : ''}</td>` : ''}
+              <td><a class="cell-title" href="${i.submission_id ? `${ctx.base}/tickets/${i.submission_id}` : `${ctx.base}/tickets/issues/${String(i.gh_repo_id)}/${String(i.gh_number)}`}">${i.issue_title ?? i.ref}</a>
+                <div class="sub">${i.issue_number ? html`<a href="https://github.com/${i.repo_owner}/${i.repo_name}/issues/${String(i.issue_number)}" target="_blank" rel="noopener noreferrer">#${String(i.issue_number)}</a> · ` : ''}${i.app_name ?? i.repo_name}${i.ticket_type_name ? ` · ${i.ticket_type_name}` : ''}${i.submission_id ? '' : ' · opened on GitHub'}</div>
                 ${v === 'changed' ? html`<div class="mt-8">${tag('Changed', { cls: 'diff-tag' })}</div>` : v === 'new' ? html`<div class="mt-8">${tag('New', { cls: 'diff-tag' })}</div>` : ''}</td>
               <td>${sideCell(beforeSide(i, vs), i, { label: 'before' })}</td>
               <td>${sideCell(afterSide(i), i, { label: 'after' })}</td>
@@ -559,7 +569,8 @@ export function registerTriageRunRoutes(app: FastifyInstance, web: Web): void {
     if (!ctx) return reply;
     const rid = (req.params as { rid: string }).rid;
     const f = (req.body ?? {}) as { ticket?: string | string[]; scope?: string; show?: string; include?: string };
-    const ids = f.ticket === undefined ? [] : Array.isArray(f.ticket) ? f.ticket : [f.ticket];
+    // Items are 'sub:<ticket id>' or 'gh:<repo>:<number>'; a bare id (a page from before) is a ticket.
+    const ids = (f.ticket === undefined ? [] : Array.isArray(f.ticket) ? f.ticket : [f.ticket]).map((x) => (/^(sub|gh):/.test(x) ? x : `sub:${x}`));
     const filter: RunFilter = FILTERS.includes(f.show as RunFilter) && f.show !== 'skipped' ? (f.show as RunFilter) : 'all';
     try {
       const count = await web.triage.applyPreview(ctx.workspace.id, rid, ctx.user.id, {

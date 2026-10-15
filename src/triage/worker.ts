@@ -52,8 +52,8 @@ export class TriageWorker {
   }
 
   /**
-   * Queues newly filed tickets and triages everything due. Re-runs only use the time left over:
-   * a new ticket always goes first. Exposed for tests.
+   * Queues newly filed tickets and new issues opened on GitHub, and triages everything due.
+   * Re-runs only use the time left over: new tickets and issues always go first. Exposed for tests.
    */
   async drain(): Promise<number> {
     await this.engine.enqueueNew();
@@ -62,6 +62,13 @@ export class TriageWorker {
       const row = await this.engine.claim();
       if (row) {
         await this.engine.process(row);
+        processed++;
+        continue;
+      }
+      // Then new issues opened on GitHub, then re-runs.
+      const issue = await this.engine.claimIssue();
+      if (issue) {
+        await this.engine.processIssue(issue);
         processed++;
         continue;
       }

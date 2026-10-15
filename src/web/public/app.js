@@ -639,6 +639,41 @@
     });
     show();
   });
+  // ---- Triage › Actions: modes per source ------------------------------------------------------
+
+  function setRadio(form, name, value) {
+    var r = form.querySelector('input[type="radio"][name="' + name + '"][value="' + value + '"]');
+    if (!r || r.checked) return;
+    r.checked = true;
+    r.dispatchEvent(new Event('change', { bubbles: true }));
+    r.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+  // "Copy Discord settings to GitHub": every GitHub mode takes the Discord ticket mode (saved with Save).
+  document.addEventListener('click', function (e) {
+    var copy = e.target.closest('[data-copy-modes]');
+    var all = e.target.closest('[data-set-gh-modes]');
+    if (!copy && !all) return;
+    var form = (copy || all).closest('form');
+    if (!form) return;
+    $$('input[type="radio"]', form).forEach(function (r) {
+      if (!/_gh_mode$/.test(r.name) || r.value !== 'off') return;
+      var base = r.name.replace(/_gh_mode$/, '_mode');
+      if (copy) {
+        var on = form.querySelector('input[type="radio"][name="' + base + '"]:checked');
+        if (on) setRadio(form, r.name, on.value);
+      } else {
+        setRadio(form, r.name, all.getAttribute('data-set-gh-modes'));
+      }
+    });
+  });
+  // The GitHub switch dims (or undims) its column right away.
+  $$('form[data-gh-switch] input[type="checkbox"]').forEach(function (box) {
+    box.addEventListener('change', function () {
+      $$('.src-modes').forEach(function (el) { el.classList.toggle('gh-off', !box.checked); });
+      $$('[data-gh-off-note]').forEach(function (el) { el.hidden = box.checked; });
+    });
+  });
+
   // A select can set its form's confirmation (Re-run: what applying the results does).
   $$('select[data-confirm-options]').forEach(function (sel) {
     function sync() {
@@ -675,6 +710,8 @@
           if (text) text.textContent = d.text;
           if (warn) { warn.textContent = d.warn || ''; warn.hidden = !d.warn; }
           $$('[data-count-all]', form).forEach(function (el) { el.textContent = d.allLabel; });
+          $$('[data-count-untouched]', form).forEach(function (el) { el.textContent = d.untouched; });
+          $$('[data-count-never]', form).forEach(function (el) { el.textContent = d.never; });
         })
         .catch(function () {});
     }

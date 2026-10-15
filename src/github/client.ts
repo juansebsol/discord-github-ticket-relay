@@ -54,6 +54,9 @@ export interface IssueDetail {
   stateReason: string | null;
   createdAt: Date;
   updatedAt: Date;
+  /** Who opened it, and whether that's a bot account (GitHub Apps, Dependabot and the like). */
+  author: string | null;
+  authorIsBot: boolean;
 }
 
 function toIssueDetail(data: any): IssueDetail {
@@ -68,6 +71,8 @@ function toIssueDetail(data: any): IssueDetail {
     stateReason: typeof data.state_reason === 'string' ? data.state_reason : null,
     createdAt: new Date(typeof data.created_at === 'string' ? data.created_at : 0),
     updatedAt: new Date(typeof data.updated_at === 'string' ? data.updated_at : typeof data.created_at === 'string' ? data.created_at : 0),
+    author: typeof data.user?.login === 'string' ? data.user.login : null,
+    authorIsBot: data.user?.type === 'Bot' || /\[bot\]$/.test(String(data.user?.login ?? '')),
   };
 }
 

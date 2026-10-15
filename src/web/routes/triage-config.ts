@@ -13,6 +13,8 @@ import { buildUserPrompt, DEFAULT_CHECK_RULES, DEFAULT_EXAMPLES } from '../../tr
 import {
   FLAGS,
   getTriageSettings,
+  githubMode,
+  groupKind,
   LABEL_GROUP_PRESETS,
   MAX_GROUP_OPTIONS,
   MAX_LABEL_GROUPS,
@@ -25,7 +27,7 @@ import {
 } from '../../triage/settings.js';
 import { setFlash } from '../session.js';
 import type { Web, WorkspaceRequestContext } from '../server.js';
-import { csrfField, empty, labelTag, linkBtn, notice, pageHeader, pill, postBtn, segRadios, selectWrap, submitBtn, type Tone } from '../ui.js';
+import { csrfField, empty, icon, labelTag, linkBtn, notice, pageHeader, pill, postBtn, segRadios, selectWrap, submitBtn, type Tone } from '../ui.js';
 import { textField } from './panel.js';
 import { ticketsHeader } from './tickets.js';
 import { FLAG_COPY, MODE_NAMES, MODE_OPTIONS, triageNav } from './triage.js';
@@ -84,12 +86,17 @@ export function registerTriageConfigRoutes(app: FastifyInstance, web: Web): void
     const addButtons = html`${presets.map((k) => postBtn(`${b}/add`, LABEL_GROUP_PRESETS[k].name, ctx.csrf, { size: 'sm', icon: 'plus', fields: { preset: k }, disabled: full }))}
       ${postBtn(`${b}/add`, 'Empty group', ctx.csrf, { size: 'sm', variant: 'ghost', icon: 'plus', fields: { preset: 'empty' }, disabled: full })}`;
 
+    const settings = await getTriageSettings(deps.db, ctx.workspace.id);
     const groupCard = (g: LabelGroup) => html`<div class="card" id="g-${g.id}">
-      <div class="card-h"><div><div class="title"><h2>${g.name}</h2>${pill(MODE_NAMES[g.mode], MODE_TONE[g.mode])}</div><div class="desc">${PICK_NAMES[g.pick]} · <span class="tags">${g.options.slice(0, 8).map((o) => labelTag(o.label))}${g.options.length > 8 ? html`<span class="small muted">+${String(g.options.length - 8)} more</span>` : ''}</span></div></div>
+      <div class="card-h"><div><div class="title"><h2>${g.name}</h2>${pill(`Discord: ${MODE_NAMES[g.mode]}`, MODE_TONE[g.mode])}${pill(`GitHub: ${MODE_NAMES[githubMode(c, groupKind(g.id))]}`, MODE_TONE[githubMode(c, groupKind(g.id))])}</div><div class="desc">${PICK_NAMES[g.pick]} · <span class="tags">${g.options.slice(0, 8).map((o) => labelTag(o.label))}${g.options.length > 8 ? html`<span class="small muted">+${String(g.options.length - 8)} more</span>` : ''}</span></div></div>
         ${postBtn(`${b}/${g.id}/delete`, 'Delete', ctx.csrf, { size: 'sm', variant: 'ghost danger', icon: 'trash-2', confirm: { title: `Delete the ${g.name} group?`, body: 'Claude stops picking these labels. Labels already added to issues stay on GitHub.', label: 'Delete group', danger: true } })}</div>
       <form method="post" action="${b}/${g.id}" data-dirty>${csrfField(ctx.csrf)}
         <div class="section">
-          <div class="section-h"><div><h3>When Claude picks</h3><div class="desc">Suggest shows the labels on the ticket for someone to apply; Automatic adds them when Claude is at least ${String(c.threshold)}% sure.</div></div>${segRadios('mode', MODE_OPTIONS, g.mode, `${g.name} mode`)}</div>
+          <div class="section-h"><div><h3>When Claude picks</h3><div class="desc">Set separately for Discord tickets and issues opened on GitHub. Suggest shows the labels for someone to apply; Automatic adds them when Claude is at least ${String(c.threshold)}% sure.</div></div>
+            <div class="src-modes${settings.githubEnabled ? '' : ' gh-off'}">
+              <span class="src-l">${icon('message-circle', 14)}Discord tickets</span>${segRadios('mode', MODE_OPTIONS, g.mode, `${g.name} for Discord tickets`)}
+              <span class="src-l gh">${icon('github', 14)}Opened on GitHub</span><span class="gh">${segRadios('gh_mode', MODE_OPTIONS, githubMode(c, groupKind(g.id)), `${g.name} for issues opened on GitHub`)}</span>
+            </div></div>
           <div class="fields">
             <div class="fields-2">
               <div class="field"><label for="name-${g.id}">Name</label><input id="name-${g.id}" type="text" name="name" value="${g.name}" maxlength="40" required></div>
@@ -135,7 +142,7 @@ export function registerTriageConfigRoutes(app: FastifyInstance, web: Web): void
           : { name: 'New group', instruction: '', pick: 'one' as const, options: [{ label: 'example', description: 'Replace with your own options.' }] };
         c.labelGroups.push({ id, mode: 'off', ...base });
       });
-      setFlash(reply, 'success', 'Label group added. It starts Off: edit its options, then choose Suggest or Automatic.');
+      setFlash(reply, 'success', 'Label group added. It starts Off for Discord tickets and for GitHub issues: edit its options, then choose Suggest or Automatic.');
     } catch (err) {
       if (!(err instanceof UserFacingError)) throw err;
       setFlash(reply, 'error', err.message);
@@ -152,6 +159,7 @@ export function registerTriageConfigRoutes(app: FastifyInstance, web: Web): void
       const name = String(f.name ?? '').trim();
       if (!name || name.length > 40) throw new UserFacingError('Give the group a name of up to 40 characters.');
       const mode = (MODES as readonly string[]).includes(String(f.mode)) ? (f.mode as Mode) : 'off';
+      const ghMode = f.gh_mode === undefined ? undefined : (MODES as readonly string[]).includes(String(f.gh_mode)) ? (f.gh_mode as Mode) : 'off';
       const pick = (['one', 'two', 'any'] as const).find((p) => p === f.pick) ?? 'one';
       const instruction = String(f.instruction ?? '').replace(/\r\n/g, '\n').trim().slice(0, 600);
       const options = parseOptions(String(f.options ?? ''));
@@ -160,6 +168,7 @@ export function registerTriageConfigRoutes(app: FastifyInstance, web: Web): void
         if (!g) throw new UserFacingError('That label group was deleted.', 404);
         if (c.labelGroups.some((x) => x.id !== gid && x.name.toLowerCase() === name.toLowerCase())) throw new UserFacingError(`There’s already a group called ${name}.`);
         Object.assign(g, { name, mode, pick, instruction, options });
+        if (ghMode) c.githubModes[groupKind(gid)] = ghMode;
       });
       setFlash(reply, 'success', `${name} saved`);
     } catch (err) {
@@ -175,6 +184,7 @@ export function registerTriageConfigRoutes(app: FastifyInstance, web: Web): void
     const gid = (req.params as { gid: string }).gid;
     await update(ctx, (c) => {
       c.labelGroups = c.labelGroups.filter((g) => g.id !== gid);
+      delete c.githubModes[groupKind(gid)];
       // Rules by ticket type no longer mention it.
       for (const rule of Object.values(c.typeRules)) rule.off = rule.off.filter((k) => k !== `group:${gid}`);
     });
@@ -208,7 +218,7 @@ export function registerTriageConfigRoutes(app: FastifyInstance, web: Web): void
           <div class="card-h"><div><h2>Checks</h2><div class="desc">How Claude decides each check. The built-in wording is tuned to avoid false positives; change it to match how your team triages. Each check is answered on its own; whether it does anything is set in Actions.</div></div></div>
           ${FLAGS.map((f) => html`<div class="section">${textField({
             id: `rule_${f}`,
-            label: `${FLAG_COPY[f].title} · ${MODE_NAMES[modeOf(f)]}`,
+            label: `${FLAG_COPY[f].title} · Discord: ${MODE_NAMES[modeOf(f)]} · GitHub: ${MODE_NAMES[githubMode(c, f)]}`,
             value: c.checkRules[f]?.trim() || DEFAULT_CHECK_RULES[f],
             max: 2000,
             rows: Math.min(10, Math.max(3, Math.ceil(DEFAULT_CHECK_RULES[f].length / 110))),
@@ -282,7 +292,7 @@ export function registerTriageConfigRoutes(app: FastifyInstance, web: Web): void
       <div class="stack">
         ${settings.enabled ? '' : notice('info', null, 'Triage is off. This is what Claude would be told.')}
         <div class="card">
-          <div class="card-h"><div><h2>Instructions</h2><div class="desc">Sent with every ticket: ${tokensOf(system)}.</div></div></div>
+          <div class="card-h"><div><h2>Instructions</h2><div class="desc">Sent with every Discord ticket: ${tokensOf(system)}. Issues opened on GitHub get the same, with the label groups that are on for them.</div></div></div>
           <pre class="prompt-pre">${system}</pre>
         </div>
         <div class="card">

@@ -241,6 +241,11 @@ export const TriageConfigSchema = z.object({
   checkRules: z.record(z.string(), z.string().max(2000)).catch({}),
   /** Worked examples for the prompt; null uses the built-in ones, '' none. */
   examples: z.string().max(6000).nullable().catch(null),
+  /**
+   * For issues opened directly on GitHub: each action's own mode, by key ('priority', a check,
+   * or 'group:<id>'). Separate from the modes for Discord tickets; anything missing is Off.
+   */
+  githubModes: z.record(z.string(), mode).catch({}),
 });
 export type TriageConfig = z.infer<typeof TriageConfigSchema>;
 
@@ -291,6 +296,24 @@ export function actionMode(c: TriageConfig, key: string): Mode {
   return (FLAGS as readonly string[]).includes(key) ? c[key as Flag].mode : 'off';
 }
 
+/** An action's mode for issues opened on GitHub (Off unless set). */
+export function githubMode(c: TriageConfig, key: string): Mode {
+  return c.githubModes[key] ?? 'off';
+}
+
+/** The settings as they apply to issues opened on GitHub: every action takes its GitHub mode. */
+export function forGitHub(c: TriageConfig): TriageConfig {
+  const out = structuredClone(c);
+  out.priority.mode = githubMode(c, 'priority');
+  for (const f of FLAGS) {
+    out[f].mode = githubMode(c, f);
+    // There's no Discord member to tell.
+    out[f].notifyMember = false;
+  }
+  for (const g of out.labelGroups) g.mode = githubMode(c, groupKind(g.id));
+  return out;
+}
+
 /** Approximate list prices (USD per million tokens, input and output) for cost estimates. */
 export const MODEL_PRICES: Record<string, [number, number]> = {
   'claude-haiku-5-5': [0.1, 0.5],
@@ -339,6 +362,9 @@ export interface TriageSettings {
   workspaceId: string;
   enabled: boolean;
   enabledAt: Date | null;
+  /** Triage of issues opened directly on GitHub (separate switch). */
+  githubEnabled: boolean;
+  githubEnabledAt: Date | null;
   config: TriageConfig;
   paused: { reason: PauseReason; detail: string | null; at: Date } | null;
   key: { hint: string; addedBy: string | null; addedAt: Date | null } | null;
@@ -348,6 +374,8 @@ interface Row {
   workspace_id: string;
   enabled: boolean;
   enabled_at: Date | null;
+  github_enabled: boolean;
+  github_enabled_at: Date | null;
   triage_config: unknown;
   paused_reason: PauseReason | null;
   paused_detail: string | null;
@@ -365,6 +393,8 @@ export async function getTriageSettings(q: Queryable, workspaceId: string): Prom
     workspaceId,
     enabled: Boolean(r?.enabled),
     enabledAt: r?.enabled_at ?? null,
+    githubEnabled: Boolean(r?.github_enabled),
+    githubEnabledAt: r?.github_enabled_at ?? null,
     config: parseTriageConfig(r?.triage_config),
     paused: r?.paused_reason ? { reason: r.paused_reason, detail: r.paused_detail, at: r.paused_at ?? new Date() } : null,
     key: key ? { hint: key.hint, addedBy: key.addedBy, addedAt: key.addedAt } : null,
@@ -388,6 +418,18 @@ export async function setTriageEnabled(q: Queryable, workspaceId: string, enable
        enabled_at = CASE WHEN $2 = 1 AND enabled = 0 THEN now_ms() ELSE enabled_at END,
        paused_reason = CASE WHEN $2 = 1 THEN NULL ELSE paused_reason END,
        paused_detail = CASE WHEN $2 = 1 THEN NULL ELSE paused_detail END,
+       updated_at = now_ms()
+     WHERE workspace_id = $1`,
+    [workspaceId, enabled],
+  );
+}
+
+/** Triage of issues opened on GitHub starts from now: issues opened earlier are only triaged by a re-run. */
+export async function setGitHubTriageEnabled(q: Queryable, workspaceId: string, enabled: boolean): Promise<void> {
+  await ensureRow(q, workspaceId);
+  await q.query(
+    `UPDATE triage_settings SET github_enabled = $2,
+       github_enabled_at = CASE WHEN $2 = 1 AND github_enabled = 0 THEN now_ms() ELSE github_enabled_at END,
        updated_at = now_ms()
      WHERE workspace_id = $1`,
     [workspaceId, enabled],
@@ -427,6 +469,8 @@ export async function monthlyUsage(q: Queryable, workspaceId: string, now = new 
   const { rows } = await q.query<{ n: number; input: number | null; output: number | null }>(
     `SELECT count(*) AS n, sum(input_tokens) AS input, sum(output_tokens) AS output FROM (
        SELECT input_tokens, output_tokens FROM triage_results WHERE workspace_id = $1 AND input_tokens IS NOT NULL AND completed_at >= $2
+       UNION ALL
+       SELECT input_tokens, output_tokens FROM issue_triage WHERE workspace_id = $1 AND input_tokens IS NOT NULL AND completed_at >= $2
        UNION ALL
        SELECT i.input_tokens, i.output_tokens FROM triage_run_items i JOIN triage_runs r ON r.id = i.run_id
        WHERE r.workspace_id = $1 AND i.input_tokens IS NOT NULL AND i.completed_at >= $2

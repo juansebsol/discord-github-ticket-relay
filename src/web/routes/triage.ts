@@ -7,6 +7,10 @@ import { UserFacingError } from '../../domain/types.js';
 import { html, raw, type SafeHtml } from '../../lib/html.js';
 import { classifyAiError, type ModelOption } from '../../triage/ai.js';
 import {
+  forGitHub,
+  githubMode,
+  groupKind,
+  setGitHubTriageEnabled,
   actionMode,
   actionName,
   actionsOffFor,
@@ -128,12 +132,27 @@ export function registerTriageRoutes(app: FastifyInstance, web: Web): void {
     const cost = tokenCost(c.model, usage.inputTokens, usage.outputTokens);
     const nextMonth = new Date(Date.UTC(usage.since.getUTCFullYear(), usage.since.getUTCMonth() + 1, 1));
 
-    const status = !settings.enabled ? pill('Off', 'neutral') : settings.paused ? pill('Paused', 'warn') : pill('On', 'ok');
+    const anyOn = settings.enabled || settings.githubEnabled;
+    const status = !anyOn ? pill('Off', 'neutral') : settings.paused ? pill('Paused', 'warn') : pill('On', 'ok');
+    const ghOff = !settings.githubEnabled;
+    /** An action's two modes: for Discord tickets, and for issues opened on GitHub. */
+    const modeControls = (name: string, key: string, title: string) => html`<div class="src-modes${ghOff ? ' gh-off' : ''}">
+      <span class="src-l">${icon('message-circle', 14)}Discord tickets</span>${segRadios(`${name}_mode`, MODE_OPTIONS, actionMode(c, key), `${title} for Discord tickets`)}
+      <span class="src-l gh">${icon('github', 14)}Opened on GitHub</span><span class="gh">${segRadios(`${name}_gh_mode`, MODE_OPTIONS, githubMode(c, key), `${title} for issues opened on GitHub`)}</span>
+    </div>`;
+    const keys = allActionKeys(c);
+    const onCount = (modeOf: (k: string) => string) => keys.filter((k) => modeOf(k) !== 'off');
+    const ticketsOn = onCount((k) => actionMode(c, k));
+    const githubOn = onCount((k) => githubMode(c, k));
+    const sourceSummary = (on: string[], modeOf: (k: string) => string, enabled: boolean) => {
+      const allSuggest = on.length && on.every((k) => modeOf(k) === 'suggest');
+      return `${plural(on.length, 'action')} on${allSuggest ? ' (all Suggest)' : ''}${enabled ? '' : ' · switched off'}`;
+    };
     const modelOptions = available.length ? available : [{ id: c.model, name: c.model, deprecated: false }];
     if (!modelOptions.some((m) => m.id === c.model)) modelOptions.unshift({ id: c.model, name: `${c.model} (not available to this key)`, deprecated: true });
 
     const flagSection = (f: Flag) => html`<div class="section">
-      <div class="section-h"><div><h3>${FLAG_COPY[f].title}</h3><div class="desc">${FLAG_COPY[f].desc}</div></div>${segRadios(`${f}_mode`, MODE_OPTIONS, c[f].mode, `${FLAG_COPY[f].title} mode`)}</div>
+      <div class="section-h"><div><h3>${FLAG_COPY[f].title}</h3><div class="desc">${FLAG_COPY[f].desc}</div></div>${modeControls(f, f, FLAG_COPY[f].title)}</div>
       <details class="act-more">
         <summary>${icon('chevron-right', 14, 'chev')}<span class="what">Label, comment${NO_CLOSE.has(f) ? '' : ' and closing'}</span><span class="truncate">${flagSummary(c, f)}</span></summary>
         <div class="fields">
@@ -142,7 +161,7 @@ export function registerTriageRoutes(app: FastifyInstance, web: Web): void {
               <div class="hint">Created on GitHub the first time it’s used. Leave empty to only comment.</div></div>
             <div class="field"><span class="label">When applied</span>
               ${NO_CLOSE.has(f) ? html`<p class="small muted mt-8">Never closes the issue.</p>` : html`<label class="check mt-8"><input type="checkbox" name="${f}_close" value="1" ${c[f].close ? raw('checked') : ''}> Also close the issue (as not planned)</label>`}
-              ${NOTIFIABLE.has(f) ? html`<label class="check mt-8"><input type="checkbox" name="${f}_notify" value="1" ${c[f].notifyMember ? raw('checked') : ''}> Also tell the member in Discord</label>` : ''}
+              ${NOTIFIABLE.has(f) ? html`<label class="check mt-8"><input type="checkbox" name="${f}_notify" value="1" ${c[f].notifyMember ? raw('checked') : ''}> Also tell the member in Discord (Discord tickets only)</label>` : ''}
               <div class="hint">Applies on Automatic and when someone presses Apply.${NOTIFIABLE.has(f) ? ' Discord can only be updated within 15 minutes of the ticket being filed.' : ''}</div></div>
           </div>
           ${f === 'support' ? html`<div class="field"><label for="help_channel">Help channel</label>
@@ -162,31 +181,35 @@ export function registerTriageRoutes(app: FastifyInstance, web: Web): void {
           })}
         </div>
       </details></div>`;
-    const keys = allActionKeys(c);
 
     const body = html`
       ${await ticketsHeader(web, ctx, 'triage')}
       ${triageNav(ctx, 'actions')}
       ${!key ? notice('warn', 'Triage needs a Claude API key', 'Add the workspace’s key in Settings. It’s shared by every feature that uses Claude.', { action: linkBtn(`${b}/settings#claude`, 'Open Settings', { size: 'sm', trail: 'arrow-right' }) }) : ''}
-      ${settings.enabled && settings.paused
+      ${anyOn && settings.paused
         ? notice('warn', 'Triage is paused', `${pauseMessage(settings.paused.reason, settings.paused.detail, c.model)} Tickets are still being filed normally.`, { action: postBtn(`${b}/tickets/triage/resume`, 'Resume', ctx.csrf, { size: 'sm', icon: 'rotate-ccw' }) })
         : ''}
-      ${settings.enabled && usage.triaged >= c.monthlyLimit
+      ${anyOn && usage.triaged >= c.monthlyLimit
         ? notice('warn', 'Monthly limit reached', `Triage resumes on ${nextMonth.toISOString().slice(0, 10)}, or raise the limit below. Tickets are still being filed normally.`)
         : ''}
       <div class="card">
         <div class="card-h"><div><div class="title"><h2>AI triage</h2>${status}</div><div class="desc">Claude reads each ticket after it’s filed and flags priority, duplicates, spam and more. It runs in its own worker: if it’s off, paused or out of credits, tickets are still filed exactly as before.</div></div></div>
         ${setting('Claude API key', keySummary(keyState, b), keyPill(keyState))}
-        ${setting('Triage', key ? html`Only tickets filed after you turn it on are triaged. For older tickets, use <a href="${b}/tickets/triage/runs">Re-run</a>.` : html`Needs a Claude API key. <a href="${b}/settings#claude">Add one in Settings</a>.`, html`<form method="post" action="${b}/tickets/triage/enabled" data-async class="inline-form">${csrfField(ctx.csrf)}<input type="hidden" name="set" value="1">
-          ${switchInput({ name: 'enabled', checked: settings.enabled, label: 'Triage on', disabled: !key && !settings.enabled })}<button type="submit" class="btn sm nojs">Save</button></form>`, { switchRow: true })}
+        ${setting(html`${icon('message-circle', 16, 'muted')} Discord tickets`, key ? html`Tickets members open in Discord. Only tickets filed after you turn it on are triaged; for older ones, use <a href="${b}/tickets/triage/runs">Re-run</a>.` : html`Needs a Claude API key. <a href="${b}/settings#claude">Add one in Settings</a>.`, html`<form method="post" action="${b}/tickets/triage/enabled" data-async class="inline-form">${csrfField(ctx.csrf)}<input type="hidden" name="set" value="1">
+          ${switchInput({ name: 'enabled', checked: settings.enabled, label: 'Triage Discord tickets', disabled: !key && !settings.enabled })}<button type="submit" class="btn sm nojs">Save</button></form>`, { switchRow: true })}
+        ${setting(html`${icon('github', 16, 'muted')} Issues opened on GitHub`, key ? html`Issues people open directly on GitHub (not pull requests, bots, or tickets from Discord). Only issues opened after you turn it on are triaged; for older ones, use <a href="${b}/tickets/triage/runs">Re-run</a>. Review them in <a href="${b}/tickets/issues/triage">Issues › Triage</a>.` : html`Needs a Claude API key. <a href="${b}/settings#claude">Add one in Settings</a>.`, html`<form method="post" action="${b}/tickets/triage/github-enabled" data-async data-gh-switch class="inline-form">${csrfField(ctx.csrf)}<input type="hidden" name="set" value="1">
+          ${switchInput({ name: 'enabled', checked: settings.githubEnabled, label: 'Triage issues opened on GitHub', disabled: !key && !settings.githubEnabled })}<button type="submit" class="btn sm nojs">Save</button></form>`, { switchRow: true })}
         ${setting('This month', 'Re-runs count too.', html`<span class="value">${plural(usage.triaged, 'ticket')} of ${String(c.monthlyLimit)}${cost !== null ? ` · ${formatCost(cost)}` : ''}${usage.inputTokens ? ` · ${(usage.inputTokens + usage.outputTokens).toLocaleString('en-US')} tokens` : ''}</span>`)}
       </div>
       <form method="post" action="${b}/tickets/triage" class="stack" data-dirty>
         ${csrfField(ctx.csrf)}
         <div class="card">
-          <div class="card-h"><div><h2>What triage does</h2><div class="desc">Every action starts off. <strong>Suggest</strong> shows Claude’s call on the ticket for someone to apply. <strong>Automatic</strong> applies it on GitHub when Claude is at least ${String(c.threshold)}% sure; less sure calls become suggestions.</div></div></div>
+          <div class="card-h"><div><h2>What triage does</h2><div class="desc">Each action has its own setting for Discord tickets and for issues opened on GitHub, and starts Off. <strong>Suggest</strong> shows Claude’s call for someone to apply. <strong>Automatic</strong> applies it on GitHub when Claude is at least ${String(c.threshold)}% sure; less sure calls become suggestions. The label, comment and closing are shared.</div>
+            <div class="src-summary"><span>${icon('message-circle', 14)}Discord tickets: ${sourceSummary(ticketsOn, (k) => actionMode(c, k), settings.enabled)}</span><span>${icon('github', 14)}Opened on GitHub: ${sourceSummary(githubOn, (k) => githubMode(c, k), settings.githubEnabled)}</span></div></div>
+            <div class="row js-only"><button type="button" class="btn sm" data-copy-modes>Copy Discord settings to GitHub</button><button type="button" class="btn sm" data-set-gh-modes="suggest">Set all GitHub to Suggest</button></div></div>
+          <div class="card-b tight" data-gh-off-note ${ghOff ? '' : raw('hidden')}>${notice('info', null, 'Issues opened on GitHub is switched off, so its settings below aren’t used yet. You can set them up first and turn it on above when you’re ready.')}</div>
           <div class="section">
-            <div class="section-h"><div><h3>Priority</h3><div class="desc">Adds one of four priority labels. The ticket type isn’t changed; the member picks it.</div></div>${segRadios('priority_mode', MODE_OPTIONS, c.priority.mode, 'Priority mode')}</div>
+            <div class="section-h"><div><h3>Priority</h3><div class="desc">Adds one of four priority labels. The ticket type isn’t changed; the member picks it.</div></div>${modeControls('priority', 'priority', 'Priority')}</div>
             <details class="act-more">
               <summary>${icon('chevron-right', 14, 'chev')}<span class="what">Labels and what each priority means</span><span class="truncate">${PRIORITIES.map((p) => c.priority.labels[p]).join(', ')}</span></summary>
               <div class="fields">
@@ -198,11 +221,11 @@ export function registerTriageRoutes(app: FastifyInstance, web: Web): void {
           ${FLAGS.map(flagSection)}
           <div class="section">
             <div class="section-h"><div><h3>Label groups</h3><div class="desc">Claude can also sort tickets with labels you define, such as Type, Area and Platform. It only picks from your options.</div></div>${linkBtn(`${b}/tickets/triage/labels`, c.labelGroups.length ? 'Edit groups' : 'Add groups', { size: 'sm', trail: 'arrow-right' })}</div>
-            ${c.labelGroups.length ? html`<div class="tags">${c.labelGroups.map((g) => tag(html`${g.name}<span class="muted"> · ${MODE_NAMES[g.mode]}</span>`, { icon: 'tags' }))}</div>` : ''}
+            ${c.labelGroups.map((g) => html`<div class="group-row"><div><div class="cell-title">${icon('tags', 14, 'muted')} ${g.name}</div><div class="sub">${plural(g.options.length, 'option')}</div></div>${modeControls(`group_${g.id}`, groupKind(g.id), g.name)}</div>`)}
           </div>
         </div>
         ${types.length ? html`<div class="card" id="rules">
-          <div class="card-h"><div><h2>Rules by ticket type</h2><div class="desc">Members pick a ticket type when they open a ticket. Choose which actions run for each type. Unticked actions never run for that type, and Claude is told to skip them so it still checks the rest.</div></div></div>
+          <div class="card-h"><div><h2>Rules by ticket type</h2><div class="desc">For Discord tickets: members pick a ticket type when they open a ticket. Choose which actions run for each type. Unticked actions never run for that type, and Claude is told to skip them so it still checks the rest. Issues opened on GitHub have no ticket type; they use their own column of settings above.</div></div></div>
           <input type="hidden" name="rules" value="1">
           <div class="card-b flush"><div class="table-wrap"><table>
             <thead><tr><th class="th-perm"><div class="l">Ticket type</div></th>${keys.map((k) => html`<th class="th-perm center"><div class="l">${actionName(c, k)}</div><div class="d">${MODE_NAMES[actionMode(c, k)]}</div></th>`)}</tr></thead>
@@ -248,8 +271,15 @@ export function registerTriageRoutes(app: FastifyInstance, web: Web): void {
       const flagClose = (f: Flag) => !NO_CLOSE.has(f) && b[`${f}_close`] !== undefined;
       if (PRIORITIES.some((p) => !str(`priority_label_${p}`) || str(`priority_label_${p}`).length > 50)) throw new UserFacingError('Each priority needs a label of up to 50 characters.');
       if (FLAGS.some((f) => flagLabel(f).length > 50)) throw new UserFacingError('Labels can be up to 50 characters.');
-      // An action that's on must do something when applied.
-      const idle = FLAGS.find((f) => mode(`${f}_mode`) !== 'off' && !flagLabel(f) && !flagClose(f) && !(flagComment(f).trim() && !CLOSE_ONLY_COMMENT.has(f)));
+      // Modes for issues opened on GitHub; a field missing from the form keeps its value.
+      const ghMode = (name: string, key: string): Mode => (b[`${name}_gh_mode`] === undefined ? githubMode(currentConfig, key) : mode(`${name}_gh_mode`));
+      const githubModes: Record<string, Mode> = Object.fromEntries([
+        ['priority', ghMode('priority', 'priority')],
+        ...FLAGS.map((f) => [f, ghMode(f, f)]),
+        ...currentConfig.labelGroups.map((g) => [groupKind(g.id), ghMode(`group_${g.id}`, groupKind(g.id))]),
+      ]);
+      // An action that's on (for either source) must do something when applied.
+      const idle = FLAGS.find((f) => (mode(`${f}_mode`) !== 'off' || githubModes[f] !== 'off') && !flagLabel(f) && !flagClose(f) && !(flagComment(f).trim() && !CLOSE_ONLY_COMMENT.has(f)));
       if (idle) throw new UserFacingError(`${FLAG_COPY[idle].title} is on but wouldn’t change anything: give it a label${CLOSE_ONLY_COMMENT.has(idle) ? ' or let it close the issue' : ', a comment or closing'}.`);
       const model = str('model') || DEFAULT_MODEL;
       if (!/^[a-z0-9][a-z0-9.-]{2,99}$/.test(model)) throw new UserFacingError('Choose a model from the list.');
@@ -300,6 +330,8 @@ export function registerTriageRoutes(app: FastifyInstance, web: Web): void {
           notifyMember: NOTIFIABLE.has(f) && b[`${f}_notify`] !== undefined,
         }])),
         helpChannel,
+        githubModes,
+        labelGroups: currentConfig.labelGroups.map((g) => ({ ...g, mode: b[`group_${g.id}_mode`] === undefined ? g.mode : mode(`group_${g.id}_mode`) })),
       });
       await saveTriageConfig(deps.db, ctx.workspace.id, config);
       setFlash(reply, 'success', 'Triage settings saved');
@@ -324,6 +356,24 @@ export function registerTriageRoutes(app: FastifyInstance, web: Web): void {
     await setTriageEnabled(deps.db, ctx.workspace.id, enabled);
     const config = (await getTriageSettings(deps.db, ctx.workspace.id)).config;
     return respond(true, enabled ? (anyActionOn(config) ? 'Triage is on for new tickets' : 'Triage is on, but every action is off. Turn one on below.') : 'Triage is off. Tickets are filed as usual.');
+  });
+
+  /** The switch for issues opened on GitHub (JSON from the switch, or a plain form without JavaScript). */
+  app.post('/w/:wid/tickets/triage/github-enabled', async (req, reply) => {
+    const ctx = await web.requireWorkspace(req, reply);
+    if (!ctx) return reply;
+    const enabled = (req.body as { enabled?: string }).enabled !== undefined;
+    const respond = (ok: boolean, message: string) => {
+      if (web.wantsJson(req)) return reply.code(ok ? 200 : 400).send(ok ? { ok, message } : { ok, error: message });
+      setFlash(reply, ok ? 'success' : 'error', message);
+      return reply.redirect(back(ctx));
+    };
+    if (enabled && !(await resolveApiKey(deps, ctx.workspace.id))) return respond(false, 'Add a Claude API key first.');
+    await setGitHubTriageEnabled(deps.db, ctx.workspace.id, enabled);
+    const config = (await getTriageSettings(deps.db, ctx.workspace.id)).config;
+    return respond(true, enabled
+      ? (anyActionOn(forGitHub(config)) ? 'Triage is on for new issues opened on GitHub' : 'Triage is on for issues opened on GitHub, but every action is Off for them. Set them in the “Opened on GitHub” rows below.')
+      : 'Triage of issues opened on GitHub is off.');
   });
 
   app.post('/w/:wid/tickets/triage/resume', async (req, reply) => {

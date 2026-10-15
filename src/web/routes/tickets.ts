@@ -168,7 +168,7 @@ export type TriageSummary = { status: string; priority: Priority | null; is_dupl
 export { priorityTag };
 
 /** Priority and flags from triage, for the inbox. */
-function triageCell(t: TriageSummary | undefined, compact = false): SafeHtml | string {
+export function triageCell(t: TriageSummary | undefined, compact = false): SafeHtml | string {
   if (!t || t.status !== 'done') return compact ? '' : html`<span class="em">—</span>`;
   const parts = [
     t.priority ? priorityTag(t.priority) : '',
@@ -278,16 +278,18 @@ function eventView(e: EventRow, s: SubmissionRow, names: Map<string, string>): {
 
 // ---- Triage card ------------------------------------------------------------------------------------
 
-function triageActionText(a: TriageAction, s: SubmissionRow): SafeHtml {
+type RepoOf = Pick<SubmissionRow, 'repo_owner' | 'repo_name'>;
+
+function triageActionText(a: TriageAction, s: RepoOf): SafeHtml {
   return html`<span class="grow">${actionTitle(a, { owner: s.repo_owner, name: s.repo_name })}</span><span class="xs muted num" title="Claude’s confidence">${String(a.confidence)}%</span>`;
 }
 
-function issueLink(s: SubmissionRow, n: number): SafeHtml {
+function issueLink(s: RepoOf, n: number): SafeHtml {
   return html`<a href="https://github.com/${s.repo_owner}/${s.repo_name}/issues/${String(n)}" target="_blank" rel="noopener noreferrer">#${String(n)}</a>`;
 }
 
 /** How the original was chosen among Claude's matches. */
-function duplicateNote(t: TriageResultRow, s: SubmissionRow): SafeHtml | string {
+function duplicateNote(t: Pick<TriageResultRow, 'verdict'>, s: RepoOf): SafeHtml | string {
   const v = t.verdict;
   if (!v || !v.duplicate_of) return '';
   const others = v.duplicate_others ?? [];
@@ -299,7 +301,8 @@ function duplicateNote(t: TriageResultRow, s: SubmissionRow): SafeHtml | string 
 }
 
 /** What triage decided for this ticket, with Apply and Dismiss for suggestions. */
-function triageCard(t: TriageResultRow, s: SubmissionRow, o: { act: boolean; csrf: string; actionBase: string }): SafeHtml {
+/** What triage decided, with Apply and Dismiss for suggestions (tickets, and issues opened on GitHub). */
+export function triageCard(t: Omit<TriageResultRow, 'submission_id'>, s: RepoOf, o: { act: boolean; csrf: string; actionBase: string }): SafeHtml {
   const status = t.status === 'done'
     ? (t.suggestion_count ? pill('To review', 'warn') : pill('Triaged', 'ok'))
     : t.status === 'pending' ? pill('Queued', 'neutral') : t.status === 'skipped' ? pill('Skipped', 'closed') : pill('Failed', 'danger');

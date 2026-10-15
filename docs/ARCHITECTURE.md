@@ -30,7 +30,11 @@ Discord endpoint, OAuth), one or more queue workers, and an optional triage work
   for that workspace; rate limits and outages retry with backoff. Ticket text is passed as JSON
   data and Claude can only answer with fixed fields; every issue it names is checked against
   what it was shown, and labels, comments and closing come from the workspace settings.
-  Re-runs (`triage_runs`, `triage_run_items`) evaluate already-filed tickets with a saved copy
+  With its own switch, triage also covers issues opened directly on GitHub: the issue sync
+  (polling, no webhooks) queues new ones in `issue_triage`, skipping pull requests, bots and
+  issues this app filed. Each action has a separate mode for these issues (`githubModes`);
+  labels, comments and closing are shared. Their results are reviewed in Issues › Triage.
+  Re-runs (`triage_runs`, `triage_run_items`) evaluate already-filed tickets and/or open GitHub issues with a saved copy
   of the settings: a preview never touches GitHub; applying it later (or an "apply" run) writes
   `triage_results` the way normal triage does, in bulk if asked (optionally approving the
   suggestions too). The worker only takes re-run items when no new ticket is waiting, one at a

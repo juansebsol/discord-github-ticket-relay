@@ -101,7 +101,7 @@ export class FakeGitHub {
   searchCalls = 0;
 
   issueJson(r: FakeRepo, i: FakeRepo['issues'][number]) {
-    return { number: i.number, title: i.title, body: i.body, state: i.state ?? 'open', state_reason: i.state_reason ?? null, closed_at: i.closed_at ?? null, created_at: i.created_at, updated_at: i.updated_at ?? i.created_at, labels: i.labels.map((name) => ({ name })), html_url: `https://github.com/${r.owner}/${r.name}/issues/${i.number}` };
+    return { number: i.number, title: i.title, body: i.body, user: { login: i.user, type: /\[bot\]$/.test(i.user) ? 'Bot' : 'User' }, state: i.state ?? 'open', state_reason: i.state_reason ?? null, closed_at: i.closed_at ?? null, created_at: i.created_at, updated_at: i.updated_at ?? i.created_at, labels: i.labels.map((name) => ({ name })), html_url: `https://github.com/${r.owner}/${r.name}/issues/${i.number}` };
   }
 
   private repoJson(r: FakeRepo) {
