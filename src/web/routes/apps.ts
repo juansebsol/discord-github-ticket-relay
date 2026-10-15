@@ -111,7 +111,7 @@ export function registerAppRoutes(app: FastifyInstance, web: Web): void {
         ${apps.length === 0
           ? empty('boxes', 'No apps yet', edit ? 'Add the first app members can file tickets for, for example “Mobile app” or “Billing portal”.' : 'An admin can add the apps members file tickets for.', addApp)
           : html`<div class="card-b flush"><div class="table-wrap wide"><table>
-              <thead><tr><th>App</th><th>Repository</th><th class="center">Tickets</th><th class="center">Contributor Roles</th><th>Extra labels</th>${edit ? html`<th class="actions"><span class="sr-only">Actions</span></th>` : ''}</tr></thead>
+              <thead><tr><th class="col-main">App</th><th>Repository</th><th class="center">Tickets</th><th class="center">Contributor Roles</th><th>Extra labels</th>${edit ? html`<th class="actions"><span class="sr-only">Actions</span></th>` : ''}</tr></thead>
               <tbody>${apps.map((a, i) => {
                 const shared = repoUse.get(a.repo_id)! - 1;
                 return html`<tr class="${a.enabled ? '' : 'off'}">
@@ -134,7 +134,7 @@ export function registerAppRoutes(app: FastifyInstance, web: Web): void {
               </tbody></table></div></div>
               <div class="card-note">Hidden apps don’t appear on the panel. With more than 25 apps, the panel shows 24 and a “More apps…” option that opens a page-by-page list.</div>`}
       </div>`;
-    return web.render(reply, ctx, 'Apps & repositories', 'apps', body);
+    return web.render(reply, ctx, 'Apps & repositories', 'apps', body, { width: 'full' });
   });
 
   async function renderForm(ctx: WorkspaceRequestContext, reply: FastifyReply, existing: AppRow | null, values: FormValues, errors: string[] = []) {

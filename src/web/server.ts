@@ -14,7 +14,7 @@ import { getDiscordConnection, getGitHubConnection, getPanel, listApps } from '.
 import { UserFacingError, type Deps, type Role } from '../domain/types.js';
 import { getMembership, listMemberships, type Membership } from '../domain/workspaces.js';
 import { can, PAGE_AREA_NAMES, PAGE_AREAS, TRIAGE_AREA_NAMES, type PageArea, type Permission, type TriageArea } from '../domain/permissions.js';
-import { layout, simplePage, type PageContext, type SetupProgress } from './layout.js';
+import { layout, simplePage, type PageContext, type PageWidth, type SetupProgress } from './layout.js';
 import { loadSession, SESSION_COOKIE, takeFlash, type AuthContext } from './session.js';
 import { registerAuthRoutes } from './routes/auth.js';
 import { registerWebhookRoutes } from './routes/webhooks.js';
@@ -67,7 +67,8 @@ export interface Web {
    */
   requireWorkspace(req: FastifyRequest, reply: FastifyReply, opts?: { permission?: Permission }): Promise<WorkspaceRequestContext | null>;
   pageContext(req: FastifyRequest, reply: FastifyReply): PageContext;
-  render(reply: FastifyReply, ctx: PageContext, title: string, active: string, body: ReturnType<typeof html>): FastifyReply;
+  /** `width: 'full'` is for pages that are mostly a table or list: they use the whole window. Other pages keep a readable width. */
+  render(reply: FastifyReply, ctx: PageContext, title: string, active: string, body: ReturnType<typeof html>, o?: { width?: PageWidth }): FastifyReply;
   /** True when the request came from app.js and expects a JSON reply (switches that save right away). */
   wantsJson(req: FastifyRequest): boolean;
   publicUrl(p: string): string;
@@ -222,8 +223,8 @@ export async function buildServer(deps: Deps, processor: Processor, opts: { logg
     wantsJson(req) {
       return String(req.headers.accept ?? '').includes('application/json');
     },
-    render(reply, ctx, title, active, body) {
-      return reply.type('text/html').send(layout(ctx, { title, active, body }));
+    render(reply, ctx, title, active, body, o = {}) {
+      return reply.type('text/html').send(layout(ctx, { title, active, body, width: o.width }));
     },
   };
 

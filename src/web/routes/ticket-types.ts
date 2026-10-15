@@ -189,7 +189,7 @@ export function registerTicketTypeRoutes(app: FastifyInstance, web: Web): void {
         ${types.length
           ? html`<div class="card-h"><div class="desc">Members pick a type after choosing an app. The label and title prefix are added to the GitHub issue, for example <code>[Bug] [Mobile App] Export fails</code>.</div></div>
               <div class="card-b flush"><div class="table-wrap"><table>
-                <thead><tr><th>Type</th><th>GitHub label</th><th>Title prefix</th><th>Form</th>${triage.enabled ? html`<th>Triage</th>` : ''}<th class="center">Enabled</th><th class="actions"><span class="sr-only">Actions</span></th></tr></thead>
+                <thead><tr><th class="col-main">Type</th><th>GitHub label</th><th>Title prefix</th><th>Form</th>${triage.enabled ? html`<th>Triage</th>` : ''}<th class="center">Enabled</th><th class="actions"><span class="sr-only">Actions</span></th></tr></thead>
                 <tbody>${types.map((t, i) => html`<tr class="${t.enabled ? '' : 'off'}">
                   <td><div class="who-cell">${icon(typeIcon(t), 16, 'muted')}<div><div class="cell-title">${t.name}</div>${t.description ? html`<div class="sub">${t.description}</div>` : ''}</div></div></td>
                   <td>${t.label ? labelTag(t.label) : html`<span class="em">—</span>`}</td>
@@ -212,7 +212,7 @@ export function registerTicketTypeRoutes(app: FastifyInstance, web: Web): void {
               <div class="card-note">The order here is the order in Discord. After changing types, update the panel on the Panel tab.</div>`
           : empty('tag', 'No ticket types', 'Without types, members go straight to the form. Add types like Bug report or Feature request so maintainers can tell tickets apart.', newType)}
       </div>`;
-    return web.render(reply, ctx, 'Ticket types', 'tickets', body);
+    return web.render(reply, ctx, 'Ticket types', 'tickets', body, { width: 'full' });
   });
 
   async function renderForm(ctx: WorkspaceRequestContext, reply: FastifyReply, existing: TicketType | null, values: Partial<TicketTypeInput>, errors: string[] = []) {

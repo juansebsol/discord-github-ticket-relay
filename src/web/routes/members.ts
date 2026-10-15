@@ -123,7 +123,7 @@ export function registerMemberRoutes(app: FastifyInstance, web: Web): void {
     };
 
     const inviteCard = showInvite
-      ? html`<div class="card" id="invite">
+      ? html`<div class="card readable" id="invite">
           <div class="card-h"><div><h2>Invite someone</h2><div class="desc">Creates a one-time link. Send it to them privately, for example in a Discord DM.</div></div>${iconBtn('x', 'Close invite', { size: 'sm', href: `${b}/members` })}</div>
           ${o.inviteUrl
             ? html`<div class="card-b"><div class="field"><label for="invite-url">${ROLE_LABELS[(o.inviteRole as Role) ?? 'moderator']} invite link</label>${copyField('invite-url', o.inviteUrl, 'Invite link')}
@@ -140,7 +140,7 @@ export function registerMemberRoutes(app: FastifyInstance, web: Web): void {
       : '';
 
     const memberTable = html`<div class="table-wrap only-desktop"><table>
-        <thead><tr><th>Member</th><th>Role</th><th>Access</th><th class="num">Joined</th><th class="actions"><span class="sr-only">Actions</span></th></tr></thead>
+        <thead><tr><th>Member</th><th>Role</th><th class="col-main">Access</th><th class="num">Joined</th><th class="actions"><span class="sr-only">Actions</span></th></tr></thead>
         <tbody>${members.map((m) => html`<tr>
           <td><span class="who-cell">${avatar(nameOf(m), 28, { src: discordAvatar(m) })}<span><span class="name">${nameOf(m)}${m.id === ctx.user.id ? tag('You', { cls: 'subtle' }) : ''}</span><span class="sub">@${m.username}</span></span></span></td>
           <td>${tag(ROLE_LABELS[m.role])}</td>
@@ -242,7 +242,7 @@ export function registerMemberRoutes(app: FastifyInstance, web: Web): void {
       <details class="card">
         <summary>${icon('info')}<span>What each role can do</span>${icon('chevron-down', 16, 'chev')}</summary>
         <div class="table-wrap"><table>
-          <thead><tr><th>Capability</th><th class="center">Owner</th><th class="center">Admin</th><th class="center">Moderator</th></tr></thead>
+          <thead><tr><th class="col-main">Capability</th><th class="center">Owner</th><th class="center">Admin</th><th class="center">Moderator</th></tr></thead>
           <tbody>${CAPABILITIES.map(([c, o1, a, m]) => html`<tr><td>${c}</td><td class="center">${mark(o1)}</td><td class="center">${mark(a)}</td><td class="center">${mark(m)}</td></tr>`)}</tbody></table></div>
       </details>
       ${owner ? members.filter((m) => m.role !== 'owner').map((m) => dialog(`role-${m.id}`, {
@@ -255,7 +255,7 @@ export function registerMemberRoutes(app: FastifyInstance, web: Web): void {
         ], m.role),
         submit: submitBtn('Save', { variant: 'primary' }),
       })) : ''}`;
-    return web.render(reply, ctx, 'Members & permissions', 'members', body);
+    return web.render(reply, ctx, 'Members & permissions', 'members', body, { width: 'full' });
   }
 
   app.get('/w/:wid/members', async (req, reply) => {

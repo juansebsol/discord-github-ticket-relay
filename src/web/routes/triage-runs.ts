@@ -557,7 +557,7 @@ export function registerTriageRunRoutes(app: FastifyInstance, web: Web): void {
           <div ${live ? raw(`data-live="4000" data-live-src="${link({}).includes('?') ? `${link({})}&partial=1` : `${link({})}?partial=1`}"`) : ''}>${results}</div>
         </div>
       </div>`;
-    return web.render(reply, ctx, `${runName(run)} · Re-run`, 'tickets', body);
+    return web.render(reply, ctx, `${runName(run)} · Re-run`, 'tickets', body, { width: 'full' });
   });
 
   app.post('/w/:wid/tickets/triage/runs/:rid/cancel', async (req, reply) => {

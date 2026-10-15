@@ -157,7 +157,7 @@ export function registerContributorRoutes(app: FastifyInstance, web: Web): void 
         : '';
 
     const table = html`<div class="table-wrap only-desktop" data-search-wrap><table>
-        <thead><tr><th>Member</th><th>GitHub</th><th>Result</th><th>Role</th><th class="num">Contributions</th><th class="num">When</th>${admin ? html`<th class="actions"><span class="sr-only">Actions</span></th>` : ''}</tr></thead>
+        <thead><tr><th class="col-main">Member</th><th>GitHub</th><th>Result</th><th>Role</th><th class="num">Contributions</th><th class="num">When</th>${admin ? html`<th class="actions"><span class="sr-only">Actions</span></th>` : ''}</tr></thead>
         <tbody>${rows.map((v) => html`<tr data-search="${search(v)}">
           <td><span class="who-cell">${avatar(v.discord_name, 24)}<span><span class="cell-title">${v.discord_name}</span><div class="sub mono">${v.discord_user_id}</div></span></span></td>
           <td>${v.github_login ? html`<a class="inline gap-4 small nowrap" href="https://github.com/${v.github_login}" target="_blank" rel="noopener noreferrer">${icon('github', 14, 'muted')}${v.github_login}</a>` : html`<span class="em">—</span>`}</td>
@@ -186,7 +186,7 @@ export function registerContributorRoutes(app: FastifyInstance, web: Web): void 
           <div id="no-verification-match" hidden>${empty('search-x', 'No matches', html`No verifications match “<span data-term></span>”.`, html`<button type="button" class="btn" data-clear-search>Clear search</button>`)}</div>
         </div>
       </div>`;
-    return web.render(reply, ctx, 'Contributor Roles', 'contributors', body);
+    return web.render(reply, ctx, 'Contributor Roles', 'contributors', body, { width: 'full' });
   });
 
   app.post('/w/:wid/contributors/verifications/:vid/revoke', async (req, reply) => {

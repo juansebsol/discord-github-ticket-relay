@@ -129,7 +129,7 @@ export function registerIssueRoutes(app: FastifyInstance, web: Web): void {
         ${postBtn(`${b}/tickets/issues/sync`, 'Sync now', ctx.csrf, { size: 'sm', icon: 'refresh-cw', loading: 'Syncing…' })}</div>
       ${repos.size
         ? html`<div class="card-b flush"><div class="table-wrap"><table>
-            <thead><tr><th>Repository</th><th>Status</th><th class="num">Issues</th><th class="num">Open</th><th class="num">Last sync</th></tr></thead>
+            <thead><tr><th class="col-main">Repository</th><th>Status</th><th class="num">Issues</th><th class="num">Open</th><th class="num">Last sync</th></tr></thead>
             <tbody>${[...repos.entries()].map(([id, r]) => {
               const st = status.find((x) => x.repo_id === id);
               return html`<tr>
@@ -199,7 +199,7 @@ export function registerIssueRoutes(app: FastifyInstance, web: Web): void {
           ${page > 1 ? linkBtn(link({ page: page - 1 }), 'Previous', { size: 'sm', icon: 'chevron-left' }) : ''}${hasMore ? linkBtn(link({ page: page + 1 }), 'Next', { size: 'sm', trail: 'chevron-right' }) : ''}</div></div>` : ''}
         ${search ? html`<div class="card-note">${rows.length ? `Best matches first${rows.length === PAGE_SIZE ? `, top ${PAGE_SIZE}` : ''}. Titles count more than descriptions; “crash” also finds “crashes”.` : ''}</div>` : ''}
       </div>`;
-    return web.render(reply, ctx, 'Issues', 'tickets', body);
+    return web.render(reply, ctx, 'Issues', 'tickets', body, { width: 'full' });
   });
 
   /** Picks up the latest changes now; a first load that's still running continues in the background. */

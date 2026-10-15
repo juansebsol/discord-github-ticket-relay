@@ -98,7 +98,10 @@ function toastsFor(flash: PageContext['flash']): SafeHtml {
     : ''}</div>`;
 }
 
-export function layout(ctx: PageContext, opts: { title: string; active: string; body: SafeHtml }): string {
+/** "full": the page uses the whole window (tables and lists). "readable" (the default): content keeps a comfortable width. */
+export type PageWidth = 'full' | 'readable';
+
+export function layout(ctx: PageContext, opts: { title: string; active: string; body: SafeHtml; width?: PageWidth }): string {
   const ws = ctx.workspace;
   const base = ws ? `/w/${ws.id}` : '';
   const p = ctx.progress;
@@ -161,7 +164,7 @@ export function layout(ctx: PageContext, opts: { title: string; active: string; 
     </div>
   </aside>
   <main class="main" id="main">
-    <div class="page">
+    <div class="page${opts.width === 'full' ? ' full' : ''}">
       ${ctx.flash?.type === 'error' ? notice('danger', null, ctx.flash.message) : ''}
       ${opts.body}
     </div>

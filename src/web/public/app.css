@@ -51,7 +51,7 @@
 
   /* spacing, radii, layout */
   --r-xs: 4px; --r-sm: 6px; --r: 8px; --r-full: 999px;
-  --sidebar-w: 240px; --topbar-h: 52px; --page-max: 1080px;
+  --sidebar-w: 240px; --topbar-h: 52px; --page-max: 1080px; --page-max-full: 2400px;
   --ease: cubic-bezier(0.2, 0, 0, 1); --t-fast: 120ms; --t: 160ms;
   --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -195,7 +195,22 @@ hr { border: 0; border-top: 1px solid var(--border); margin: 0; }
 .scrim { position: fixed; inset: 0; background: var(--scrim); z-index: 25; }
 
 .main { min-width: 0; padding: 32px 40px 64px; }
-.page { max-width: var(--page-max); margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+.page { max-width: var(--page-max-full); margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+/*
+ * Page widths. Every page starts at the same left edge, so titles never move between pages.
+ * Readable pages (settings, forms, details) keep their content at --page-max; a section's
+ * title and tabs still span the window, so switching tabs doesn't make them jump.
+ * Full pages (tables, lists, logs) use the whole window, up to --page-max-full.
+ */
+.page:not(.full) > * { width: 100%; max-width: var(--page-max); }
+.page:not(.full) > .tabs, .page:not(.full) > .ph:has(+ .tabs) { max-width: none; }
+.page.full .readable { max-width: var(--page-max); }
+/* On full pages, text still wraps at a comfortable line length. */
+.page.full .card-note { padding-right: max(20px, calc(100% - 900px)); }
+.page.full .notice .n-text, .page.full .log-d { max-width: 90ch; }
+/* Wide tables: the main column takes the extra room, the others stay close to their content. */
+@media (min-width: 1600px) { .page.full th.col-main { width: 50%; } }
+@media (min-width: 2200px) { .page.full th.col-main { width: 60%; } }
 .page > .ph + .tabs { margin-top: 4px; }
 .page > .tabs + * { margin-top: 8px; }
 .page > .ph + :not(.tabs) { margin-top: 8px; }

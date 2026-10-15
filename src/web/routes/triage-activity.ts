@@ -205,6 +205,6 @@ export function registerTriageActivityRoutes(app: FastifyInstance, web: Web): vo
       ${await ticketsHeader(web, ctx, 'triage')}
       ${triageNav(ctx, 'activity', before ? null : html`<span class="live" data-live-status>${raw('<span class="pulse" aria-hidden="true"></span>')}<span class="t">Live</span></span>`)}
       <div class="stack" ${before ? '' : raw(`data-live="5000" data-live-src="${partialSrc}"`)}>${live}</div>`;
-    return web.render(reply, ctx, 'Activity · Triage', 'tickets', body);
+    return web.render(reply, ctx, 'Activity · Triage', 'tickets', body, { width: 'full' });
   });
 }

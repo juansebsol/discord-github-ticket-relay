@@ -250,7 +250,7 @@ export function registerFileRoutes(app: FastifyInstance, web: Web): void {
       ? html`<div class="table-wrap wide"><table>
           <thead><tr>
             <th class="check-col"><input type="checkbox" class="rule-check" data-select-all="bulk-files" aria-label="Select every ticket on this page"></th>
-            <th>Ticket</th><th>GitHub issue</th><th>Files</th><th class="num">Size</th><th>Cleanup reason</th><th class="num">Latest file</th></tr></thead>
+            <th class="col-main">Ticket</th><th>GitHub issue</th><th>Files</th><th class="num">Size</th><th>Cleanup reason</th><th class="num">Latest file</th></tr></thead>
           <tbody>${rows.map((r) => html`<tr>
             <td class="check-col"><input type="checkbox" class="rule-check" name="ticket" value="${r.sub.id}" form="bulk-files" aria-label="Select ${titleOf(r)}"></td>
             <td><a class="cell-title" href="${b}/tickets/${r.sub.id}#files">${titleOf(r)}</a><div class="sub">${[r.sub.app_name, r.sub.ticket_type_name, r.sub.reporter_display_name].filter(Boolean).join(' · ')}</div></td>
@@ -309,7 +309,7 @@ export function registerFileRoutes(app: FastifyInstance, web: Web): void {
       </div>
       <form method="post" action="${b}/tickets/files/delete" id="bulk-files" hidden data-confirm-title="Delete the selected tickets’ files?" data-confirm-body="Their files are deleted from this server and removed from their GitHub issues. This can’t be undone." data-confirm-label="Delete files" data-confirm-danger>${csrfField(ctx.csrf)}</form>
 
-      <form method="post" action="${b}/tickets/files/settings" class="card" id="rules" data-dirty>
+      <form method="post" action="${b}/tickets/files/settings" class="card readable" id="rules" data-dirty>
         ${csrfField(ctx.csrf)}
         <div class="card-h"><div><h2>Cleanup rules</h2><div class="desc">Used by Scan for cleanup, and every day by automatic cleanup when it’s on.</div></div>${admin ? '' : viewOnlyTag('Only owners and admins can change the cleanup rules and the storage limit.')}</div>
         <fieldset class="plain" ${admin ? '' : raw('disabled')}>
@@ -330,7 +330,7 @@ export function registerFileRoutes(app: FastifyInstance, web: Web): void {
             </div></div>`
           : html`<div class="card-note">Only owners and admins can change these.</div>`}
       </form>`;
-    return web.render(reply, ctx, 'Files', 'tickets', body);
+    return web.render(reply, ctx, 'Files', 'tickets', body, { width: 'full' });
   });
 
   app.post('/w/:wid/tickets/files/settings', async (req, reply) => {

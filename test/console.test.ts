@@ -79,4 +79,13 @@ describe('console pages', () => {
     expect(again.body).not.toMatch(/\/invite\/[A-Za-z0-9_-]{20,}/);
     expect(again.body).toContain('Moderator invite');
   });
+
+  it('uses the whole window for tables and lists, and a readable width for settings and forms', async () => {
+    const full = ['/tickets', '/tickets/issues', '/tickets/types', '/tickets/files', '/tickets/triage/activity', '/apps', '/members', '/contributors'];
+    const readable = ['', '/tickets/triage', '/tickets/triage/prompt', '/tickets/triage/runs', '/tickets/panel', '/tickets/settings', '/apps/new', '/settings', '/setup/github'];
+    for (const p of full) expect((await env.server.inject({ method: 'GET', url: w() + p, ...get(ws.owner) })).body, p).toContain('<div class="page full">');
+    for (const p of readable) expect((await env.server.inject({ method: 'GET', url: w() + p, ...get(ws.owner) })).body, p).toContain('<div class="page">');
+    // The main column of a table takes the extra room.
+    expect((await env.server.inject({ method: 'GET', url: `${w()}/apps`, ...get(ws.owner) })).body).toContain('<th class="col-main">App</th>');
+  });
 });

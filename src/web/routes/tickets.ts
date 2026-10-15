@@ -167,7 +167,7 @@ export function ticketList(base: string, rows: SubmissionRow[], titleOf: (s: Sub
   // with a matching suggestion, so the bar and the confirmation can say how many count.
   const selectable = o.select ?? null;
   return html`<div class="table-wrap only-desktop" data-search-wrap><table>
-      <thead><tr>${selectable ? html`<th class="check-col"><input type="checkbox" class="rule-check" data-select-all="bulk-triage" aria-label="Select every ticket on this page"></th>` : ''}<th>Ticket</th>${o.compact ? '' : html`<th>Reporter</th>`}<th>Status</th>${o.triage ? html`<th>Triage</th>` : ''}${o.compact ? '' : html`<th>GitHub issue</th>`}<th class="num">Updated</th></tr></thead>
+      <thead><tr>${selectable ? html`<th class="check-col"><input type="checkbox" class="rule-check" data-select-all="bulk-triage" aria-label="Select every ticket on this page"></th>` : ''}<th class="col-main">Ticket</th>${o.compact ? '' : html`<th>Reporter</th>`}<th>Status</th>${o.triage ? html`<th>Triage</th>` : ''}${o.compact ? '' : html`<th>GitHub issue</th>`}<th class="num">Updated</th></tr></thead>
       <tbody>${view.map((v) => html`<tr class="click" data-search="${v.search}">
         ${selectable ? html`<td class="check-col"><input type="checkbox" class="rule-check" name="ticket" value="sub:${v.s.id}" form="bulk-triage" ${selectable.matches(v.s) ? raw('data-match') : ''} aria-label="Select ${v.title}"></td>` : ''}
         <td><a class="cell-title" href="${v.href}">${v.title}</a>${test(v.s)}<div class="sub">${appLine(v.s)}</div></td>
@@ -505,7 +505,7 @@ export function registerTicketRoutes(app: FastifyInstance, web: Web): void {
         ${pages > 1 ? html`<div class="pager"><span>Page ${String(page)} of ${String(pages)} · ${plural(total, 'ticket')}</span><div class="row">
           ${page > 1 ? linkBtn(link({ page: page - 1 }), 'Previous', { size: 'sm', icon: 'chevron-left' }) : ''}${page < pages ? linkBtn(link({ page: page + 1 }), 'Next', { size: 'sm', trail: 'chevron-right' }) : ''}</div></div>` : ''}
       </div>`;
-    return web.render(reply, ctx, 'Tickets', 'tickets', body);
+    return web.render(reply, ctx, 'Tickets', 'tickets', body, { width: 'full' });
   });
 
   // ---- Ticket detail ----------------------------------------------------------------------------

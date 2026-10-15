@@ -68,7 +68,7 @@ export function issueTable(rows: IssueTableRow[], o: { select?: boolean } = {}):
   const closedText = (r: IssueTableRow) => (r.closedReason === 'not_planned' ? 'Closed · not planned' : r.closedReason === 'duplicate' ? 'Closed · duplicate' : 'Closed');
   const closedTag = (r: IssueTableRow) => (r.closed ? html` ${tag(closedText(r))}` : '');
   return html`<div class="table-wrap only-desktop"><table>
-      <thead><tr>${o.select ? html`<th class="check-col"><input type="checkbox" class="rule-check" data-select-all="bulk-triage" aria-label="Select every issue on this page"></th>` : ''}<th>Issue</th><th>Reporter</th><th>Triage</th><th>GitHub issue</th><th class="num">Updated</th></tr></thead>
+      <thead><tr>${o.select ? html`<th class="check-col"><input type="checkbox" class="rule-check" data-select-all="bulk-triage" aria-label="Select every issue on this page"></th>` : ''}<th class="col-main">Issue</th><th>Reporter</th><th>Triage</th><th>GitHub issue</th><th class="num">Updated</th></tr></thead>
       <tbody>${rows.map((r) => html`<tr class="click">
         ${o.select ? html`<td class="check-col">${r.select ? html`<input type="checkbox" class="rule-check" name="ticket" value="${r.select.value}" form="bulk-triage" ${r.select.match ? raw('data-match') : ''} aria-label="Select issue #${String(r.number)}">` : ''}</td>` : ''}
         <td><a class="cell-title" href="${r.href}" ${target(r)}>${r.title}</a>${closedTag(r)}<div class="sub">${[shortApps(r.app), r.repoName].filter(Boolean).join(' · ')}</div>${r.extra ?? ''}</td>
@@ -236,7 +236,7 @@ export function registerIssueTriageRoutes(app: FastifyInstance, web: Web): void 
             ${page > 1 ? linkBtn(link({ page: page - 1 }), 'Previous', { size: 'sm', icon: 'chevron-left' }) : ''}${hasMore ? linkBtn(link({ page: page + 1 }), 'Next', { size: 'sm', trail: 'chevron-right' }) : ''}</div></div>` : ''}
         </div>
       </div>`;
-    return web.render(reply, ctx, 'Triage · Issues', 'tickets', body);
+    return web.render(reply, ctx, 'Triage · Issues', 'tickets', body, { width: 'full' });
   });
 
   app.get('/w/:wid/tickets/issues/:repoId/:number', async (req, reply) => {
