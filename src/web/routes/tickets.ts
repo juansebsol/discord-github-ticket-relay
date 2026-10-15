@@ -72,10 +72,10 @@ export async function ticketsHeader(web: Web, ctx: WorkspaceRequestContext, tab:
   // Moderators see the tabs they've been given (Inbox always).
   const tabList = [
     { href: `${b}/tickets`, label: 'Inbox', current: tab === 'inbox', count: ctx.progress?.attention },
+    can(ctx.membership, 'issues.view') && { href: `${b}/tickets/issues`, label: 'Issues', current: tab === 'issues' },
     manage && { href: `${b}/tickets/panel`, label: 'Panel', current: tab === 'panel' },
     manage && { href: `${b}/tickets/types`, label: 'Ticket types', current: tab === 'types' },
     manage && { href: `${b}/tickets/triage`, label: 'Triage', current: tab === 'triage' },
-    can(ctx.membership, 'issues.view') && { href: `${b}/tickets/issues`, label: 'Issues', current: tab === 'issues' },
     can(ctx.membership, 'files.manage') && { href: `${b}/tickets/files`, label: 'Files', current: tab === 'files' },
     manage && { href: `${b}/tickets/settings`, label: 'Settings', current: tab === 'settings' },
   ].filter((t): t is { href: string; label: string; current: boolean; count?: number } => Boolean(t));
