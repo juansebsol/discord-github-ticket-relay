@@ -276,9 +276,11 @@ export function selectWrap(selectMarkup: SafeHtml, o: { sm?: boolean; cls?: stri
   return html`<span class="select${o.sm ? ' sm' : ''}${o.cls ? ` ${o.cls}` : ''}">${selectMarkup}${icon('chevron-down', 14)}</span>`;
 }
 
-/** Segmented control made of links (filters). */
-export function segLinks(label: string, items: { href: string; label: string; count?: number; current: boolean }[]): SafeHtml {
-  return html`<nav class="seg" aria-label="${label}">${items.map((s) => html`<a class="seg-item" href="${s.href}" ${s.current ? raw('aria-current="true"') : ''}>${s.label}${s.count !== undefined ? html`<span class="n">${String(s.count)}</span>` : ''}</a>`)}</nav>`;
+/** Segmented control made of links (filters). A `locked` item is shown greyed out with a lock, not as a link; its text says why. */
+export function segLinks(label: string, items: { href: string; label: string; count?: number; current: boolean; locked?: string }[]): SafeHtml {
+  return html`<nav class="seg" aria-label="${label}">${items.map((s) => (s.locked
+    ? html`<span class="seg-item locked" aria-disabled="true" title="${s.locked}">${icon('lock', 12)}${s.label}</span>`
+    : html`<a class="seg-item" href="${s.href}" ${s.current ? raw('aria-current="true"') : ''}>${s.label}${s.count !== undefined ? html`<span class="n">${String(s.count)}</span>` : ''}</a>`))}</nav>`;
 }
 
 /** Segmented control made of radio buttons (form values). */

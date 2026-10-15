@@ -5,6 +5,7 @@
  * does the work one ticket at a time, between new tickets, and waits out rate limits.
  */
 import type { FastifyInstance } from 'fastify';
+import { TRIAGE_AREA_NAMES } from '../../domain/permissions.js';
 import { listApps } from '../../domain/store.js';
 import { listTicketTypes } from '../../domain/ticket-types.js';
 import { UserFacingError } from '../../domain/types.js';
@@ -57,10 +58,11 @@ import {
   submitBtn,
   tag,
   timeAgo,
+  viewOnlyTag,
   when,
   type Tone,
 } from '../ui.js';
-import { ticketsHeader } from './tickets.js';
+import { canTriage, ticketsHeader } from './tickets.js';
 import { FLAG_COPY, MODE_NAMES, triageNav } from './triage.js';
 
 /** Tokens and seconds per ticket when there's no history to go by. */
@@ -230,10 +232,14 @@ export function registerTriageRunRoutes(app: FastifyInstance, web: Web): void {
     return { matched, picked, left, text, warn, allLabel: `All matching (${n(matched)})`, untouched: `Triaged, nothing applied yet (${n(untouched)})`, never: `Never triaged (${n(never)})` };
   }
 
+  /** Using a run's settings replaces Actions, Label groups and Prompt, so it needs Edit on each. */
+  const SETTINGS_AREAS = ['actions', 'labels', 'prompt'] as const;
+  const canUseSettings = (ctx: WorkspaceRequestContext) => canTriage(ctx, 'runs', 'edit') && SETTINGS_AREAS.every((a) => canTriage(ctx, a, 'edit'));
+
   // ---- Start a run, and the list of runs -----------------------------------------------------
 
   app.get('/w/:wid/tickets/triage/runs', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply);
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'triage.runs.view' });
     if (!ctx) return reply;
     const wid = ctx.workspace.id;
     const b = runsUrl(ctx);
@@ -245,18 +251,20 @@ export function registerTriageRunRoutes(app: FastifyInstance, web: Web): void {
       web.triage.listRuns(wid),
     ]);
     const c = settings.config;
+    const edit = canTriage(ctx, 'runs', 'edit');
     const all: RerunScope = { source: 'tickets', untouched: true, never: true, appId: null, typeName: null, limit: MAX_RERUN };
-    const [est, ticketCount, githubCount] = await Promise.all([
-      estimate(wid, all),
-      web.triage.countRerun(wid, all),
-      web.triage.countRerun(wid, { ...all, source: 'github' }),
-    ]);
+    // The start form's numbers, only for someone who can start a run.
+    const [est, ticketCount, githubCount] = edit
+      ? await Promise.all([estimate(wid, all), web.triage.countRerun(wid, all), web.triage.countRerun(wid, { ...all, source: 'github' })])
+      : [null, 0, 0];
     const githubActions = anyActionOn(forGitHub(c));
     const running = runs.find((r) => r.status === 'running');
     const names = await userNames(deps.db, runs.map((r) => r.created_by));
-    const blocked = !key ? 'Add a Claude API key in Settings first.' : !anyActionOn(c) && !githubActions ? 'Turn at least one action on in Actions first.' : est.left <= 0 ? 'This month’s triage limit is used up. Raise it in Actions to re-run.' : running ? 'A re-run is going. Wait for it to finish or stop it.' : null;
+    const blocked = !est ? null : !key ? 'Add a Claude API key in Settings first.' : !anyActionOn(c) && !githubActions ? 'Turn at least one action on in Actions first.' : est.left <= 0 ? 'This month’s triage limit is used up. Raise it in Actions to re-run.' : running ? 'A re-run is going. Wait for it to finish or stop it.' : null;
 
-    const form = html`<form method="post" action="${b}" data-estimate="${b}/estimate">
+    const form = !est
+      ? html`<div class="card-b tight">${notice('info', 'View only', 'You can see the runs below and their results. Starting, stopping and applying a re-run needs Edit on Re-run; ask an admin if you need it.')}</div>`
+      : html`<form method="post" action="${b}" data-estimate="${b}/estimate">
       ${csrfField(ctx.csrf)}
       ${setting('Source', html`Each uses its own settings from Actions.${githubActions ? '' : ' Every action is Off for issues opened on GitHub, so set some first to include them.'}`, html`<div class="check-list stacked">
         <label class="check"><input type="radio" name="source" value="tickets" checked> ${icon('message-circle', 14, 'muted')} Discord tickets (${n(ticketCount)})</label>
@@ -308,7 +316,7 @@ export function registerTriageRunRoutes(app: FastifyInstance, web: Web): void {
         ${running ? notice('info', 'A re-run is going', `${runName(running)}: ${n(running.done + running.skipped + running.failed)} of ${n(running.total)} tickets. ${waitingText(running) ?? 'It uses the time between new tickets, so filing and normal triage are never delayed.'}`, { action: linkBtn(`${b}/${running.id}`, 'View', { size: 'sm', trail: 'arrow-right' }) }) : ''}
         ${blocked && !running ? notice('warn', null, blocked) : ''}
         <div class="card">
-          <div class="card-h"><div><h2>Re-run triage</h2><div class="desc">Run your current settings on tickets that are already filed: all of them, or the newest few to try something quickly. Change a setting, preview again and compare, until you like the results; then apply them in bulk. Each ticket counts toward the monthly limit.</div></div></div>
+          <div class="card-h"><div><h2>Re-run triage</h2><div class="desc">Run the current settings on tickets that are already filed: all of them, or the newest few to try something quickly. Change a setting, preview again and compare, until you like the results; then apply them in bulk. Each ticket counts toward the monthly limit.</div></div></div>
           ${form}
         </div>
         <div class="card">
@@ -321,14 +329,14 @@ export function registerTriageRunRoutes(app: FastifyInstance, web: Web): void {
 
   /** Live estimate for the start form (count, cost, time, monthly limit). */
   app.get('/w/:wid/tickets/triage/runs/estimate', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply);
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'triage.runs.view' });
     if (!ctx) return reply;
     const e = await estimate(ctx.workspace.id, parseScope(req.query as Record<string, string | undefined>));
     return reply.header('Cache-Control', 'no-store').send({ text: e.text, warn: e.warn, allLabel: e.allLabel, untouched: e.untouched, never: e.never });
   });
 
   app.post('/w/:wid/tickets/triage/runs', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply);
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'triage.runs.edit' });
     if (!ctx) return reply;
     const f = (req.body ?? {}) as Record<string, string | undefined>;
     try {
@@ -348,7 +356,7 @@ export function registerTriageRunRoutes(app: FastifyInstance, web: Web): void {
   // ---- One run's results -------------------------------------------------------------------------
 
   app.get('/w/:wid/tickets/triage/runs/:rid', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply);
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'triage.runs.view' });
     if (!ctx) return reply;
     const wid = ctx.workspace.id;
     const rid = (req.params as { rid: string }).rid;
@@ -389,8 +397,9 @@ export function registerTriageRunRoutes(app: FastifyInstance, web: Web): void {
     const pages = Math.max(1, Math.ceil(matching / PAGE));
     const applying = counts.applying > 0;
     const live = run.status === 'running' || applying;
+    const edit = canTriage(ctx, 'runs', 'edit');
     // Updating the inbox works while triage is off; applying on GitHub needs it on.
-    const canApply = run.mode === 'preview' && run.status !== 'running' && !applying && !vsRun;
+    const canApply = edit && run.mode === 'preview' && run.status !== 'running' && !applying && !vsRun;
     const applicable = (i: RunItemView) => i.status === 'done' && (i.apply_status === null || i.apply_status === 'failed');
     const anyApply = items.some((i) => i.apply_status !== null) || counts.applied + counts.notApplied + counts.applying > 0;
     const link = (o: { show?: RunFilter; vs?: string | null; page?: number }) => {
@@ -524,14 +533,14 @@ export function registerTriageRunRoutes(app: FastifyInstance, web: Web): void {
       ${pageHeader({
         title: runName(run),
         crumbs: [{ href: `${ctx.base}/tickets/triage`, label: 'Triage' }, { href: runsUrl(ctx), label: 'Re-run' }, { label: runName(run) }],
-        after: [run.mode === 'preview' ? tag('Preview', { icon: 'flask-conical' }) : tag('Applied', { icon: 'play' }), pill(...STATUS_PILL[run.status])],
+        after: [run.mode === 'preview' ? tag('Preview', { icon: 'flask-conical' }) : tag('Applied', { icon: 'play' }), pill(...STATUS_PILL[run.status]), edit ? '' : viewOnlyTag('You can see this run and its results. Ask an admin if you need to stop or apply it.')],
         description: `${matched > counts.total ? `The newest ${n(counts.total)} of ${n(matched)} matching tickets` : sentence(plural(counts.total, 'ticket').replace(/^\d+/, n(counts.total)))} · ${run.config_used.model} · started by ${run.created_by ? names.get(run.created_by) ?? 'an admin' : 'an admin'} ${timeAgo(run.created_at)}${cost !== null ? ` · ${formatCost(cost)}` : ''}${run.applied_at ? ` · applied by ${run.applied_by ? names.get(run.applied_by) ?? 'an admin' : 'an admin'} ${timeAgo(run.applied_at)}` : ''}`,
         actions: [
-          linkBtn(`${ctx.base}/tickets/triage/activity?run=${run.id}`, 'Activity log', { icon: 'history' }),
-          run.status === 'running' ? postBtn(`${b}/cancel`, 'Stop', ctx.csrf, { icon: 'circle-x', confirm: { title: 'Stop this re-run?', body: 'Tickets not reached yet are skipped. Results so far are kept, and you can apply them.', label: 'Stop' } }) : null,
-          applying ? postBtn(`${b}/stop-applying`, 'Stop applying', ctx.csrf, { icon: 'circle-x', confirm: { title: 'Stop applying?', body: 'Tickets already applied stay applied. The rest go back to not applied, so you can apply them later.', label: 'Stop applying' } }) : null,
-          diff.length ? postBtn(`${b}/use-settings`, 'Use these settings', ctx.csrf, { icon: 'rotate-ccw', confirm: { title: 'Use the settings from this run?', body: 'Your current triage settings (actions, label groups and prompt) are replaced with the ones this run used. New tickets use them right away.', label: 'Use these settings' } }) : null,
-          run.status !== 'running' && !applying ? menu([{ post: `${b}/delete`, label: 'Delete run', icon: 'trash-2', danger: true, confirm: { title: 'Delete this run?', body: 'Its results are deleted here. Nothing changes on GitHub.', label: 'Delete', danger: true } }], { csrf: ctx.csrf, label: 'More actions' }) : null,
+          canTriage(ctx, 'activity') ? linkBtn(`${ctx.base}/tickets/triage/activity?run=${run.id}`, 'Activity log', { icon: 'history' }) : null,
+          !edit ? null : run.status === 'running' ? postBtn(`${b}/cancel`, 'Stop', ctx.csrf, { icon: 'circle-x', confirm: { title: 'Stop this re-run?', body: 'Tickets not reached yet are skipped. Results so far are kept, and you can apply them.', label: 'Stop' } }) : null,
+          edit && applying ? postBtn(`${b}/stop-applying`, 'Stop applying', ctx.csrf, { icon: 'circle-x', confirm: { title: 'Stop applying?', body: 'Tickets already applied stay applied. The rest go back to not applied, so you can apply them later.', label: 'Stop applying' } }) : null,
+          diff.length && canUseSettings(ctx) ? postBtn(`${b}/use-settings`, 'Use these settings', ctx.csrf, { icon: 'rotate-ccw', confirm: { title: 'Use the settings from this run?', body: 'Your current triage settings (actions, label groups and prompt) are replaced with the ones this run used. New tickets use them right away.', label: 'Use these settings' } }) : null,
+          edit && run.status !== 'running' && !applying ? menu([{ post: `${b}/delete`, label: 'Delete run', icon: 'trash-2', danger: true, confirm: { title: 'Delete this run?', body: 'Its results are deleted here. Nothing changes on GitHub.', label: 'Delete', danger: true } }], { csrf: ctx.csrf, label: 'More actions' }) : null,
         ],
       })}
       <div class="stack">
@@ -552,7 +561,7 @@ export function registerTriageRunRoutes(app: FastifyInstance, web: Web): void {
   });
 
   app.post('/w/:wid/tickets/triage/runs/:rid/cancel', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply);
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'triage.runs.edit' });
     if (!ctx) return reply;
     const rid = (req.params as { rid: string }).rid;
     try {
@@ -566,7 +575,7 @@ export function registerTriageRunRoutes(app: FastifyInstance, web: Web): void {
   });
 
   app.post('/w/:wid/tickets/triage/runs/:rid/apply', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply);
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'triage.runs.edit' });
     if (!ctx) return reply;
     const rid = (req.params as { rid: string }).rid;
     const f = (req.body ?? {}) as { ticket?: string | string[]; scope?: string; show?: string; include?: string };
@@ -590,7 +599,7 @@ export function registerTriageRunRoutes(app: FastifyInstance, web: Web): void {
   });
 
   app.post('/w/:wid/tickets/triage/runs/:rid/stop-applying', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply);
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'triage.runs.edit' });
     if (!ctx) return reply;
     const rid = (req.params as { rid: string }).rid;
     try {
@@ -604,18 +613,23 @@ export function registerTriageRunRoutes(app: FastifyInstance, web: Web): void {
   });
 
   app.post('/w/:wid/tickets/triage/runs/:rid/use-settings', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply);
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'triage.runs.edit' });
     if (!ctx) return reply;
     const rid = (req.params as { rid: string }).rid;
     const run = await web.triage.getRun(ctx.workspace.id, rid);
     if (!run) return reply.callNotFound();
+    if (!canUseSettings(ctx)) {
+      const missing = SETTINGS_AREAS.filter((a) => !canTriage(ctx, a, 'edit')).map((a) => TRIAGE_AREA_NAMES[a]);
+      setFlash(reply, 'error', `Using a run’s settings replaces Actions, Label groups and Prompt, so it needs Edit on all three. You can’t change ${missing.join(' or ')}.`);
+      return reply.redirect(`${runsUrl(ctx)}/${rid}`);
+    }
     await saveTriageConfig(deps.db, ctx.workspace.id, run.config_used);
     setFlash(reply, 'success', `Now using the settings from ${runName(run)}`);
     return reply.redirect(`${runsUrl(ctx)}/${rid}`);
   });
 
   app.post('/w/:wid/tickets/triage/runs/:rid/delete', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply);
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'triage.runs.edit' });
     if (!ctx) return reply;
     const rid = (req.params as { rid: string }).rid;
     try {

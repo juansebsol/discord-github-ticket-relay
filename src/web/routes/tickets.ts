@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { checkPanel } from '../../domain/panel.js';
-import { can } from '../../domain/permissions.js';
+import { can, firstTriageArea, type TriageArea } from '../../domain/permissions.js';
 import { getDiscordConnection, getGitHubConnection, listApps } from '../../domain/store.js';
 import { GitHubApiError } from '../../github/client.js';
 import { parseIssueBody, type IssueText } from '../../github/issue-content.js';
@@ -55,6 +55,12 @@ const PAGE_SIZE = 25;
 
 export type TicketsTab = 'inbox' | 'panel' | 'types' | 'triage' | 'issues' | 'files' | 'settings';
 
+const TRIAGE_PATHS: Record<TriageArea, string> = { actions: '', labels: '/labels', prompt: '/prompt', runs: '/runs', activity: '/activity' };
+/** A Triage page's address. */
+export const triageHref = (ctx: Pick<WorkspaceRequestContext, 'base'>, area: TriageArea): string => `${ctx.base}/tickets/triage${TRIAGE_PATHS[area]}`;
+/** Whether this person can see (or change) a Triage page. */
+export const canTriage = (ctx: Pick<WorkspaceRequestContext, 'membership'>, area: TriageArea, level: 'view' | 'edit' = 'view'): boolean => can(ctx.membership, `triage.${area}.${level}`);
+
 const VIEW_ONLY_TICKETS = 'You can read tickets. Checking GitHub, retrying, linking and closing need the Act on tickets permission. Ask an admin or the owner.';
 
 /** Header and tabs shared by every Tickets page. */
@@ -74,6 +80,7 @@ export async function ticketsHeader(web: Web, ctx: WorkspaceRequestContext, tab:
         ? pill('Check panel', 'warn')
         : pill('Not published', 'neutral');
   const manage = can(ctx.membership, 'manage');
+  const triageArea = firstTriageArea(ctx.membership);
   const b = ctx.base;
   // Moderators see the tabs they've been given (Inbox always).
   const tabList = [
@@ -81,13 +88,13 @@ export async function ticketsHeader(web: Web, ctx: WorkspaceRequestContext, tab:
     can(ctx.membership, 'issues.view') && { href: githubTriage.rows.length ? `${b}/tickets/issues/triage` : `${b}/tickets/issues`, label: 'Issues', current: tab === 'issues' },
     manage && { href: `${b}/tickets/panel`, label: 'Panel', current: tab === 'panel' },
     manage && { href: `${b}/tickets/types`, label: 'Ticket types', current: tab === 'types' },
-    manage && { href: `${b}/tickets/triage`, label: 'Triage', current: tab === 'triage' },
+    triageArea && { href: triageHref(ctx, triageArea), label: 'Triage', current: tab === 'triage' },
     can(ctx.membership, 'files.manage') && { href: `${b}/tickets/files`, label: 'Files', current: tab === 'files' },
     manage && { href: `${b}/tickets/settings`, label: 'Settings', current: tab === 'settings' },
   ].filter((t): t is { href: string; label: string; current: boolean; count?: number } => Boolean(t));
   return html`${pageHeader({
     title: 'Tickets',
-    after: [status, !can(ctx.membership, 'tickets.act') ? viewOnlyTag(VIEW_ONLY_TICKETS) : ''],
+    after: [status, tab !== 'triage' && !can(ctx.membership, 'tickets.act') ? viewOnlyTag(VIEW_ONLY_TICKETS) : ''],
     description: conn?.tickets_channel_name
       ? `Members open tickets from #${conn.tickets_channel_name}. Each one becomes a GitHub issue.`
       : 'Members open tickets from a panel in Discord. Each one becomes a GitHub issue.',

@@ -133,7 +133,7 @@ interface Links {
 
 function linksFor(ctx: WorkspaceRequestContext): Links {
   const manage = can(ctx.membership, 'manage');
-  return { triage: manage, settings: manage, files: can(ctx.membership, 'files.manage'), issues: can(ctx.membership, 'issues.view') };
+  return { triage: can(ctx.membership, 'triage.actions.view'), settings: manage, files: can(ctx.membership, 'files.manage'), issues: can(ctx.membership, 'issues.view') };
 }
 
 /** A row that links somewhere only if the viewer can open that page. */

@@ -1,8 +1,8 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
-import { can, ROLE_LABELS, type MemberAccess } from '../../domain/permissions.js';
+import { can, ROLE_LABELS, TRIAGE_AREA_NAMES, TRIAGE_AREAS, triageLevel, VIEW_ONLY_AREAS, type AccessLevel, type MemberAccess, type TriageArea } from '../../domain/permissions.js';
 import { UserFacingError, type Role } from '../../domain/types.js';
-import { createInvite, listInvites, listMembers, removeMember, revokeInvite, setMemberRole, setModeratorPermissions } from '../../domain/workspaces.js';
-import { html, type SafeHtml } from '../../lib/html.js';
+import { createInvite, listInvites, listMembers, removeMember, revokeInvite, setMemberRole, setModeratorPermissions, setModeratorTriageAccess } from '../../domain/workspaces.js';
+import { html, raw, type SafeHtml } from '../../lib/html.js';
 import { setFlash } from '../session.js';
 import type { Web, WorkspaceRequestContext } from '../server.js';
 import {
@@ -21,6 +21,7 @@ import {
   menu,
   pageHeader,
   segRadios,
+  selectWrap,
   setting,
   submitBtn,
   switchInput,
@@ -51,7 +52,8 @@ type ModField = (typeof MOD_SWITCHES)[number]['field'];
 
 const CAPABILITIES: [string, string, string, string][] = [
   ['Setup, panels and settings', 'yes', 'yes', 'no'],
-  ['Ticket forms, triage settings and file rules', 'yes', 'yes', 'no'],
+  ['Ticket forms and file rules', 'yes', 'yes', 'no'],
+  ['Triage pages (view or edit, page by page)', 'yes', 'yes', 'maybe'],
   ['Tickets inbox', 'yes', 'yes', 'yes'],
   ['Act on tickets', 'yes', 'yes', 'maybe'],
   ['Contributor verifications', 'yes', 'yes', 'maybe'],
@@ -62,10 +64,32 @@ const CAPABILITIES: [string, string, string, string][] = [
   ['Invite people and change roles', 'yes', 'no', 'no'],
 ];
 
+/** What each Triage page covers, for the access table. */
+const TRIAGE_AREA_DESC: Record<TriageArea, string> = {
+  actions: 'Switches, actions, rules and limits.',
+  labels: 'Label groups and their options.',
+  prompt: 'What Claude is told.',
+  runs: 'Previews and applying their results.',
+  activity: 'What triage did, live.',
+};
+const LEVEL_NAMES: Record<AccessLevel, string> = { none: 'No access', view: 'View', edit: 'Edit' };
+
+/** A moderator's Triage access in a few words: "Triage: view", "Triage · 3 pages". */
+function triageSummary(m: MemberAccess): string | null {
+  const levels = TRIAGE_AREAS.map((a) => triageLevel(m.triage_access, a));
+  const on = levels.filter((l) => l !== 'none').length;
+  if (!on) return null;
+  const top = TRIAGE_AREAS.map((a) => (VIEW_ONLY_AREAS.has(a) ? 'view' : 'edit'));
+  if (on === TRIAGE_AREAS.length && levels.every((l, i) => l === top[i])) return 'Triage: edit';
+  if (levels.every((l) => l === 'view')) return 'Triage: view';
+  return `Triage · ${on} of ${TRIAGE_AREAS.length} pages`;
+}
+
 function accessTags(m: MemberAccess): SafeHtml {
   if (m.role === 'owner') return html`${tag('Full access')}${tag('Invites & roles')}`;
   if (m.role === 'admin') return tag('Full access');
-  return html`${tag(m.can_act_tickets ? 'Act on tickets' : 'View tickets')}${m.can_view_contributors ? tag('Verifications') : ''}${m.can_search_issues ? tag('Issue search') : ''}${m.can_manage_files ? tag('Files') : ''}${m.can_view_health ? tag('Server health') : ''}`;
+  const triage = triageSummary(m);
+  return html`${tag(m.can_act_tickets ? 'Act on tickets' : 'View tickets')}${m.can_view_contributors ? tag('Verifications') : ''}${m.can_search_issues ? tag('Issue search') : ''}${m.can_manage_files ? tag('Files') : ''}${m.can_view_health ? tag('Server health') : ''}${triage ? tag(triage) : ''}`;
 }
 
 export function registerMemberRoutes(app: FastifyInstance, web: Web): void {
@@ -131,7 +155,7 @@ export function registerMemberRoutes(app: FastifyInstance, web: Web): void {
       switchInput({ name: field, checked: m[field], label: `${nameOf(m)}: ${label}`, attrs: html`form="perm-${suffix}${m.id}"` });
 
     const modAccess = html`<div class="card" id="moderator-access">
-      <div class="card-h"><div><h2>Moderator access</h2><div class="desc">New moderators start view-only. Moderators never see setup, panels or settings.</div></div></div>
+      <div class="card-h"><div><h2>Moderator access</h2><div class="desc">New moderators start view-only. Moderators never see setup, panels or settings. Triage pages are set below.</div></div></div>
       ${mods.length
         ? html`${mods.map((m) => html`${permForm(m, '')}${permForm(m, 'm-')}`)}
             <div class="table-wrap only-desktop"><table>
@@ -151,6 +175,34 @@ export function registerMemberRoutes(app: FastifyInstance, web: Web): void {
         : empty('users', 'No moderators yet', 'Moderators can read the tickets inbox. Invite someone as a moderator, then choose what else they can do here.', owner ? linkBtn(`${b}/members?invite=1#invite`, 'Invite', { icon: 'user-plus' }) : null)}
     </div>`;
 
+    const levelSelect = (m: (typeof members)[number], area: TriageArea, suffix: string) => {
+      const level = triageLevel(m.triage_access, area);
+      const levels: AccessLevel[] = VIEW_ONLY_AREAS.has(area) ? ['none', 'view'] : ['none', 'view', 'edit'];
+      return selectWrap(html`<select name="${area}" form="tri-${suffix}${m.id}" class="level-select" data-level="${level}" aria-label="${nameOf(m)}: ${TRIAGE_AREA_NAMES[area]}">${levels.map((l) => html`<option value="${l}" ${l === level ? raw('selected') : ''}>${LEVEL_NAMES[l]}</option>`)}</select>`, { sm: true });
+    };
+    // "All pages" sets every page at once (Activity goes up to View); it shows Custom when they differ.
+    const allSelect = (m: (typeof members)[number], suffix: string) => {
+      const levels = TRIAGE_AREAS.map((a) => triageLevel(m.triage_access, a));
+      const same = (l: AccessLevel) => TRIAGE_AREAS.every((a, i) => levels[i] === (l === 'edit' && VIEW_ONLY_AREAS.has(a) ? 'view' : l));
+      const current = (['none', 'view', 'edit'] as const).find(same) ?? '';
+      return selectWrap(html`<select data-set-levels="tri-${suffix}${m.id}" aria-label="${nameOf(m)}: every Triage page"><option value="" ${current ? '' : raw('selected')} disabled hidden>Custom</option>${(['none', 'view', 'edit'] as const).map((l) => html`<option value="${l}" ${l === current ? raw('selected') : ''}>${l === 'none' ? 'No access' : l === 'view' ? 'View all' : 'Edit all'}</option>`)}</select>`, { sm: true });
+    };
+    const triageAccess = mods.length ? html`<div class="card" id="triage-access">
+      <div class="card-h"><div><h2>Triage access</h2><div class="desc">What each moderator can do in Tickets › Triage, page by page. <strong>View</strong> shows the page with every control turned off; <strong>Edit</strong> lets them change it. Moderators start with no access.</div></div></div>
+      ${mods.map((m) => html`<form id="tri-${m.id}" method="post" action="${b}/members/${m.id}/triage-access" data-async hidden>${csrfField(ctx.csrf)}</form><form id="tri-m-${m.id}" method="post" action="${b}/members/${m.id}/triage-access" data-async hidden>${csrfField(ctx.csrf)}</form>`)}
+      <div class="table-wrap only-desktop"><table class="access-table">
+        <thead><tr><th class="th-perm"><div class="l">Moderator</div></th><th class="th-perm"><div class="l">All pages</div><div class="d">Set every page at once.</div></th>${TRIAGE_AREAS.map((a) => html`<th class="th-perm"><div class="l">${TRIAGE_AREA_NAMES[a]}</div><div class="d">${TRIAGE_AREA_DESC[a]}</div></th>`)}</tr></thead>
+        <tbody>${mods.map((m) => html`<tr>
+          <td class="perm"><span class="who-cell">${avatar(nameOf(m), 24, { src: discordAvatar(m) })}<span class="name">${nameOf(m)}</span></span></td>
+          <td class="perm all-col">${allSelect(m, '')}</td>
+          ${TRIAGE_AREAS.map((a) => html`<td class="perm">${levelSelect(m, a, '')}</td>`)}
+        </tr>`)}</tbody></table></div>
+      <div class="only-mobile">${mods.map((m) => html`<div class="mod-block">
+        <div class="line"><span class="who-cell">${avatar(nameOf(m), 24, { src: discordAvatar(m) })}<span class="name">${nameOf(m)}</span></span>${allSelect(m, 'm-')}</div>
+        ${TRIAGE_AREAS.map((a) => setting(TRIAGE_AREA_NAMES[a], TRIAGE_AREA_DESC[a], levelSelect(m, a, 'm-')))}</div>`)}</div>
+      <div class="card-note">Changes apply right away. “Use these settings” on a re-run also needs Edit on Actions, Label groups and Prompt. Applying suggestions on tickets is set by “Act on tickets” above.</div>
+    </div>` : '';
+
     const mark = (v: string) => (v === 'yes' ? html`${icon('circle-check', 16, 'ok')}<span class="sr-only">Yes</span>` : v === 'maybe' ? html`<span class="xs muted">If allowed</span>` : html`<span class="em" aria-label="No">—</span>`);
     const body = html`
       ${pageHeader({
@@ -165,6 +217,7 @@ export function registerMemberRoutes(app: FastifyInstance, web: Web): void {
         ${pending}
       </div>
       ${modAccess}
+      ${triageAccess}
       <details class="card">
         <summary>${icon('info')}<span>What each role can do</span>${icon('chevron-down', 16, 'chev')}</summary>
         <div class="table-wrap"><table>
@@ -249,6 +302,27 @@ export function registerMemberRoutes(app: FastifyInstance, web: Web): void {
       setFlash(reply, 'error', err.message);
     }
     return reply.redirect(`${ctx.base}/members`);
+  });
+
+  /** Owners and admins set a moderator's access to each Triage page (JSON from the selects, or a form). */
+  app.post('/w/:wid/members/:userId/triage-access', async (req, reply) => {
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'manage' });
+    if (!ctx) return reply;
+    const userId = (req.params as { userId: string }).userId;
+    try {
+      const before = (await listMembers(deps.db, ctx.workspace.id)).find((m) => m.id === userId);
+      const next = await setModeratorTriageAccess(deps.db, ctx.workspace.id, userId, req.body as Record<string, string>);
+      const name = before ? before.display_name ?? before.username : 'Moderator';
+      const changes = TRIAGE_AREAS.filter((a) => triageLevel(before?.triage_access, a) !== triageLevel(next, a)).map((a) => `${TRIAGE_AREA_NAMES[a]} → ${LEVEL_NAMES[triageLevel(next, a)]}`);
+      const message = `${name}: ${changes.length ? changes.join(', ') : 'Triage access saved'}`;
+      if (web.wantsJson(req)) return reply.send({ ok: true, message });
+      setFlash(reply, 'success', message);
+    } catch (err) {
+      if (!(err instanceof UserFacingError)) throw err;
+      if (web.wantsJson(req)) return reply.code(err.status).send({ ok: false, error: err.message });
+      setFlash(reply, 'error', err.message);
+    }
+    return reply.redirect(`${ctx.base}/members#triage-access`);
   });
 
   app.post('/w/:wid/members/:userId/remove', async (req, reply) => {

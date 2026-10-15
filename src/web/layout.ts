@@ -4,7 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { html, raw, type SafeHtml } from '../lib/html.js';
 import type { Membership } from '../domain/workspaces.js';
-import { can, ROLE_LABELS, type MemberAccess } from '../domain/permissions.js';
+import { can, ROLE_LABELS, TRIAGE_AREAS, type MemberAccess } from '../domain/permissions.js';
 import type { Role, UserRow, WorkspaceRow } from '../domain/types.js';
 import { avatar, csrfField, discordAvatar, icon, iconBtn, initials, menu, notice, type IconName } from './ui.js';
 
@@ -83,7 +83,8 @@ function stepMark(state: StepState): SafeHtml {
 }
 
 export function roleLabel(access: MemberAccess): string {
-  if (access.role === 'moderator' && !access.can_act_tickets) return 'Moderator · View only';
+  // View only: can't act on tickets or change any Triage page.
+  if (access.role === 'moderator' && !access.can_act_tickets && !TRIAGE_AREAS.some((a) => can(access, `triage.${a}.edit`))) return 'Moderator · View only';
   return ROLE_LABELS[access.role];
 }
 

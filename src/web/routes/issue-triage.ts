@@ -219,7 +219,7 @@ export function registerIssueTriageRoutes(app: FastifyInstance, web: Web): void 
       ${await ticketsHeader(web, ctx, 'issues')}
       ${issuesNav(ctx, 'triage', count('review'))}
       <div class="stack">
-        ${!settings.githubEnabled ? notice('info', 'Triage of issues opened on GitHub is off', can(ctx.membership, 'manage') ? html`Turn it on in <a href="${b}/tickets/triage">Triage › Actions</a>, or use <a href="${b}/tickets/triage/runs">Re-run</a> for issues already open.` : 'An admin can turn it on in Triage.') : ''}
+        ${!settings.githubEnabled ? notice('info', 'Triage of issues opened on GitHub is off', can(ctx.membership, 'triage.actions.edit') ? html`Turn it on in <a href="${b}/tickets/triage">Triage › Actions</a>${can(ctx.membership, 'triage.runs.edit') ? html`, or use <a href="${b}/tickets/triage/runs">Re-run</a> for issues already open` : ''}.` : 'An admin can turn it on in Triage › Actions.') : ''}
         <div class="card">
           <div class="card-h"><div><h2>Issues opened on GitHub</h2><div class="desc">Issues people opened directly on GitHub (not through Discord) that triage looked at. Open one to see what triage suggests and what applying it does.</div></div></div>
           <div class="toolbar">${segLinks('Show', SHOWS.map((x) => ({ href: link({ show: x.key, page: 1 }), label: x.label, count: count(x.key), current: x.key === show.key })))}

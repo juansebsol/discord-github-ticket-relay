@@ -14,7 +14,7 @@ import { setFlash } from '../session.js';
 import type { Web, WorkspaceRequestContext } from '../server.js';
 import { csrfField, icon, linkBtn, plural, postBtn, submitBtn } from '../ui.js';
 import { issueTriageSubjects } from './issue-triage.js';
-import { inboxFilters, type InboxQuery } from './tickets.js';
+import { canTriage, inboxFilters, type InboxQuery } from './tickets.js';
 
 /** Most tickets one bulk action takes. */
 const MAX_BULK = 10_000;
@@ -43,7 +43,7 @@ export function bulkBar(ctx: WorkspaceRequestContext, o: { matcher: ActionMatche
         ${submitBtn('Apply', { size: 'sm', variant: 'primary', icon: 'play', name: 'op', value: 'apply', form: FORM, attrs: html`data-needs-selection="${FORM}" data-bulk-summary="${FORM}" data-confirm-title="Apply ${what}?" data-confirm-body="${applyBody}" data-confirm-label="Apply on GitHub"` })}
       </div>
     </div>
-    <p class="card-note">${m.narrowed ? html`Apply and Dismiss only take <strong>${m.describe}</strong> (${m.effects}). Other suggestions on these tickets stay.` : html`No action filter: Apply and Dismiss take <strong>every waiting suggestion</strong>. Filter by “Flagged as”, priority, label or confidence to take only some.`} Follow it in <a href="${ctx.base}/tickets/triage/activity?source=review">Triage › Activity</a>.</p>`;
+    <p class="card-note">${m.narrowed ? html`Apply and Dismiss only take <strong>${m.describe}</strong> (${m.effects}). Other suggestions on these tickets stay.` : html`No action filter: Apply and Dismiss take <strong>every waiting suggestion</strong>. Filter by “Flagged as”, priority, label or confidence to take only some.`}${canTriage(ctx, 'activity') ? html` Follow it in <a href="${ctx.base}/tickets/triage/activity?source=review">Triage › Activity</a>.` : ''}</p>`;
 }
 
 /** Bulk applies going on (and just finished), with progress; live while one runs. */
@@ -63,7 +63,7 @@ function bulkStatus(ctx: WorkspaceRequestContext, bulks: BulkProgress[]): SafeHt
       ${icon(x.status === 'running' ? 'loader-circle' : x.failed ? 'triangle-alert' : 'circle-check', 16, x.status === 'running' ? 'muted' : x.failed ? 'warn' : 'ok')}
       <div class="grow"><div class="small"><strong>${x.status === 'running' ? 'Applying' : x.status === 'stopped' ? 'Stopped applying' : 'Applied'} ${x.description}</strong>: ${n(x.done)} of ${n(x.total)} done${x.skipped ? ` · ${n(x.skipped)} skipped` : ''}${x.failed ? ` · ${n(x.failed)} failed` : ''}${waiting ? ` · waiting for GitHub’s hourly limit until ${x.waiting_until_at!.toISOString().slice(11, 16)} UTC` : ''}</div>
         ${x.status === 'running' ? html`<progress class="bar wide" max="${String(x.total || 1)}" value="${String(finished)}"></progress>` : ''}</div>
-      <div class="row">${linkBtn(`${b}/tickets/triage/activity?bulk=${x.id}`, 'Activity', { size: 'sm', variant: 'ghost', icon: 'history' })}
+      <div class="row">${canTriage(ctx, 'activity') ? linkBtn(`${b}/tickets/triage/activity?bulk=${x.id}`, 'Activity', { size: 'sm', variant: 'ghost', icon: 'history' }) : ''}
         ${x.status === 'running' ? postBtn(`${b}/tickets/triage/bulk/${x.id}/stop`, 'Stop', ctx.csrf, { size: 'sm', icon: 'circle-x', confirm: { title: 'Stop applying?', body: 'What’s applied stays applied. The rest stays as suggestions.', label: 'Stop' } }) : ''}</div>
     </div>`;
   })}${bulks.some((x) => x.status === 'running') ? '' : html`<span data-live-reload hidden></span>`}</div>`;

@@ -13,7 +13,7 @@ import type { TriageEngine } from '../triage/engine.js';
 import { getDiscordConnection, getGitHubConnection, getPanel, listApps } from '../domain/store.js';
 import { UserFacingError, type Deps, type Role } from '../domain/types.js';
 import { getMembership, listMemberships, type Membership } from '../domain/workspaces.js';
-import { can, type Permission } from '../domain/permissions.js';
+import { can, TRIAGE_AREA_NAMES, type Permission, type TriageArea } from '../domain/permissions.js';
 import { layout, simplePage, type PageContext, type SetupProgress } from './layout.js';
 import { loadSession, SESSION_COOKIE, takeFlash, type AuthContext } from './session.js';
 import { registerAuthRoutes } from './routes/auth.js';
@@ -197,8 +197,14 @@ export async function buildServer(deps: Deps, processor: Processor, opts: { logg
         }
         const ctx = { ...web.pageContext(req, reply), workspace: membership.workspace, role: membership.role, membership, base: `/w/${membership.workspace.id}`, memberships: await listMemberships(deps.db, auth.user.id), progress: await computeProgress(deps, wid) };
         const scope = can(membership, 'contrib.view') ? 'the tickets inbox and contributor verifications' : 'the tickets inbox';
+        // A Triage page: say which one, and what access it needs.
+        const triage = /^triage\.(\w+)\.(view|edit)$/.exec(o.permission ?? '');
+        const area = triage ? TRIAGE_AREA_NAMES[triage[1] as TriageArea] : null;
+        const text = area
+          ? triage![2] === 'edit' && can(membership, `triage.${triage![1] as TriageArea}.view`) ? `You can see Triage › ${area}, but not change it. Ask an admin if you need Edit.` : `You don’t have access to Triage › ${area}. Ask an admin if you need it.`
+          : `Your role can see ${scope}. Ask an admin or the owner if you need more access.`;
         web.render(reply, ctx, 'No access', '', html`${pageHeader({ title: 'No access' })}
-          <div class="card">${empty('lock', 'You don’t have access to this page', `Your role can see ${scope}. Ask an admin or the owner if you need more access.`, linkBtn(`/w/${membership.workspace.id}`, 'Go to overview'))}</div>`);
+          <div class="card">${empty('lock', 'You don’t have access to this page', text, linkBtn(`/w/${membership.workspace.id}`, 'Go to overview'))}</div>`);
         return null;
       }
       const [memberships, progress] = await Promise.all([listMemberships(deps.db, auth.user.id), computeProgress(deps, wid)]);

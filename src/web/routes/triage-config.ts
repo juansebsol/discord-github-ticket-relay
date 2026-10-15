@@ -4,6 +4,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
+import { can } from '../../domain/permissions.js';
 import { listApps } from '../../domain/store.js';
 import { UserFacingError } from '../../domain/types.js';
 import { html, raw } from '../../lib/html.js';
@@ -29,8 +30,8 @@ import { setFlash } from '../session.js';
 import type { Web, WorkspaceRequestContext } from '../server.js';
 import { csrfField, empty, icon, labelTag, linkBtn, notice, pageHeader, pill, postBtn, segRadios, selectWrap, submitBtn, type Tone } from '../ui.js';
 import { textField } from './panel.js';
-import { ticketsHeader } from './tickets.js';
-import { FLAG_COPY, MODE_NAMES, MODE_OPTIONS, triageNav } from './triage.js';
+import { canTriage, ticketsHeader } from './tickets.js';
+import { FLAG_COPY, MODE_NAMES, MODE_OPTIONS, triageNav, viewOnlyFooter } from './triage.js';
 
 const PICK_NAMES: Record<LabelGroup['pick'], string> = { one: 'One option', two: 'Up to two options', any: 'Any number of options' };
 const MODE_TONE: Record<Mode, Tone> = { off: 'neutral', suggest: 'warn', auto: 'ok' };
@@ -76,9 +77,10 @@ export function registerTriageConfigRoutes(app: FastifyInstance, web: Web): void
   // ---- Label groups -------------------------------------------------------------------------
 
   app.get('/w/:wid/tickets/triage/labels', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply);
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'triage.labels.view' });
     if (!ctx) return reply;
     const b = labelsUrl(ctx);
+    const edit = canTriage(ctx, 'labels', 'edit');
     const c = (await getTriageSettings(deps.db, ctx.workspace.id)).config;
     const groups = c.labelGroups;
     const full = groups.length >= MAX_LABEL_GROUPS;
@@ -89,8 +91,9 @@ export function registerTriageConfigRoutes(app: FastifyInstance, web: Web): void
     const settings = await getTriageSettings(deps.db, ctx.workspace.id);
     const groupCard = (g: LabelGroup) => html`<div class="card" id="g-${g.id}">
       <div class="card-h"><div><div class="title"><h2>${g.name}</h2>${pill(`Discord: ${MODE_NAMES[g.mode]}`, MODE_TONE[g.mode])}${pill(`GitHub: ${MODE_NAMES[githubMode(c, groupKind(g.id))]}`, MODE_TONE[githubMode(c, groupKind(g.id))])}</div><div class="desc">${PICK_NAMES[g.pick]} · <span class="tags">${g.options.slice(0, 8).map((o) => labelTag(o.label))}${g.options.length > 8 ? html`<span class="small muted">+${String(g.options.length - 8)} more</span>` : ''}</span></div></div>
-        ${postBtn(`${b}/${g.id}/delete`, 'Delete', ctx.csrf, { size: 'sm', variant: 'ghost danger', icon: 'trash-2', confirm: { title: `Delete the ${g.name} group?`, body: 'Claude stops picking these labels. Labels already added to issues stay on GitHub.', label: 'Delete group', danger: true } })}</div>
-      <form method="post" action="${b}/${g.id}" data-dirty>${csrfField(ctx.csrf)}
+        ${edit ? postBtn(`${b}/${g.id}/delete`, 'Delete', ctx.csrf, { size: 'sm', variant: 'ghost danger', icon: 'trash-2', confirm: { title: `Delete the ${g.name} group?`, body: 'Claude stops picking these labels. Labels already added to issues stay on GitHub.', label: 'Delete group', danger: true } }) : ''}</div>
+      <form method="post" action="${b}/${g.id}" ${edit ? raw('data-dirty') : ''}>${csrfField(ctx.csrf)}
+        <fieldset class="plain${edit ? '' : ' view-only'}" ${edit ? '' : raw('disabled')}>
         <div class="section">
           <div class="section-h"><div><h3>When Claude picks</h3><div class="desc">Set separately for Discord tickets and issues opened on GitHub. Suggest shows the labels for someone to apply; Automatic adds them when Claude is at least ${String(c.threshold)}% sure.</div></div>
             <div class="src-modes${settings.githubEnabled ? '' : ' gh-off'}">
@@ -106,10 +109,11 @@ export function registerTriageConfigRoutes(app: FastifyInstance, web: Web): void
             ${textField({ id: `options-${g.id}`, name: 'options', label: 'Options', value: optionsText(g), max: 5000, rows: Math.min(12, Math.max(4, g.options.length + 1)), placeholder: 'crash: The app crashes, freezes or loses work.\nbug: Wrong behaviour.', hint: html`One per line: <code>label: when to use it</code>. Claude can only pick these labels; each is created on GitHub the first time it’s used. Up to ${String(MAX_GROUP_OPTIONS)}.` })}
           </div>
         </div>
-        <div class="card-f"><span></span><div class="end">
+        </fieldset>
+        <div class="card-f">${edit ? html`<span></span><div class="end">
           <button type="button" class="btn" data-discard data-dirty-enable>Cancel</button>
           ${submitBtn('Save group', { variant: 'primary', loading: 'Saving…', attrs: raw('data-dirty-enable') })}
-        </div></div>
+        </div>` : viewOnlyFooter('this group')}</div>
       </form>
     </div>`;
 
@@ -119,9 +123,11 @@ export function registerTriageConfigRoutes(app: FastifyInstance, web: Web): void
       <div class="stack">
         <div class="card">
           <div class="card-h"><div><h2>Label groups</h2><div class="desc">Sets of labels Claude sorts tickets with, such as the type of problem, the part of the app and the platform. Claude only picks from the options you list, using each one’s description. New groups start Off.</div></div></div>
-          ${groups.length
-            ? html`<div class="card-b tight"><div class="row"><span class="small muted">Add a group:</span>${addButtons}</div>${full ? html`<p class="small muted mt-8">You have the maximum of ${String(MAX_LABEL_GROUPS)} groups.</p>` : ''}</div>`
-            : empty('tags', 'No label groups yet', 'Start from a ready-made group and edit its options, or start empty.', html`<div class="row">${addButtons}</div>`)}
+          ${!edit
+            ? (groups.length ? '' : empty('tags', 'No label groups yet', 'An admin can add groups here.'))
+            : groups.length
+              ? html`<div class="card-b tight"><div class="row"><span class="small muted">Add a group:</span>${addButtons}</div>${full ? html`<p class="small muted mt-8">You have the maximum of ${String(MAX_LABEL_GROUPS)} groups.</p>` : ''}</div>`
+              : empty('tags', 'No label groups yet', 'Start from a ready-made group and edit its options, or start empty.', html`<div class="row">${addButtons}</div>`)}
           <div class="card-note">Which ticket types each group runs for is set in Actions › Rules by ticket type.</div>
         </div>
         ${groups.map(groupCard)}
@@ -130,7 +136,7 @@ export function registerTriageConfigRoutes(app: FastifyInstance, web: Web): void
   });
 
   app.post('/w/:wid/tickets/triage/labels/add', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply);
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'triage.labels.edit' });
     if (!ctx) return reply;
     const preset = String((req.body as { preset?: string }).preset ?? '');
     const id = randomUUID().replace(/-/g, '').slice(0, 8);
@@ -151,7 +157,7 @@ export function registerTriageConfigRoutes(app: FastifyInstance, web: Web): void
   });
 
   app.post('/w/:wid/tickets/triage/labels/:gid', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply);
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'triage.labels.edit' });
     if (!ctx) return reply;
     const gid = (req.params as { gid: string }).gid;
     const f = (req.body ?? {}) as Record<string, string | undefined>;
@@ -179,7 +185,7 @@ export function registerTriageConfigRoutes(app: FastifyInstance, web: Web): void
   });
 
   app.post('/w/:wid/tickets/triage/labels/:gid/delete', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply);
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'triage.labels.edit' });
     if (!ctx) return reply;
     const gid = (req.params as { gid: string }).gid;
     await update(ctx, (c) => {
@@ -195,20 +201,22 @@ export function registerTriageConfigRoutes(app: FastifyInstance, web: Web): void
   // ---- Prompt -------------------------------------------------------------------------------
 
   app.get('/w/:wid/tickets/triage/prompt', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply);
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'triage.prompt.view' });
     if (!ctx) return reply;
     const [settings, apps] = await Promise.all([getTriageSettings(deps.db, ctx.workspace.id), listApps(deps.db, ctx.workspace.id)]);
     const c = settings.config;
     const b = promptUrl(ctx);
     const system = systemPromptFor(c, apps);
     const modeOf = (f: (typeof FLAGS)[number]) => c[f].mode;
+    const edit = canTriage(ctx, 'prompt', 'edit');
     const body = html`
       ${await ticketsHeader(web, ctx, 'triage')}
       ${triageNav(ctx, 'prompt', linkBtn(`${b}/full`, 'See the full prompt', { size: 'sm', icon: 'file-text' }))}
-      <form method="post" action="${b}" class="stack" data-dirty>
+      <form method="post" action="${b}" ${edit ? raw('data-dirty') : ''}>
         ${csrfField(ctx.csrf)}
+        <fieldset class="plain stack${edit ? '' : ' view-only'}" ${edit ? '' : raw('disabled')}>
         <div class="card">
-          <div class="card-h"><div><h2>About your products</h2><div class="desc">Claude reads this with every ticket. It already gets each app’s name, repository and description.</div></div>${linkBtn(`${ctx.base}/apps`, 'Edit apps', { size: 'sm', variant: 'ghost', trail: 'arrow-right' })}</div>
+          <div class="card-h"><div><h2>About your products</h2><div class="desc">Claude reads this with every ticket. It already gets each app’s name, repository and description.</div></div>${can(ctx.membership, 'manage') ? linkBtn(`${ctx.base}/apps`, 'Edit apps', { size: 'sm', variant: 'ghost', trail: 'arrow-right' }) : ''}</div>
           <div class="card-b tight">${apps.length
             ? html`<ul class="tri-effects">${apps.map((a) => html`<li><span><strong>${a.name}</strong> <span class="muted mono xs">${a.repo_owner}/${a.repo_name}</span>${a.description ? html`<span class="muted"> · ${a.description}</span>` : html`<span class="em"> · no description</span>`}</span></li>`)}</ul>`
             : html`<p class="small muted">No apps yet.</p>`}</div>
@@ -242,17 +250,18 @@ export function registerTriageConfigRoutes(app: FastifyInstance, web: Web): void
         <div class="card">
           <div class="card-h"><div><h2>Notes for Claude</h2><div class="desc">Anything else Claude should know: what’s urgent for you, what to ignore. Added at the end, as trusted instructions.</div></div></div>
           <div class="section">${textField({ id: 'instructions', label: 'Notes (optional)', value: c.instructions, max: 2000, rows: 4, placeholder: 'Anything about payments or sign-in is high priority. Questions about pricing are low priority.' })}</div>
-          <div class="card-f"><span class="small muted">The prompt is ${tokensOf(system)} before each ticket.</span><div class="end">
+          <div class="card-f"><span class="small muted">The prompt is ${tokensOf(system)} before each ticket.</span>${edit ? html`<div class="end">
             <button type="button" class="btn" data-discard data-dirty-enable>Cancel</button>
             ${submitBtn('Save prompt', { variant: 'primary', loading: 'Saving…', attrs: raw('data-dirty-enable') })}
-          </div></div>
+          </div>` : viewOnlyFooter('the prompt')}</div>
         </div>
+        </fieldset>
       </form>`;
     return web.render(reply, ctx, 'Prompt · Triage', 'tickets', body);
   });
 
   app.post('/w/:wid/tickets/triage/prompt', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply);
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'triage.prompt.edit' });
     if (!ctx) return reply;
     const f = (req.body ?? {}) as Record<string, string | undefined>;
     const text = (k: string, max: number) => (f[k] === undefined ? undefined : String(f[k]).replace(/\r\n/g, '\n').trim().slice(0, max));
@@ -276,7 +285,7 @@ export function registerTriageConfigRoutes(app: FastifyInstance, web: Web): void
   });
 
   app.get('/w/:wid/tickets/triage/prompt/full', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply);
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'triage.prompt.view' });
     if (!ctx) return reply;
     const [settings, apps] = await Promise.all([getTriageSettings(deps.db, ctx.workspace.id), listApps(deps.db, ctx.workspace.id)]);
     const c = settings.config;
@@ -288,7 +297,7 @@ export function registerTriageConfigRoutes(app: FastifyInstance, web: Web): void
     );
     const fields = Object.keys(verdictSchema({ groups, apps: apps.map((a) => a.name) }).shape);
     const body = html`
-      ${pageHeader({ title: 'Full prompt', crumbs: [{ href: `${ctx.base}/tickets/triage`, label: 'Triage' }, { href: promptUrl(ctx), label: 'Prompt' }, { label: 'Full prompt' }], description: 'Exactly what Claude is told, with your current settings. Edit it in Prompt, Actions and Label groups.' })}
+      ${pageHeader({ title: 'Full prompt', crumbs: [{ href: `${ctx.base}/tickets/triage`, label: 'Triage' }, { href: promptUrl(ctx), label: 'Prompt' }, { label: 'Full prompt' }], description: canTriage(ctx, 'prompt', 'edit') ? 'Exactly what Claude is told, with your current settings. Edit it in Prompt, Actions and Label groups.' : 'Exactly what Claude is told, with your current settings.' })}
       <div class="stack">
         ${settings.enabled ? '' : notice('info', null, 'Triage is off. This is what Claude would be told.')}
         <div class="card">

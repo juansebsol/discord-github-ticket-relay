@@ -1049,3 +1049,20 @@ progress.bar.wide { max-width: none; }
 .nav-item.locked:hover > .ic { color: var(--muted); }
 .nav-item.locked .trail .ic { color: var(--faint); }
 .list-row .l2.tri-line-m { overflow: visible; white-space: normal; }
+/* Members › Triage access */
+.level-select[data-level="none"] { color: var(--muted); }
+.level-select[data-level="edit"] { color: var(--accent-text); font-weight: 500; }
+/* Room for the longest choice (“No access”) next to the chevron. */
+.access-table .select { min-width: 112px; }
+.access-table td.all-col { border-right: 1px solid var(--border); }
+.seg-item.locked { opacity: 0.6; cursor: not-allowed; }
+.seg-item.locked:hover { color: var(--muted); }
+.seg-item.locked svg { flex: none; }
+/* A page someone can see but not change: readable, clearly not editable. */
+fieldset.view-only[disabled] .setting .control { opacity: 1; }
+fieldset.view-only input[type="text"]:disabled, fieldset.view-only input[type="number"]:disabled, fieldset.view-only select:disabled, fieldset.view-only textarea:disabled { opacity: 1; color: var(--text); background: var(--surface-2); cursor: default; }
+fieldset.view-only .seg-item, fieldset.view-only label.check, fieldset.view-only input:disabled { cursor: default; }
+fieldset.view-only .seg-item:hover { color: var(--muted); }
+fieldset.view-only .seg input:checked + .seg-item:hover { color: var(--text); }
+fieldset.view-only .seg input:not(:checked) + .seg-item { opacity: 0.55; }
+fieldset.view-only .link-btn { display: none; }

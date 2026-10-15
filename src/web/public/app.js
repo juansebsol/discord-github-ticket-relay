@@ -697,6 +697,40 @@
     });
     show();
   });
+  // ---- Members › Triage access ------------------------------------------------------------------
+
+  /** The highest level a page's select offers ("edit", or "view" for Activity). */
+  function capLevel(select, level) {
+    var has = [].some.call(select.options, function (o) { return o.value === level; });
+    return has ? level : 'view';
+  }
+  // "All pages" sets every page of that moderator, then saves them together.
+  $$('[data-set-levels]').forEach(function (all) {
+    var formId = all.getAttribute('data-set-levels');
+    all.addEventListener('change', function () {
+      var selects = $$('select[form="' + formId + '"]');
+      selects.forEach(function (sel) {
+        sel.value = capLevel(sel, all.value);
+        sel.setAttribute('data-level', sel.value);
+      });
+      if (selects[0]) selects[0].dispatchEvent(new Event('change', { bubbles: true }));
+    });
+  });
+  // Each page's select shows its level; "All pages" says Custom when they differ.
+  document.addEventListener('change', function (e) {
+    var sel = e.target;
+    if (!sel.classList || !sel.classList.contains('level-select')) return;
+    sel.setAttribute('data-level', sel.value);
+    var formId = sel.getAttribute('form');
+    var all = document.querySelector('[data-set-levels="' + formId + '"]');
+    if (!all) return;
+    var selects = $$('select[form="' + formId + '"]');
+    var match = ['none', 'view', 'edit'].filter(function (l) {
+      return selects.every(function (x) { return x.value === capLevel(x, l); });
+    })[0];
+    all.value = match || '';
+  });
+
   // ---- Triage › Actions: modes per source ------------------------------------------------------
 
   function setRadio(form, name, value) {

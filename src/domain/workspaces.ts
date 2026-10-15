@@ -2,7 +2,7 @@ import { withTransaction, type Db, type Queryable } from '../db/database.js';
 import { randomUUID } from 'node:crypto';
 import { randomToken, sha256 } from '../lib/crypto.js';
 import type { Config } from '../config.js';
-import type { MemberAccess } from './permissions.js';
+import { TRIAGE_AREAS, triageLevel, type MemberAccess } from './permissions.js';
 import { UserFacingError, type Role, type UserRow, type WorkspaceRow } from './types.js';
 
 export async function upsertUser(
@@ -25,10 +25,10 @@ export interface Membership extends MemberAccess {
   workspace: WorkspaceRow;
 }
 
-const MEMBER_COLUMNS = 'm.role, m.can_act_tickets, m.can_view_contributors, m.can_search_issues, m.can_manage_files, m.can_view_health';
+const MEMBER_COLUMNS = 'm.role, m.can_act_tickets, m.can_view_contributors, m.can_search_issues, m.can_manage_files, m.can_view_health, m.triage_access';
 
 function toMembership(row: Record<string, unknown>): Membership {
-  const { role, can_act_tickets, can_view_contributors, can_search_issues, can_manage_files, can_view_health, ...workspace } = row;
+  const { role, can_act_tickets, can_view_contributors, can_search_issues, can_manage_files, can_view_health, triage_access, ...workspace } = row;
   return {
     workspace: workspace as unknown as WorkspaceRow,
     role: role as Role,
@@ -37,6 +37,7 @@ function toMembership(row: Record<string, unknown>): Membership {
     can_search_issues: Boolean(can_search_issues),
     can_manage_files: Boolean(can_manage_files),
     can_view_health: Boolean(can_view_health),
+    triage_access: (triage_access && typeof triage_access === 'object' ? triage_access : {}) as MemberAccess['triage_access'],
   };
 }
 
@@ -207,6 +208,14 @@ export async function setMemberRole(q: Queryable, workspaceId: string, userId: s
 }
 
 /** Owners and admins: what a moderator may do beyond viewing tickets. */
+/** What a moderator can do on each Triage page. Unknown pages and levels are dropped. */
+export async function setModeratorTriageAccess(q: Queryable, workspaceId: string, userId: string, access: Partial<Record<string, string>>): Promise<MemberAccess['triage_access']> {
+  const clean = Object.fromEntries(TRIAGE_AREAS.map((a) => [a, triageLevel(access, a)]).filter(([, l]) => l !== 'none'));
+  const res = await q.query(`UPDATE workspace_members SET triage_access = $3 WHERE workspace_id = $1 AND user_id = $2 AND role = 'moderator'`, [workspaceId, userId, clean]);
+  if (!res.rowCount) throw new UserFacingError('Only moderators have adjustable permissions.', 404);
+  return clean;
+}
+
 export async function setModeratorPermissions(
   q: Queryable,
   workspaceId: string,
