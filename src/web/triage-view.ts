@@ -32,12 +32,12 @@ function joined(items: SafeHtml[]): SafeHtml {
 }
 
 /** What triage found, in a few words (with links). */
-export function actionTitle(a: TriageAction, repo: Repo): SafeHtml {
+export function actionTitle(a: TriageAction, repo: Repo, o: { applied?: boolean } = {}): SafeHtml {
   switch (a.kind) {
     case 'priority':
       return a.priority ? html`${priorityTag(a.priority)} priority` : html`Priority`;
     case 'duplicate':
-      return html`Duplicate of ${issueLink(repo, a.duplicateOf)}${a.originalClosed ? html`<span class="muted"> · the original is closed, so this is only suggested</span>` : ''}`;
+      return html`Duplicate of ${issueLink(repo, a.duplicateOf)}${a.originalClosed ? html`<span class="muted"> · the original is closed${o.applied ? '' : ', so this is only suggested'}</span>` : ''}`;
     case 'regression':
       return html`Regression of ${issueLink(repo, a.regressionOf)}<span class="muted"> · closed as fixed, reported again</span>`;
     case 'needsInfo':

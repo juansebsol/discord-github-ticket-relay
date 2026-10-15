@@ -48,7 +48,8 @@ const inbox = (triage: string) => env.server.inject({ method: 'GET', url: `${w()
 describe('triage status', () => {
   it('tells apart applied, to review, reviewed and nothing to do', () => {
     expect(triageState({ status: 'pending', suggestion_count: 0 })).toBe('queued');
-    expect(triageState({ status: 'done', suggestion_count: 1, applied_actions: [{}] })).toBe('review');
+    expect(triageState({ status: 'done', suggestion_count: 1, applied_actions: [] })).toBe('review');
+    expect(triageState({ status: 'done', suggestion_count: 1, applied_actions: [{}] })).toBe('partial');
     expect(triageState({ status: 'done', suggestion_count: 0, applied_actions: [{}] })).toBe('applied');
     expect(triageState({ status: 'done', suggestion_count: 0, applied_actions: [], dismissed_count: 2 })).toBe('reviewed');
     expect(triageState({ status: 'done', suggestion_count: 0, applied_actions: [] })).toBe('nothing');
@@ -78,17 +79,28 @@ describe('triage status', () => {
     expect(all.body).toContain('<optgroup label="Flagged as">');
     expect(all.body).toContain('value="l:type1:crash"');
 
+    // "applied" got priority automatically, and nothing else: Applied.
     const appliedList = await inbox('s:applied');
     expect(has(appliedList.body, applied.id) && !has(appliedList.body, review.id)).toBe(true);
+    // Applying one of two suggestions makes it Partly applied.
+    await env.server.inject({ method: 'POST', url: `${w()}/tickets/${review.id}/triage/apply`, ...form(ws.owner, { kind: 'priority' }) });
+    const partial = await inbox('s:partial');
+    expect(has(partial.body, review.id) && !has(partial.body, applied.id)).toBe(true);
+    expect(partial.body).toContain('Partly applied');
+    // Confidence: at least one action at 90%+ (only "applied" has one, at 95%).
+    const sure = await env.server.inject({ method: 'GET', url: `${w()}/tickets?status=all&conf=90`, ...get(ws.owner) });
+    expect(has(sure.body, applied.id) && !has(sure.body, review.id)).toBe(true);
+    const leaning = await env.server.inject({ method: 'GET', url: `${w()}/tickets?status=all&conf=60&triage=s:partial`, ...get(ws.owner) });
+    expect(has(leaning.body, review.id) && !has(leaning.body, applied.id)).toBe(true);
     const reviewList = await inbox('s:review');
-    expect(has(reviewList.body, review.id) && !has(reviewList.body, applied.id)).toBe(true);
+    expect(!has(reviewList.body, review.id) && !has(reviewList.body, applied.id)).toBe(true);
     const reviewedList = await inbox('s:reviewed');
     expect(has(reviewedList.body, dismissed.id) && !has(reviewedList.body, review.id)).toBe(true);
     expect(has((await inbox('p:high')).body, applied.id)).toBe(true);
     expect(has((await inbox('f:spam')).body, review.id) && !has((await inbox('f:spam')).body, applied.id)).toBe(true);
     expect(has((await inbox('l:type1:crash')).body, review.id) && !has((await inbox('l:type1:crash')).body, dismissed.id)).toBe(true);
     // Old links still work.
-    expect(has((await inbox('review')).body, review.id)).toBe(true);
+    expect(has((await inbox('high')).body, applied.id)).toBe(true);
 
     // Tickets filed before triage was on have no result: "Not triaged".
     await setTriageEnabled(env.db, wid(), false);

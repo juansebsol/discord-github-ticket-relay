@@ -186,6 +186,9 @@ describe('settings for issues opened on GitHub', () => {
     expect(s.githubEnabled).toBe(true);
     expect(s.githubEnabledAt).toBeInstanceOf(Date);
     expect(s.enabled).toBe(false); // Discord tickets have their own switch
+    // The Issues tab now opens on the GitHub triage view.
+    const inbox = await env.server.inject({ method: 'GET', url: `${w()}/tickets`, ...get(ws.owner) });
+    expect(inbox.body).toContain(`href="${w()}/tickets/issues/triage"`);
   });
 });
 

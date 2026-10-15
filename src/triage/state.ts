@@ -5,11 +5,12 @@
  */
 import { FLAGS, PRIORITIES, groupKind, type Flag, type TriageConfig } from './settings.js';
 
-export type TriageState = 'queued' | 'review' | 'applied' | 'reviewed' | 'nothing' | 'skipped' | 'failed';
+export type TriageState = 'queued' | 'review' | 'partial' | 'applied' | 'reviewed' | 'nothing' | 'skipped' | 'failed';
 
 export const TRIAGE_STATES: Record<TriageState, { label: string; desc: string }> = {
   queued: { label: 'Queued', desc: 'Waiting to be triaged.' },
-  review: { label: 'To review', desc: 'Suggestions are waiting for someone to apply or dismiss them.' },
+  review: { label: 'To review', desc: 'Suggestions are waiting for someone to apply or dismiss them; nothing was applied yet.' },
+  partial: { label: 'Partly applied', desc: 'Some triage actions were applied on GitHub; others are still waiting for review.' },
   applied: { label: 'Applied', desc: 'Triage actions were applied on GitHub (automatically or by someone), and nothing is waiting.' },
   reviewed: { label: 'Reviewed', desc: 'The suggestions were dismissed; nothing was applied.' },
   nothing: { label: 'Nothing to do', desc: 'Triage found nothing to flag.' },
@@ -30,8 +31,9 @@ export function triageState(r: StateFields): TriageState {
   if (r.status === 'pending') return 'queued';
   if (r.status === 'skipped') return 'skipped';
   if (r.status === 'failed') return 'failed';
-  if (r.suggestion_count > 0) return 'review';
-  if ((r.applied_count ?? r.applied_actions?.length ?? 0) > 0) return 'applied';
+  const applied = (r.applied_count ?? r.applied_actions?.length ?? 0) > 0;
+  if (r.suggestion_count > 0) return applied ? 'partial' : 'review';
+  if (applied) return 'applied';
   return (r.dismissed_count ?? 0) > 0 ? 'reviewed' : 'nothing';
 }
 
@@ -40,7 +42,8 @@ const APPLIED = `json_array_length(COALESCE(t.applied_actions, '[]'))`;
 /** Each status as SQL on a triage result aliased t. */
 const STATE_SQL: Record<TriageState, string> = {
   queued: `t.status = 'pending'`,
-  review: `t.status = 'done' AND t.suggestion_count > 0`,
+  review: `t.status = 'done' AND t.suggestion_count > 0 AND ${APPLIED} = 0`,
+  partial: `t.status = 'done' AND t.suggestion_count > 0 AND ${APPLIED} > 0`,
   applied: `t.status = 'done' AND t.suggestion_count = 0 AND ${APPLIED} > 0`,
   reviewed: `t.status = 'done' AND t.suggestion_count = 0 AND ${APPLIED} = 0 AND t.dismissed_count > 0`,
   nothing: `t.status = 'done' AND t.suggestion_count = 0 AND ${APPLIED} = 0 AND t.dismissed_count = 0`,
@@ -78,7 +81,7 @@ export function triageFilterGroups(c: TriageConfig, o: { untriaged?: boolean } =
     {
       label: 'Triage status',
       options: [
-        ...(['review', 'applied', 'reviewed', 'nothing', 'queued'] as const).map((s) => ({ value: `s:${s}`, label: TRIAGE_STATES[s].label })),
+        ...(['review', 'partial', 'applied', 'reviewed', 'nothing', 'queued'] as const).map((s) => ({ value: `s:${s}`, label: TRIAGE_STATES[s].label })),
         { value: 's:skipped', label: 'Skipped or failed' },
         ...(o.untriaged ? [{ value: 's:untriaged', label: 'Not triaged' }] : []),
       ],
@@ -142,4 +145,19 @@ export function triageFilter(raw: string | undefined, c: TriageConfig): TriageFi
     };
   }
   return null;
+}
+
+/** The confidence filter: at least one triage action (applied or suggested) at or above this. */
+export const CONFIDENCE_STEPS = [50, 60, 70, 80, 90] as const;
+
+export function confidenceFilter(raw: string | undefined): TriageFilter | null {
+  const min = Number(raw);
+  if (!(CONFIDENCE_STEPS as readonly number[]).includes(min)) return null;
+  return {
+    value: String(min),
+    untriaged: false,
+    where: () => `(${['suggestions', 'applied_actions']
+      .map((col) => `EXISTS (SELECT 1 FROM json_each(COALESCE(t.${col}, '[]')) a WHERE json_extract(a.value, '$.confidence') >= ${min})`)
+      .join(' OR ')})`,
+  };
 }

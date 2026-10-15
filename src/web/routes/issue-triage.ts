@@ -12,7 +12,7 @@ import { GitHubApiError, type IssueDetail } from '../../github/client.js';
 import { html, raw, type SafeHtml } from '../../lib/html.js';
 import type { IssueTriageRow } from '../../triage/engine.js';
 import { getTriageSettings, parseTriageConfig } from '../../triage/settings.js';
-import { TRIAGE_STATES, triageFilter, triageFilterGroups } from '../../triage/state.js';
+import { CONFIDENCE_STEPS, confidenceFilter, TRIAGE_STATES, triageFilter, triageFilterGroups } from '../../triage/state.js';
 import { setFlash } from '../session.js';
 import type { Web, WorkspaceRequestContext } from '../server.js';
 import { avatar, empty, formatDate, icon, labelTag, linkBtn, notice, pageHeader, pill, segLinks, selectWrap, timeAgo, when } from '../ui.js';
@@ -21,9 +21,9 @@ import { ticketsHeader, triageCard, triageCell } from './tickets.js';
 const PAGE = 50;
 const LIVE_TIMEOUT_MS = 5000;
 
-type Show = 'review' | 'applied' | 'reviewed' | 'nothing' | 'queued' | 'skipped' | 'all';
+type Show = 'review' | 'partial' | 'applied' | 'reviewed' | 'nothing' | 'queued' | 'skipped' | 'all';
 const SHOWS: { key: Show; label: string; where: string }[] = [
-  ...(['review', 'applied', 'reviewed', 'nothing', 'queued'] as const).map((k) => ({ key: k, label: TRIAGE_STATES[k].label, where: triageFilter(`s:${k}`, parseTriageConfig({}))!.where(() => '') })),
+  ...(['review', 'partial', 'applied', 'reviewed', 'nothing', 'queued'] as const).map((k) => ({ key: k, label: TRIAGE_STATES[k].label, where: triageFilter(`s:${k}`, parseTriageConfig({}))!.where(() => '') })),
   { key: 'skipped', label: 'Skipped or failed', where: `t.status IN ('skipped', 'failed')` },
   { key: 'all', label: 'All', where: '1' },
 ];
@@ -33,8 +33,8 @@ type Row = IssueTriageRow & { title: string | null; html_url: string | null; iss
 /** "All issues" and "Triage" inside the Issues tab. */
 export function issuesNav(ctx: WorkspaceRequestContext, current: 'all' | 'triage', toReview?: number): SafeHtml {
   return html`<div class="subnav">${segLinks('Issues', [
-    { href: `${ctx.base}/tickets/issues`, label: 'All issues', current: current === 'all' },
     { href: `${ctx.base}/tickets/issues/triage`, label: 'Opened on GitHub · Triage', count: toReview || undefined, current: current === 'triage' },
+    { href: `${ctx.base}/tickets/issues`, label: 'All issues', current: current === 'all' },
   ])}</div>`;
 }
 
@@ -81,12 +81,13 @@ export function registerIssueTriageRoutes(app: FastifyInstance, web: Web): void 
     if (!ctx) return reply;
     const wid = ctx.workspace.id;
     const b = ctx.base;
-    const q = req.query as { show?: string; page?: string; f?: string };
+    const q = req.query as { show?: string; page?: string; f?: string; conf?: string };
     const show = SHOWS.find((x) => x.key === q.show) ?? SHOWS[0]!;
     const page = Math.max(1, Number.parseInt(q.page ?? '1', 10) || 1);
     const settings = await getTriageSettings(deps.db, wid);
     // More filters: priority, what triage flagged, labels (status is the tabs above).
     const extra = q.f && !q.f.startsWith('s:') ? triageFilter(q.f, settings.config) : null;
+    const confSpec = confidenceFilter(q.conf);
     const { rows: counts } = await deps.db.query<Record<string, number>>(
       `SELECT ${SHOWS.map((x) => `sum(${x.where.replace(/\bt\./g, '')}) AS "${x.key}"`).join(', ')} FROM issue_triage WHERE workspace_id = $1`,
       [wid],
@@ -97,7 +98,7 @@ export function registerIssueTriageRoutes(app: FastifyInstance, web: Web): void 
       params.push(v);
       return `$${params.length}`;
     };
-    const extraSql = extra ? ` AND ${extra.where(bind)}` : '';
+    const extraSql = `${extra ? ` AND ${extra.where(bind)}` : ''}${confSpec ? ` AND ${confSpec.where(bind)}` : ''}`;
     const { rows } = await deps.db.query<Row>(
       `SELECT t.*, x.title, x.html_url, x.state AS issue_state, x.created_at AS opened_at, COALESCE(ir.owner, a.repo_owner) AS owner, COALESCE(ir.name, a.repo_name) AS name
        FROM issue_triage t
@@ -113,6 +114,7 @@ export function registerIssueTriageRoutes(app: FastifyInstance, web: Web): void 
       const s = o.show ?? show.key;
       if (s !== 'review') p.set('show', s);
       if (extra) p.set('f', extra.value);
+      if (confSpec) p.set('conf', confSpec.value);
       if (o.page && o.page > 1) p.set('page', String(o.page));
       const qs = p.toString();
       return `${b}/tickets/issues/triage${qs ? `?${qs}` : ''}`;
@@ -135,6 +137,7 @@ export function registerIssueTriageRoutes(app: FastifyInstance, web: Web): void 
           <div class="toolbar">${segLinks('Show', SHOWS.map((x) => ({ href: link({ show: x.key, page: 1 }), label: x.label, count: count(x.key), current: x.key === show.key })))}
             <form method="get" action="${b}/tickets/issues/triage" class="tools">${show.key !== 'review' ? html`<input type="hidden" name="show" value="${show.key}">` : ''}
               ${selectWrap(html`<select name="f" aria-label="More filters" data-autosubmit><option value="">All priorities and flags</option>${triageFilterGroups(settings.config).filter((g) => g.label !== 'Triage status').map((g) => html`<optgroup label="${g.label}">${g.options.map((o) => html`<option value="${o.value}" ${o.value === extra?.value ? raw('selected') : ''}>${o.label}</option>`)}</optgroup>`)}</select>`, { sm: true })}
+              ${selectWrap(html`<select name="conf" aria-label="Filter by triage confidence" data-autosubmit><option value="">Any confidence</option>${CONFIDENCE_STEPS.map((c) => html`<option value="${String(c)}" ${String(c) === confSpec?.value ? raw('selected') : ''}>Confidence ${String(c)}%+</option>`)}</select>`, { sm: true })}
               <button type="submit" class="btn sm nojs">Show</button></form></div>
           <div class="card-b flush">${list.length
             ? html`<ul class="list issues">${list}</ul>`

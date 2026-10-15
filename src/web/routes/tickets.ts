@@ -6,7 +6,7 @@ import { getDiscordConnection, getGitHubConnection, listApps } from '../../domai
 import { GitHubApiError } from '../../github/client.js';
 import { parseIssueBody, type IssueText } from '../../github/issue-content.js';
 import { countByStatus, decryptPayload, getSubmission, listEvents, listSubmissions, type SubmissionFilter } from '../../domain/submissions.js';
-import { TRIAGE_STATES, triageFilter as parseTriageFilter, triageFilterGroups, triageState } from '../../triage/state.js';
+import { CONFIDENCE_STEPS, confidenceFilter, TRIAGE_STATES, triageFilter as parseTriageFilter, triageFilterGroups, triageState } from '../../triage/state.js';
 import { describeAction, triageSummaries, type TriageAction, type TriageResultRow } from '../../triage/engine.js';
 import { actionEffects, actionEffectsShort, actionTitle, priorityTag } from '../triage-view.js';
 import { getTriageSettings, type Priority } from '../../triage/settings.js';
@@ -59,7 +59,12 @@ const VIEW_ONLY_TICKETS = 'You can read tickets. Checking GitHub, retrying, link
 /** Header and tabs shared by every Tickets page. */
 export async function ticketsHeader(web: Web, ctx: WorkspaceRequestContext, tab: TicketsTab, o: { actions?: SafeHtml } = {}): Promise<SafeHtml> {
   const wid = ctx.workspace.id;
-  const [state, conn] = await Promise.all([checkPanel(web.deps, wid, { live: false }), getDiscordConnection(web.deps.db, wid)]);
+  const [state, conn, githubTriage] = await Promise.all([
+    checkPanel(web.deps, wid, { live: false }),
+    getDiscordConnection(web.deps.db, wid),
+    // The Issues tab opens on "Opened on GitHub · Triage" once that's in use.
+    web.deps.db.query(`SELECT 1 FROM triage_settings WHERE workspace_id = $1 AND github_enabled = 1 UNION ALL SELECT 1 FROM issue_triage WHERE workspace_id = $1 LIMIT 1`, [wid]),
+  ]);
   const status = state.state === 'published'
     ? pill('Live', 'ok')
     : state.state === 'missing'
@@ -72,7 +77,7 @@ export async function ticketsHeader(web: Web, ctx: WorkspaceRequestContext, tab:
   // Moderators see the tabs they've been given (Inbox always).
   const tabList = [
     { href: `${b}/tickets`, label: 'Inbox', current: tab === 'inbox', count: ctx.progress?.attention },
-    can(ctx.membership, 'issues.view') && { href: `${b}/tickets/issues`, label: 'Issues', current: tab === 'issues' },
+    can(ctx.membership, 'issues.view') && { href: githubTriage.rows.length ? `${b}/tickets/issues/triage` : `${b}/tickets/issues`, label: 'Issues', current: tab === 'issues' },
     manage && { href: `${b}/tickets/panel`, label: 'Panel', current: tab === 'panel' },
     manage && { href: `${b}/tickets/types`, label: 'Ticket types', current: tab === 'types' },
     manage && { href: `${b}/tickets/triage`, label: 'Triage', current: tab === 'triage' },
@@ -167,7 +172,7 @@ export function ticketList(base: string, rows: SubmissionRow[], titleOf: (s: Sub
 export type TriageSummary = { status: string; priority: Priority | null; is_duplicate: number; is_spam: number; is_support: number; suggestion_count: number; suggestions?: TriageAction[] | null; applied_count?: number | null; applied_actions?: TriageAction[] | null; dismissed_count?: number | null };
 
 /** The tone of each triage status pill. */
-export const TRIAGE_STATE_TONE = { queued: 'neutral', review: 'warn', applied: 'ok', reviewed: 'closed', nothing: 'neutral', skipped: 'closed', failed: 'danger' } as const;
+export const TRIAGE_STATE_TONE = { queued: 'neutral', review: 'warn', partial: 'warn', applied: 'ok', reviewed: 'closed', nothing: 'neutral', skipped: 'closed', failed: 'danger' } as const;
 
 export { priorityTag };
 
@@ -280,8 +285,8 @@ function eventView(e: EventRow, s: SubmissionRow, names: Map<string, string>): {
 
 type RepoOf = Pick<SubmissionRow, 'repo_owner' | 'repo_name'>;
 
-function triageActionText(a: TriageAction, s: RepoOf): SafeHtml {
-  return html`<span class="grow">${actionTitle(a, { owner: s.repo_owner, name: s.repo_name })}</span><span class="xs muted num" title="Claude’s confidence">${String(a.confidence)}%</span>`;
+function triageActionText(a: TriageAction, s: RepoOf, o: { applied?: boolean } = {}): SafeHtml {
+  return html`<span class="grow">${actionTitle(a, { owner: s.repo_owner, name: s.repo_name }, o)}</span><span class="xs muted num" title="Claude’s confidence">${String(a.confidence)}%</span>`;
 }
 
 function issueLink(s: RepoOf, n: number): SafeHtml {
@@ -311,7 +316,7 @@ export function triageCard(t: Omit<TriageResultRow, 'submission_id'>, s: RepoOf,
     const suggestions = t.suggestions ?? [];
     content = html`
       ${t.verdict?.summary ? html`<p class="small tri-summary">${t.verdict.summary}${t.verdict.version ? html`<span class="muted"> · version ${t.verdict.version}</span>` : ''}</p>` : ''}
-      ${applied.map((a) => html`<div class="tri-row tri-suggest">${icon('circle-check', 14, 'ok')}${triageActionText(a, s)}
+      ${applied.map((a) => html`<div class="tri-row tri-suggest">${icon('circle-check', 14, 'ok')}${triageActionText(a, s, { applied: true })}
         <details class="tri-more"><summary>${icon('chevron-right', 14, 'chev')}What was done<span class="muted"> · ${actionEffectsShort(a)}</span></summary>${actionEffects(a, { done: true })}</details></div>`)}
       ${suggestions.map((a) => html`<div class="tri-row tri-suggest">${icon('circle-help', 14, 'warn')}${triageActionText(a, s)}
         <details class="tri-more" ${suggestions.length <= 2 ? raw('open') : ''}><summary>${icon('chevron-right', 14, 'chev')}What Apply does<span class="muted"> · ${actionEffectsShort(a)}</span></summary>${actionEffects(a)}</details>
@@ -397,7 +402,7 @@ export function registerTicketRoutes(app: FastifyInstance, web: Web): void {
     if (!ctx) return reply;
     const wid = ctx.workspace.id;
     const b = ctx.base;
-    const q = req.query as { status?: string; q?: string; page?: string; app?: string; type?: string; triage?: string };
+    const q = req.query as { status?: string; q?: string; page?: string; app?: string; type?: string; triage?: string; conf?: string };
     const [counts, apps, types] = await Promise.all([countByStatus(deps.db, wid), listApps(deps.db, wid), listTicketTypes(deps.db, wid)]);
     const n = {
       attention: counts.failed + counts.uncertain,
@@ -416,8 +421,10 @@ export function registerTicketRoutes(app: FastifyInstance, web: Web): void {
     const triageOn = triageSettings.enabled || (await deps.db.query('SELECT 1 FROM triage_results WHERE workspace_id = $1 LIMIT 1', [wid])).rows.length > 0;
     const triageSpec = triageOn ? parseTriageFilter(q.triage, triageSettings.config) : null;
     const triageFilter = triageSpec?.value;
+    const confSpec = triageOn ? confidenceFilter(q.conf) : null;
+    const conf = confSpec?.value;
     const { rows, total } = await listSubmissions(deps.db, wid, {
-      triage: triageSpec ?? undefined,
+      triage: [triageSpec, confSpec].filter((x) => x !== null),
       status: filter.status,
       search: search || undefined,
       appId,
@@ -430,15 +437,15 @@ export function registerTicketRoutes(app: FastifyInstance, web: Web): void {
     const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
     const link = (p: Record<string, string | number | undefined>) => {
       const params = new URLSearchParams();
-      const merged = { status: filter.key, q: search || undefined, app: appId, type: typeName, triage: triageFilter, ...p };
+      const merged = { status: filter.key, q: search || undefined, app: appId, type: typeName, triage: triageFilter, conf, ...p };
       for (const [k, v] of Object.entries(merged)) if (v !== undefined && v !== '') params.set(k, String(v));
       return `${b}/tickets?${params.toString()}`;
     };
-    const filtered = Boolean(search || appId || typeName || triageFilter);
+    const filtered = Boolean(search || appId || typeName || triageFilter || conf);
     const emptyState = rows.length
       ? ''
       : filtered
-        ? empty('search-x', 'No tickets match these filters', 'Try another search, app, type or triage filter.', linkBtn(link({ q: undefined, app: undefined, type: undefined, triage: undefined, page: undefined }), 'Clear filters'))
+        ? empty('search-x', 'No tickets match these filters', 'Try another search, app, type or triage filter.', linkBtn(link({ q: undefined, app: undefined, type: undefined, triage: undefined, conf: undefined, page: undefined }), 'Clear filters'))
         : filter.key === 'attention'
           ? empty('circle-check', 'All caught up', 'No tickets need attention.', linkBtn(link({ status: 'all', page: undefined }), 'View all tickets', { variant: 'ghost' }), 'ok')
           : n.all === 0
@@ -458,6 +465,7 @@ export function registerTicketRoutes(app: FastifyInstance, web: Web): void {
               ${selectWrap(html`<select name="app" aria-label="Filter by app" data-autosubmit><option value="">All apps</option>${apps.map((a) => html`<option value="${a.id}" ${a.id === appId ? raw('selected') : ''}>${a.name}</option>`)}</select>`, { sm: true })}
               ${types.length ? selectWrap(html`<select name="type" aria-label="Filter by type" data-autosubmit><option value="">All types</option>${types.map((t) => html`<option value="${t.name}" ${t.name === typeName ? raw('selected') : ''}>${t.name}</option>`)}</select>`, { sm: true }) : ''}
               ${triageOn ? selectWrap(html`<select name="triage" aria-label="Filter by triage" data-autosubmit><option value="">All triage</option>${triageFilterGroups(triageSettings.config, { untriaged: true }).map((g) => html`<optgroup label="${g.label}">${g.options.map((o) => html`<option value="${o.value}" ${o.value === triageFilter ? raw('selected') : ''}>${o.label}</option>`)}</optgroup>`)}</select>`, { sm: true }) : ''}
+              ${triageOn ? selectWrap(html`<select name="conf" aria-label="Filter by triage confidence" data-autosubmit><option value="">Any confidence</option>${CONFIDENCE_STEPS.map((c) => html`<option value="${String(c)}" ${String(c) === conf ? raw('selected') : ''}>Confidence ${String(c)}%+</option>`)}</select>`, { sm: true }) : ''}
             </div>
             <button type="submit" class="btn sm nojs">Apply</button>
           </form>

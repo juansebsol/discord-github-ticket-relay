@@ -237,7 +237,7 @@ export interface TriageFilterSql {
 export async function listSubmissions(
   q: Queryable,
   workspaceId: string,
-  opts: { status?: SubmissionFilter; search?: string; appId?: string; ticketType?: string; triage?: TriageFilterSql; limit: number; offset: number },
+  opts: { status?: SubmissionFilter; search?: string; appId?: string; ticketType?: string; triage?: TriageFilterSql[]; limit: number; offset: number },
 ): Promise<{ rows: SubmissionRow[]; total: number }> {
   const where = ['workspace_id = $1'];
   const params: unknown[] = [workspaceId];
@@ -255,14 +255,14 @@ export async function listSubmissions(
     params.push(opts.ticketType);
     where.push(`ticket_type_name = $${params.length}`);
   }
-  if (opts.triage) {
+  for (const f of opts.triage ?? []) {
     const bind = (v: unknown) => {
       params.push(v);
       return `$${params.length}`;
     };
-    where.push(opts.triage.untriaged
+    where.push(f.untriaged
       ? `status = 'created' AND NOT EXISTS (SELECT 1 FROM triage_results t WHERE t.submission_id = submissions.id)`
-      : `EXISTS (SELECT 1 FROM triage_results t WHERE t.submission_id = submissions.id AND ${opts.triage.where(bind)})`);
+      : `EXISTS (SELECT 1 FROM triage_results t WHERE t.submission_id = submissions.id AND ${f.where(bind)})`);
   }
   if (opts.search) {
     params.push(`%${opts.search.replace(/[%_\\]/g, '\\$&')}%`);
