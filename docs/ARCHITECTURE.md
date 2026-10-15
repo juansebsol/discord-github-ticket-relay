@@ -40,7 +40,8 @@ Discord endpoint, OAuth), one or more queue workers, and an optional triage work
   suggestions too). The worker only takes re-run items when no new ticket is waiting, one at a
   time, and a run waits instead of failing when Claude rate-limits it or when the
   installation's GitHub budget drops below a reserve (a fifth of the hourly limit, at least
-  500 calls), so filing always has room.
+  500 calls), so filing always has room. Every step is written to `triage_log` (kept 90 days), shown
+  live in Triage › Activity with the queues and what the worker is doing.
 - **No Discord gateway.** The bot is driven entirely by Discord's HTTP interactions endpoint and
   REST API. It needs no privileged intents and no slash-command registration.
 - **GitHub App auth.** Short-lived installation tokens are minted from the app's private key

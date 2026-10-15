@@ -5,7 +5,8 @@ import { can } from '../../domain/permissions.js';
 import { getDiscordConnection, getGitHubConnection, listApps } from '../../domain/store.js';
 import { GitHubApiError } from '../../github/client.js';
 import { parseIssueBody, type IssueText } from '../../github/issue-content.js';
-import { countByStatus, decryptPayload, getSubmission, listEvents, listSubmissions, type SubmissionFilter, type TriageFilter } from '../../domain/submissions.js';
+import { countByStatus, decryptPayload, getSubmission, listEvents, listSubmissions, type SubmissionFilter } from '../../domain/submissions.js';
+import { TRIAGE_STATES, triageFilter as parseTriageFilter, triageFilterGroups, triageState } from '../../triage/state.js';
 import { describeAction, triageSummaries, type TriageAction, type TriageResultRow } from '../../triage/engine.js';
 import { actionEffects, actionEffectsShort, actionTitle, priorityTag } from '../triage-view.js';
 import { getTriageSettings, type Priority } from '../../triage/settings.js';
@@ -163,21 +164,27 @@ export function ticketList(base: string, rows: SubmissionRow[], titleOf: (s: Sub
       <span class="l2">${o.triage ? triageCell(o.triage.get(v.s.id), true) : ''}${[appLine(v.s), v.s.reporter_display_name, timeAgo(v.s.updated_at)].filter(Boolean).join(' · ')}</span></a></li>`)}</ul>`;
 }
 
-export type TriageSummary = { status: string; priority: Priority | null; is_duplicate: number; is_spam: number; is_support: number; suggestion_count: number; suggestions?: TriageAction[] | null };
+export type TriageSummary = { status: string; priority: Priority | null; is_duplicate: number; is_spam: number; is_support: number; suggestion_count: number; suggestions?: TriageAction[] | null; applied_count?: number | null; applied_actions?: TriageAction[] | null; dismissed_count?: number | null };
+
+/** The tone of each triage status pill. */
+export const TRIAGE_STATE_TONE = { queued: 'neutral', review: 'warn', applied: 'ok', reviewed: 'closed', nothing: 'neutral', skipped: 'closed', failed: 'danger' } as const;
 
 export { priorityTag };
 
 /** Priority and flags from triage, for the inbox. */
 export function triageCell(t: TriageSummary | undefined, compact = false): SafeHtml | string {
-  if (!t || t.status !== 'done') return compact ? '' : html`<span class="em">—</span>`;
+  if (!t) return compact ? '' : html`<span class="em">—</span>`;
+  const state = triageState(t);
+  const tip = state === 'review'
+    ? (t.suggestions ?? []).map((a) => `Suggested: ${describeAction(a)} (${actionEffectsShort(a)})`).join('\n') || TRIAGE_STATES.review.desc
+    : TRIAGE_STATES[state].desc;
   const parts = [
+    tag(html`<span class="dot s-${state}" aria-hidden="true"></span>${TRIAGE_STATES[state].label}`, { title: tip }),
     t.priority ? priorityTag(t.priority) : '',
     t.is_spam ? tag('Spam') : '',
     t.is_support ? tag('Not a dev issue') : '',
     t.is_duplicate ? tag('Duplicate') : '',
-    t.suggestion_count ? tag('To review', { icon: 'eye', title: (t.suggestions ?? []).map((a) => `Suggested: ${describeAction(a)} (${actionEffectsShort(a)})`).join('\n') || undefined }) : '',
   ].filter(Boolean);
-  if (!parts.length) return compact ? '' : html`<span class="em">—</span>`;
   return html`<span class="tags">${parts}</span>`;
 }
 
@@ -189,13 +196,6 @@ const FILTERS: { key: string; label: string; status?: SubmissionFilter }[] = [
   { key: 'filed', label: 'Filed', status: 'created' },
   { key: 'closed', label: 'Closed', status: 'dismissed' },
   { key: 'all', label: 'All' },
-];
-const TRIAGE_OPTIONS: { value: TriageFilter; label: string }[] = [
-  { value: 'review', label: 'To review' },
-  { value: 'high', label: 'High priority' },
-  { value: 'duplicate', label: 'Duplicates' },
-  { value: 'support', label: 'Not a development issue' },
-  { value: 'spam', label: 'Spam' },
 ];
 
 /** Old status filter values still work in bookmarked links. */
@@ -303,9 +303,8 @@ function duplicateNote(t: Pick<TriageResultRow, 'verdict'>, s: RepoOf): SafeHtml
 /** What triage decided for this ticket, with Apply and Dismiss for suggestions. */
 /** What triage decided, with Apply and Dismiss for suggestions (tickets, and issues opened on GitHub). */
 export function triageCard(t: Omit<TriageResultRow, 'submission_id'>, s: RepoOf, o: { act: boolean; csrf: string; actionBase: string }): SafeHtml {
-  const status = t.status === 'done'
-    ? (t.suggestion_count ? pill('To review', 'warn') : pill('Triaged', 'ok'))
-    : t.status === 'pending' ? pill('Queued', 'neutral') : t.status === 'skipped' ? pill('Skipped', 'closed') : pill('Failed', 'danger');
+  const state = triageState(t);
+  const status = pill(TRIAGE_STATES[state].label, TRIAGE_STATE_TONE[state]);
   let content: SafeHtml;
   if (t.status === 'done') {
     const applied = t.applied_actions ?? [];
@@ -413,10 +412,12 @@ export function registerTicketRoutes(app: FastifyInstance, web: Web): void {
     const appId = apps.some((a) => a.id === q.app) ? q.app : undefined;
     const typeName = types.some((t) => t.name === q.type) ? q.type : undefined;
     const page = Math.max(1, Number(q.page) || 1);
-    const triageOn = (await getTriageSettings(deps.db, wid)).enabled || (await deps.db.query('SELECT 1 FROM triage_results WHERE workspace_id = $1 LIMIT 1', [wid])).rows.length > 0;
-    const triageFilter = triageOn && TRIAGE_OPTIONS.some((o) => o.value === q.triage) ? (q.triage as TriageFilter) : undefined;
+    const triageSettings = await getTriageSettings(deps.db, wid);
+    const triageOn = triageSettings.enabled || (await deps.db.query('SELECT 1 FROM triage_results WHERE workspace_id = $1 LIMIT 1', [wid])).rows.length > 0;
+    const triageSpec = triageOn ? parseTriageFilter(q.triage, triageSettings.config) : null;
+    const triageFilter = triageSpec?.value;
     const { rows, total } = await listSubmissions(deps.db, wid, {
-      triage: triageFilter,
+      triage: triageSpec ?? undefined,
       status: filter.status,
       search: search || undefined,
       appId,
@@ -456,7 +457,7 @@ export function registerTicketRoutes(app: FastifyInstance, web: Web): void {
             <div class="row filter-selects" id="ticket-filters">
               ${selectWrap(html`<select name="app" aria-label="Filter by app" data-autosubmit><option value="">All apps</option>${apps.map((a) => html`<option value="${a.id}" ${a.id === appId ? raw('selected') : ''}>${a.name}</option>`)}</select>`, { sm: true })}
               ${types.length ? selectWrap(html`<select name="type" aria-label="Filter by type" data-autosubmit><option value="">All types</option>${types.map((t) => html`<option value="${t.name}" ${t.name === typeName ? raw('selected') : ''}>${t.name}</option>`)}</select>`, { sm: true }) : ''}
-              ${triageOn ? selectWrap(html`<select name="triage" aria-label="Filter by triage" data-autosubmit><option value="">All triage</option>${TRIAGE_OPTIONS.map((o) => html`<option value="${o.value}" ${o.value === triageFilter ? raw('selected') : ''}>${o.label}</option>`)}</select>`, { sm: true }) : ''}
+              ${triageOn ? selectWrap(html`<select name="triage" aria-label="Filter by triage" data-autosubmit><option value="">All triage</option>${triageFilterGroups(triageSettings.config, { untriaged: true }).map((g) => html`<optgroup label="${g.label}">${g.options.map((o) => html`<option value="${o.value}" ${o.value === triageFilter ? raw('selected') : ''}>${o.label}</option>`)}</optgroup>`)}</select>`, { sm: true }) : ''}
             </div>
             <button type="submit" class="btn sm nojs">Apply</button>
           </form>

@@ -157,6 +157,8 @@ export interface TriageResultRow {
   is_spam: number;
   is_support: number;
   suggestion_count: number;
+  /** Suggestions someone dismissed (Reviewed vs Nothing to do). */
+  dismissed_count: number;
   skip_reason: string | null;
   error: string | null;
   input_tokens: number | null;
@@ -488,6 +490,9 @@ export interface RunItemRow {
   completed_at: Date | null;
 }
 
+/** What applying one re-run result did. */
+type CommitResult = { status: 'done' | 'skipped' | 'failed'; note: string | null; applied?: TriageAction[]; suggested?: TriageAction[]; inbox?: boolean; ref?: string };
+
 /** Most tickets in one run (each one is a Claude call; the monthly limit applies too). */
 export const MAX_RERUN = 10_000;
 
@@ -643,6 +648,90 @@ async function isTicketIssue(q: Queryable, repoId: number, number: number): Prom
   return rows.length > 0;
 }
 
+// ---- Activity log (Triage › Activity) ------------------------------------------------------
+
+/** Where an entry comes from: a new ticket, a new GitHub issue, a re-run (preview or applying), or someone reviewing. */
+export type LogSource = 'ticket' | 'github' | 'preview' | 'rerun' | 'review';
+export type LogResult = 'ok' | 'failed' | 'skipped' | 'info';
+
+export interface LogDetail {
+  applied?: TriageAction[];
+  suggested?: TriageAction[];
+  /** A preview: what would be applied automatically. */
+  auto?: TriageAction[];
+  dismissed?: TriageAction[];
+  /** Applied to the inbox only (everything became a suggestion). */
+  inbox?: boolean;
+  toldMember?: boolean;
+}
+
+export interface LogEntry {
+  workspaceId: string;
+  source: LogSource;
+  result: LogResult;
+  submissionId?: string | null;
+  repoId?: number | null;
+  number?: number | null;
+  ref?: string | null;
+  runId?: string | null;
+  by?: string | null;
+  message?: string | null;
+  detail?: LogDetail;
+}
+
+/** Days the activity log is kept. */
+export const LOG_DAYS = 90;
+
+/** Adds an entry to the activity log. Never throws: the log can't stop triage. */
+export async function writeTriageLog(q: Queryable, e: LogEntry): Promise<void> {
+  try {
+    await q.query(
+      `INSERT INTO triage_log (workspace_id, source, result, submission_id, repo_id, number, ref, run_id, by_user, message, detail)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+      [e.workspaceId, e.source, e.result, e.submissionId ?? null, e.repoId ?? null, e.number ?? null, e.ref ?? null, e.runId ?? null, e.by ?? null, e.message ? e.message.slice(0, 500) : null, e.detail ?? {}],
+    );
+  } catch {
+    // Best effort.
+  }
+}
+
+/** The log fields that say what an entry is about. */
+function aboutSubject(subject: Subject): Pick<LogEntry, 'submissionId' | 'repoId' | 'number'> {
+  return subject.kind === 'ticket' ? { submissionId: subject.submissionId } : { repoId: subject.repoId, number: subject.number };
+}
+
+/** What triage is doing now (Triage › Activity). */
+export interface ActivityNow {
+  queued: { tickets: number; issues: number; evaluate: number; apply: number };
+  working: { kind: 'ticket' | 'issue' | 'rerun'; submission_id: string | null; repo_id: number | null; number: number | null; run_id: string | null; job: string | null }[];
+  runs: (TriageRunRow & { pending: number; applying: number })[];
+  /** When the triage worker process last reported in (null if never). */
+  workerSeenAt: Date | null;
+}
+
+/** A log entry with what's needed to show it. */
+export interface LogRow {
+  id: number;
+  workspace_id: string;
+  at: Date;
+  source: LogSource;
+  result: LogResult;
+  submission_id: string | null;
+  repo_id: number | null;
+  number: number | null;
+  ref: string | null;
+  run_id: string | null;
+  by_user: string | null;
+  message: string | null;
+  detail: LogDetail;
+  ticket_ref: string | null;
+  title: string | null;
+  owner: string | null;
+  name: string | null;
+  issue_number: number | null;
+  run_name: string | null;
+}
+
 /** Records what happened to an issue's triage, for its page in the console. */
 export async function addIssueEvent(q: Queryable, triageId: string, kind: string, detail: Record<string, unknown>): Promise<void> {
   await q.query('INSERT INTO issue_triage_events (triage_id, kind, detail) VALUES ($1, $2, $3)', [triageId, kind, detail]);
@@ -720,12 +809,24 @@ export class TriageEngine {
     );
   }
 
-  private skip(row: AnyResultRow, reason: string, extra: Record<string, unknown> = {}, store: StoreName = 'tickets') {
-    return this.finish(row, { status: 'skipped', skip_reason: reason, completed_at: new Date(), ...extra }, store);
+  /** Log fields for a queued ticket or GitHub issue. */
+  private rowLog(row: AnyResultRow, store: StoreName): Pick<LogEntry, 'workspaceId' | 'source' | 'submissionId' | 'repoId' | 'number'> {
+    return store === 'tickets'
+      ? { workspaceId: row.workspace_id, source: 'ticket', submissionId: (row as TriageResultRow).submission_id }
+      : { workspaceId: row.workspace_id, source: 'github', repoId: (row as IssueTriageRow).repo_id, number: (row as IssueTriageRow).number };
   }
 
-  private retry(row: AnyResultRow, message: string, store: StoreName = 'tickets') {
-    if (row.attempts > RETRY_DELAYS.length) return this.finish(row, { status: 'failed', error: message, completed_at: new Date() }, store);
+  private async skip(row: AnyResultRow, reason: string, extra: Record<string, unknown> = {}, store: StoreName = 'tickets') {
+    await this.finish(row, { status: 'skipped', skip_reason: reason, completed_at: new Date(), ...extra }, store);
+    await writeTriageLog(this.deps.db, { ...this.rowLog(row, store), result: 'skipped', message: reason });
+  }
+
+  private async retry(row: AnyResultRow, message: string, store: StoreName = 'tickets') {
+    if (row.attempts > RETRY_DELAYS.length) {
+      await this.finish(row, { status: 'failed', error: message, completed_at: new Date() }, store);
+      await writeTriageLog(this.deps.db, { ...this.rowLog(row, store), result: 'failed', message: `Gave up after ${row.attempts} tries: ${message}` });
+      return;
+    }
     return this.finish(row, { status: 'pending', error: message, next_attempt_at: new Date(Date.now() + RETRY_DELAYS[row.attempts - 1]! * 1000) }, store);
   }
 
@@ -777,6 +878,7 @@ export class TriageEngine {
     const detail = { applied: applied.map(describeAction), suggested: suggested.map(describeAction), told_member: toldMember };
     if (ticket) await addEvent(deps.db, ticket.id, 'triage_done', detail);
     else await addIssueEvent(deps.db, (row as IssueTriageRow).id, 'triage_done', detail);
+    await writeTriageLog(deps.db, { ...this.rowLog(row, store), ref: e.target.ref, result: error ? 'failed' : 'ok', message: error ? `${error}. Kept as suggestions.` : null, detail: { applied, suggested, toldMember } });
     deps.log.info({ [ticket ? 'submission' : 'issue']: e.target.ref, applied: applied.length, suggested: suggested.length }, ticket ? 'ticket triaged' : 'GitHub issue triaged');
   }
 
@@ -1038,29 +1140,33 @@ export class TriageEngine {
     const { row, action, rest } = await this.reviewTarget(workspaceId, submissionId, kind);
     const sub = await getSubmission(this.deps.db, workspaceId, submissionId);
     if (!sub || sub.status !== 'created') throw new UserFacingError('The ticket is no longer filed on GitHub.');
+    const about = { workspaceId, source: 'review' as const, submissionId, ref: sub.ref, by: userId };
     try {
       await applyToGitHub(this.deps, sub, [action]);
     } catch (err) {
+      await writeTriageLog(this.deps.db, { ...about, result: 'failed', message: `GitHub didn’t accept the change: ${githubMessage(err)}`, detail: { suggested: [action] } });
       throw new UserFacingError(`GitHub didn’t accept the change (${githubMessage(err)}). Try again in a moment.`, 502);
     }
     await this.saveReview(row, rest, [...(row.applied_actions ?? []), action]);
     const told = await tellMember(this.deps, sub, [action]);
     await addEvent(this.deps.db, submissionId, 'triage_applied', { by: userId, actions: [describeAction(action)], told_member: told });
+    await writeTriageLog(this.deps.db, { ...about, result: 'ok', detail: { applied: [action], toldMember: told } });
     return action;
   }
 
   async dismissSuggestion(workspaceId: string, submissionId: string, kind: string, userId: string): Promise<TriageAction> {
     const { row, action, rest } = await this.reviewTarget(workspaceId, submissionId, kind);
-    await this.saveReview(row, rest, row.applied_actions ?? []);
+    await this.saveReview(row, rest, row.applied_actions ?? [], 'tickets', 1);
     await addEvent(this.deps.db, submissionId, 'triage_dismissed', { by: userId, actions: [describeAction(action)] });
+    await writeTriageLog(this.deps.db, { workspaceId, source: 'review', submissionId, by: userId, result: 'ok', detail: { dismissed: [action] } });
     return action;
   }
 
-  private async saveReview(row: AnyResultRow, suggestions: TriageAction[], applied: TriageAction[], store: StoreName = 'tickets') {
+  private async saveReview(row: AnyResultRow, suggestions: TriageAction[], applied: TriageAction[], store: StoreName = 'tickets', dismissed = 0) {
     const { table, key } = STORES[store];
     await this.deps.db.query(
-      `UPDATE ${table} SET suggestions = $2, applied_actions = $3, suggestion_count = $4, updated_at = now_ms() WHERE ${key} = $1`,
-      [keyOf(store, row), suggestions, applied, suggestions.length],
+      `UPDATE ${table} SET suggestions = $2, applied_actions = $3, suggestion_count = $4, dismissed_count = dismissed_count + $5, updated_at = now_ms() WHERE ${key} = $1`,
+      [keyOf(store, row), suggestions, applied, suggestions.length, dismissed],
     );
   }
 
@@ -1083,20 +1189,24 @@ export class TriageEngine {
     const { row, action, rest } = await this.issueReviewTarget(workspaceId, repoId, number, kind);
     const target = await this.issueTarget(workspaceId, repoId, number);
     if (!target) throw new UserFacingError('This repository isn’t connected any more.');
+    const about = { workspaceId, source: 'review' as const, repoId, number, ref: target.ref, by: userId };
     try {
       await applyToGitHub(this.deps, target, [action]);
     } catch (err) {
+      await writeTriageLog(this.deps.db, { ...about, result: 'failed', message: `GitHub didn’t accept the change: ${githubMessage(err)}`, detail: { suggested: [action] } });
       throw new UserFacingError(`GitHub didn’t accept the change (${githubMessage(err)}). Try again in a moment.`, 502);
     }
     await this.saveReview(row, rest, [...(row.applied_actions ?? []), action], 'issues');
     await addIssueEvent(this.deps.db, row.id, 'triage_applied', { by: userId, actions: [describeAction(action)] });
+    await writeTriageLog(this.deps.db, { ...about, result: 'ok', detail: { applied: [action] } });
     return action;
   }
 
   async dismissIssueSuggestion(workspaceId: string, repoId: number, number: number, kind: string, userId: string): Promise<TriageAction> {
     const { row, action, rest } = await this.issueReviewTarget(workspaceId, repoId, number, kind);
-    await this.saveReview(row, rest, row.applied_actions ?? [], 'issues');
+    await this.saveReview(row, rest, row.applied_actions ?? [], 'issues', 1);
     await addIssueEvent(this.deps.db, row.id, 'triage_dismissed', { by: userId, actions: [describeAction(action)] });
+    await writeTriageLog(this.deps.db, { workspaceId, source: 'review', repoId, number, by: userId, result: 'ok', detail: { dismissed: [action] } });
     return action;
   }
 
@@ -1114,6 +1224,13 @@ export class TriageEngine {
    * triage would do; an "apply" run applies it like normal triage. One run at a time.
    */
   async startRun(workspaceId: string, userId: string, o: { mode: 'preview' | 'apply'; name: string | null; scope: RerunScope }): Promise<TriageRunRow> {
+    const run = await this.startRunInner(workspaceId, userId, o);
+    const items = (run.scope.limit ?? 0) < (run.scope.matched ?? 0) ? run.scope.limit : run.scope.matched;
+    await writeTriageLog(this.deps.db, { workspaceId, source: run.mode === 'preview' ? 'preview' : 'rerun', result: 'info', runId: run.id, by: userId, message: `Re-run started (${run.mode === 'preview' ? 'preview' : 'applying right away'}): ${items ?? 0} queued` });
+    return run;
+  }
+
+  private async startRunInner(workspaceId: string, userId: string, o: { mode: 'preview' | 'apply'; name: string | null; scope: RerunScope }): Promise<TriageRunRow> {
     const { db } = this.deps;
     const settings = await getTriageSettings(db, workspaceId);
     const source = o.scope.source ?? 'tickets';
@@ -1217,20 +1334,22 @@ export class TriageEngine {
   }
 
   /** Stops applying a preview: tickets not reached yet go back to not applied, so they can be applied later. */
-  async stopApplying(workspaceId: string, runId: string): Promise<number> {
+  async stopApplying(workspaceId: string, runId: string, userId: string | null = null): Promise<number> {
     if (!(await this.getRun(workspaceId, runId))) throw new UserFacingError('That re-run wasn’t found.', 404);
     const res = await this.deps.db.query(`UPDATE triage_run_items SET apply_status = NULL, apply_suggestions = 0, apply_inbox_only = 0 WHERE run_id = $1 AND apply_status = 'pending' AND (lease_until_at IS NULL OR lease_until_at < now_ms())`, [runId]);
+    await writeTriageLog(this.deps.db, { workspaceId, source: 'rerun', result: 'info', runId, by: userId, message: `Applying stopped: ${res.rowCount} not applied (they can be applied later)` });
     return res.rowCount;
   }
 
   /** Stops a running re-run; tickets not reached yet are skipped. Results so far are kept. */
-  async cancelRun(workspaceId: string, runId: string): Promise<void> {
+  async cancelRun(workspaceId: string, runId: string, userId: string | null = null): Promise<void> {
     await this.deps.db.transaction(async (tx) => {
       const res = await tx.query(`UPDATE triage_runs SET status = 'cancelled', finished_at = now_ms() WHERE workspace_id = $1 AND id = $2 AND status = 'running'`, [workspaceId, runId]);
       if (!res.rowCount) throw new UserFacingError('That re-run already finished.', 409);
       await tx.query(`UPDATE triage_run_items SET status = 'skipped', note = 'Stopped before this ticket', lease_until_at = NULL WHERE run_id = $1 AND status = 'pending'`, [runId]);
       await tx.query(`UPDATE triage_run_items SET apply_status = 'skipped', apply_note = 'Stopped before this ticket' WHERE run_id = $1 AND apply_status = 'pending'`, [runId]);
     });
+    await writeTriageLog(this.deps.db, { workspaceId, source: 'preview', result: 'info', runId, by: userId, message: 'Re-run stopped: tickets not reached yet are skipped' });
   }
 
   async deleteRun(workspaceId: string, runId: string): Promise<void> {
@@ -1262,6 +1381,8 @@ export class TriageEngine {
     );
     if (!res.rowCount) throw new UserFacingError('There’s nothing left to apply here.', 409);
     await db.query('UPDATE triage_runs SET applied_at = now_ms(), applied_by = $2 WHERE id = $1', [runId, userId]);
+    const how = o.mode === 'inbox' ? 'to the inbox only (as suggestions)' : o.mode === 'all' ? 'on GitHub, suggestions included' : 'on GitHub (automatic actions)';
+    await writeTriageLog(db, { workspaceId, source: 'rerun', result: 'info', runId, by: userId, message: `Applying ${res.rowCount} result${res.rowCount === 1 ? '' : 's'} ${how}, one at a time` });
     return res.rowCount;
   }
 
@@ -1302,6 +1423,9 @@ export class TriageEngine {
     await db.query('UPDATE triage_runs SET waiting_until_at = $2, waiting_reason = $3 WHERE id = $1', [run.id, until, reason]);
     await db.query('UPDATE triage_run_items SET lease_until_at = NULL, attempts = $3 WHERE run_id = $1 AND subject = $2', [run.id, item.subject, uncount ? Math.max(0, item.attempts - 1) : item.attempts]);
     this.deps.log.info({ run: run.id, until, reason }, 're-run waiting for a rate limit');
+    if (!run.waiting_until_at || run.waiting_until_at.getTime() <= Date.now()) {
+      await writeTriageLog(db, { workspaceId: run.workspace_id, source: run.mode === 'preview' ? 'preview' : 'rerun', result: 'info', runId: run.id, message: reason === 'github' ? `Waiting until ${until.toISOString().slice(11, 16)} UTC for GitHub’s hourly limit, so new tickets can still be filed` : `Claude asked to slow down; waiting until ${until.toISOString().slice(11, 16)} UTC` });
+    }
   }
 
   async processRunItem(claimed: { item: RunItemRow; job: 'evaluate' | 'apply' }): Promise<void> {
@@ -1314,7 +1438,12 @@ export class TriageEngine {
       const entries = Object.entries({ ...fields, lease_until_at: null });
       return db.query(`UPDATE triage_run_items SET ${entries.map(([k], i) => `${k} = $${i + 3}`).join(', ')} WHERE run_id = $1 AND subject = $2`, [item.run_id, item.subject, ...entries.map(([, v]) => v)]);
     };
-    const applied = (r: { status: string; note: string | null }) => set({ apply_status: r.status, apply_note: r.note, apply_done_at: new Date() });
+    const about = { workspaceId: run.workspace_id, runId: run.id, ...aboutSubject(subjectOfItem(item)) };
+    const evalSource: LogSource = run.mode === 'preview' ? 'preview' : 'rerun';
+    const applied = async (r: CommitResult) => {
+      await set({ apply_status: r.status, apply_note: r.note, apply_done_at: new Date() });
+      await writeTriageLog(db, { ...about, source: 'rerun', ref: r.ref ?? null, result: r.status === 'done' ? 'ok' : r.status, message: r.note, detail: { applied: r.applied, suggested: r.suggested, inbox: r.inbox } });
+    };
     try {
       // Filing and normal triage share GitHub's hourly budget: leave them room.
       const conn = await getGitHubConnection(db, run.workspace_id);
@@ -1328,18 +1457,23 @@ export class TriageEngine {
         return;
       }
       const out = await this.evaluate(run.workspace_id, subjectOfItem(item), run.config_used);
-      if (out.status === 'skip') await set({ status: 'skipped', note: out.reason, model: out.model ?? null, completed_at: new Date() });
+      if (out.status === 'skip') {
+        await set({ status: 'skipped', note: out.reason, model: out.model ?? null, completed_at: new Date() });
+        await writeTriageLog(db, { ...about, source: evalSource, result: 'skipped', message: out.reason });
+      }
       else if (out.status === 'paused') await set({ attempts: Math.max(0, item.attempts - 1) });
       else if (out.status === 'retry' && out.waitSeconds) await this.waitRun(run, item, new Date(Date.now() + out.waitSeconds * 1000), out.waitFor ?? 'claude', true);
       else if (out.status === 'retry') {
         await set(item.attempts >= RERUN_ATTEMPTS
           ? { status: 'failed', note: out.message, completed_at: new Date() }
           : { note: out.message, next_attempt_at: new Date(Date.now() + 60_000 * item.attempts) });
+        if (item.attempts >= RERUN_ATTEMPTS) await writeTriageLog(db, { ...about, source: evalSource, result: 'failed', message: `Gave up after ${item.attempts} tries: ${out.message}` });
       } else {
         const { e } = out;
         const done: RunItemRow = { ...item, verdict: e.verdict, auto_actions: e.auto, suggestions: e.suggested };
         const change = changeFrom(beforeDecisions(item.before), { auto: e.auto, suggested: e.suggested });
         await set({ status: 'done', note: null, change, verdict: e.verdict, auto_actions: e.auto, suggestions: e.suggested, model: e.config.model, input_tokens: e.inputTokens, output_tokens: e.outputTokens, completed_at: new Date() });
+        if (run.mode === 'preview') await writeTriageLog(db, { ...about, source: 'preview', ref: e.target.ref, result: 'ok', detail: { auto: e.auto, suggested: e.suggested } });
         if (run.mode === 'apply') {
           try {
             await applied(await this.commitItem(run, done, run.created_by, e));
@@ -1358,7 +1492,10 @@ export class TriageEngine {
       }
       this.deps.log.error({ err: (err as Error).message, run: run.id, subject: item.subject }, 're-run failed unexpectedly');
       if (job === 'apply') await applied({ status: 'failed', note: 'Unexpected error' });
-      else await set({ status: 'failed', note: 'Unexpected error', completed_at: new Date() });
+      else {
+        await set({ status: 'failed', note: 'Unexpected error', completed_at: new Date() });
+        await writeTriageLog(db, { ...about, source: evalSource, result: 'failed', message: 'Unexpected error' });
+      }
     } finally {
       await db.query(
         `UPDATE triage_runs SET status = 'done', finished_at = now_ms(), waiting_until_at = NULL, waiting_reason = NULL WHERE id = $1 AND status = 'running'
@@ -1373,7 +1510,7 @@ export class TriageEngine {
    * actions are applied on GitHub and its suggestions replace the old ones. Skipped when
    * something changed since: actions were applied, it's being triaged, or the issue was closed.
    */
-  private async commitItem(run: TriageRunRow, item: RunItemRow, userId: string | null, fresh?: Evaluation): Promise<{ status: 'done' | 'skipped' | 'failed'; note: string | null }> {
+  private async commitItem(run: TriageRunRow, item: RunItemRow, userId: string | null, fresh?: Evaluation): Promise<CommitResult> {
     const { deps } = this;
     const subject = subjectOfItem(item);
     const target: Target | null = fresh?.target
@@ -1427,15 +1564,90 @@ export class TriageEngine {
       );
       if (rows[0]) await addIssueEvent(deps.db, rows[0].id, 'triage_rerun', detail);
     }
-    return error ? { status: 'failed', note: `${error}. Kept as suggestions.` } : { status: 'done', note: null };
+    const did = { applied, suggested, inbox: inboxOnly, ref: target.ref };
+    return error ? { status: 'failed', note: `${error}. Kept as suggestions.`, ...did } : { status: 'done', note: null, ...did };
+  }
+
+  // ---- Activity (Triage › Activity) ---------------------------------------------------------------
+
+  /** Deletes log entries older than LOG_DAYS. */
+  async pruneLog(): Promise<number> {
+    const res = await this.deps.db.query('DELETE FROM triage_log WHERE at < $1', [new Date(Date.now() - LOG_DAYS * 86_400_000)]);
+    return res.rowCount;
+  }
+
+  /** What triage is doing for a workspace right now: queues, what's being worked on, and waits. */
+  async activityNow(workspaceId: string): Promise<ActivityNow> {
+    const { db } = this.deps;
+    const [counts, working, runs, worker] = await Promise.all([
+      db.query<Record<string, number>>(
+        `SELECT
+           (SELECT count(*) FROM triage_results WHERE workspace_id = $1 AND status = 'pending') AS tickets,
+           (SELECT count(*) FROM issue_triage WHERE workspace_id = $1 AND status = 'pending') AS issues,
+           (SELECT count(*) FROM triage_run_items i JOIN triage_runs r ON r.id = i.run_id WHERE r.workspace_id = $1 AND r.status = 'running' AND i.status = 'pending') AS evaluate,
+           (SELECT count(*) FROM triage_run_items i JOIN triage_runs r ON r.id = i.run_id WHERE r.workspace_id = $1 AND i.apply_status = 'pending') AS apply`,
+        [workspaceId],
+      ),
+      db.query<{ kind: 'ticket' | 'issue' | 'rerun'; submission_id: string | null; repo_id: number | null; number: number | null; run_id: string | null; job: string | null }>(
+        `SELECT 'ticket' AS kind, submission_id, NULL AS repo_id, NULL AS number, NULL AS run_id, NULL AS job FROM triage_results WHERE workspace_id = $1 AND status = 'pending' AND lease_until_at > now_ms()
+         UNION ALL SELECT 'issue', NULL, repo_id, number, NULL, NULL FROM issue_triage WHERE workspace_id = $1 AND status = 'pending' AND lease_until_at > now_ms()
+         UNION ALL SELECT 'rerun', i.submission_id, i.gh_repo_id, i.gh_number, i.run_id, CASE WHEN i.status = 'pending' THEN 'evaluate' ELSE 'apply' END
+           FROM triage_run_items i JOIN triage_runs r ON r.id = i.run_id WHERE r.workspace_id = $1 AND i.lease_until_at > now_ms()
+         LIMIT 5`,
+        [workspaceId],
+      ),
+      db.query<TriageRunRow & { pending: number; applying: number }>(
+        `SELECT r.*, (SELECT count(*) FROM triage_run_items i WHERE i.run_id = r.id AND i.status = 'pending') AS pending,
+           (SELECT count(*) FROM triage_run_items i WHERE i.run_id = r.id AND i.apply_status = 'pending') AS applying
+         FROM triage_runs r WHERE r.workspace_id = $1
+           AND (r.status = 'running' OR EXISTS (SELECT 1 FROM triage_run_items i WHERE i.run_id = r.id AND i.apply_status = 'pending'))
+         ORDER BY r.created_at`,
+        [workspaceId],
+      ),
+      db.query<{ seen_at: Date; started_at: Date }>(`SELECT seen_at, started_at FROM process_status WHERE role = 'triage' ORDER BY seen_at DESC LIMIT 1`),
+    ]);
+    const c = counts.rows[0] ?? {};
+    return {
+      queued: { tickets: Number(c.tickets ?? 0), issues: Number(c.issues ?? 0), evaluate: Number(c.evaluate ?? 0), apply: Number(c.apply ?? 0) },
+      working: working.rows,
+      runs: runs.rows.map(withParsedConfig),
+      workerSeenAt: worker.rows[0]?.seen_at ?? null,
+    };
+  }
+
+  /** A page of the activity log, newest first (before: an entry id, for the next page). */
+  async activityLog(workspaceId: string, o: { result?: LogResult | null; source?: LogSource | null; runId?: string | null; before?: number | null; limit: number }): Promise<LogRow[]> {
+    const params: unknown[] = [workspaceId];
+    const bind = (v: unknown) => {
+      params.push(v);
+      return `$${params.length}`;
+    };
+    const where = ['l.workspace_id = $1'];
+    if (o.result) where.push(`l.result = ${bind(o.result)}`);
+    if (o.source) where.push(`l.source = ${bind(o.source)}`);
+    if (o.runId) where.push(`l.run_id = ${bind(o.runId)}`);
+    if (o.before) where.push(`l.id < ${bind(o.before)}`);
+    const { rows } = await this.deps.db.query<LogRow>(
+      `SELECT l.*, s.ref AS ticket_ref, s.repo_id AS ticket_repo_id, COALESCE(x1.title, x2.title) AS title,
+         COALESCE(s.repo_owner, ir.owner) AS owner, COALESCE(s.repo_name, ir.name) AS name, COALESCE(s.issue_number, l.number) AS issue_number, run.name AS run_name
+       FROM triage_log l
+       LEFT JOIN submissions s ON s.id = l.submission_id
+       LEFT JOIN issue_index x1 ON x1.repo_id = s.repo_id AND x1.number = s.issue_number
+       LEFT JOIN issue_index x2 ON x2.repo_id = l.repo_id AND x2.number = l.number
+       LEFT JOIN issue_index_repos ir ON ir.repo_id = l.repo_id
+       LEFT JOIN triage_runs run ON run.id = l.run_id
+       WHERE ${where.join(' AND ')} ORDER BY l.id DESC LIMIT ${bind(o.limit)}`,
+      params,
+    );
+    return rows;
   }
 }
 
 /** Triage summaries for a page of tickets (inbox priority column). */
-export async function triageSummaries(q: Queryable, workspaceId: string, ids: string[]): Promise<Map<string, Pick<TriageResultRow, 'status' | 'priority' | 'is_duplicate' | 'is_spam' | 'is_support' | 'suggestion_count' | 'suggestions'>>> {
+export async function triageSummaries(q: Queryable, workspaceId: string, ids: string[]): Promise<Map<string, Pick<TriageResultRow, 'status' | 'priority' | 'is_duplicate' | 'is_spam' | 'is_support' | 'suggestion_count' | 'suggestions' | 'dismissed_count'> & { applied_count: number }>> {
   if (!ids.length) return new Map();
-  const { rows } = await q.query<TriageResultRow>(
-    'SELECT submission_id, status, priority, is_duplicate, is_spam, is_support, suggestion_count, suggestions FROM triage_results WHERE workspace_id = $1 AND submission_id IN (SELECT value FROM json_each($2))',
+  const { rows } = await q.query<TriageResultRow & { applied_count: number }>(
+    'SELECT submission_id, status, priority, is_duplicate, is_spam, is_support, suggestion_count, suggestions, dismissed_count, json_array_length(COALESCE(applied_actions, \'[]\')) AS applied_count FROM triage_results WHERE workspace_id = $1 AND submission_id IN (SELECT value FROM json_each($2))',
     [workspaceId, ids],
   );
   return new Map(rows.map((r) => [r.submission_id, r]));

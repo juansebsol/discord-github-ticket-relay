@@ -66,7 +66,7 @@ export const MODE_OPTIONS = [
 
 export const MODE_NAMES: Record<Mode, string> = { off: 'Off', suggest: 'Suggest', auto: 'Automatic' };
 
-export type TriagePage = 'actions' | 'labels' | 'prompt' | 'runs';
+export type TriagePage = 'actions' | 'labels' | 'prompt' | 'runs' | 'activity';
 
 /** The Triage tab's sections. */
 export function triageNav(ctx: WorkspaceRequestContext, current: TriagePage, actions?: SafeHtml | null): SafeHtml {
@@ -76,6 +76,7 @@ export function triageNav(ctx: WorkspaceRequestContext, current: TriagePage, act
     { href: `${b}/labels`, label: 'Label groups', current: current === 'labels' },
     { href: `${b}/prompt`, label: 'Prompt', current: current === 'prompt' },
     { href: `${b}/runs`, label: 'Re-run', current: current === 'runs' },
+    { href: `${b}/activity`, label: 'Activity', current: current === 'activity' },
   ])}${actions ? html`<div class="row">${actions}</div>` : ''}</div>`;
 }
 

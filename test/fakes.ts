@@ -60,6 +60,8 @@ export class FakeGitHub {
   listCalls = 0;
   /** Every request made to the fake GitHub. */
   requests = 0;
+  /** Requests to fail once each, matched on "METHOD /path". */
+  failRequests: { match: RegExp; status: number; message: string }[] = [];
   /** Simulates a wrong/rotated private key: every app-JWT call is rejected. */
   rejectAppJwt = false;
   /** GitHub account returned for the user access token from code `good-code`. */
@@ -122,6 +124,11 @@ export class FakeGitHub {
     this.requests++;
     const method = init.method ?? 'GET';
     const path = url.pathname;
+    const fail = this.failRequests.findIndex((f) => f.match.test(`${method} ${path}`));
+    if (fail >= 0) {
+      const f = this.failRequests.splice(fail, 1)[0]!;
+      return json(f.status, { message: f.message });
+    }
     const auth = String((init.headers as Record<string, string>)?.Authorization ?? '');
     const body = init.body ? JSON.parse(String(init.body)) : {};
     let m: RegExpExecArray | null;

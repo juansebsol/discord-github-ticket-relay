@@ -527,6 +527,7 @@ export function registerTriageRunRoutes(app: FastifyInstance, web: Web): void {
         after: [run.mode === 'preview' ? tag('Preview', { icon: 'flask-conical' }) : tag('Applied', { icon: 'play' }), pill(...STATUS_PILL[run.status])],
         description: `${matched > counts.total ? `The newest ${n(counts.total)} of ${n(matched)} matching tickets` : sentence(plural(counts.total, 'ticket').replace(/^\d+/, n(counts.total)))} · ${run.config_used.model} · started by ${run.created_by ? names.get(run.created_by) ?? 'an admin' : 'an admin'} ${timeAgo(run.created_at)}${cost !== null ? ` · ${formatCost(cost)}` : ''}${run.applied_at ? ` · applied by ${run.applied_by ? names.get(run.applied_by) ?? 'an admin' : 'an admin'} ${timeAgo(run.applied_at)}` : ''}`,
         actions: [
+          linkBtn(`${ctx.base}/tickets/triage/activity?run=${run.id}`, 'Activity log', { icon: 'history' }),
           run.status === 'running' ? postBtn(`${b}/cancel`, 'Stop', ctx.csrf, { icon: 'circle-x', confirm: { title: 'Stop this re-run?', body: 'Tickets not reached yet are skipped. Results so far are kept, and you can apply them.', label: 'Stop' } }) : null,
           applying ? postBtn(`${b}/stop-applying`, 'Stop applying', ctx.csrf, { icon: 'circle-x', confirm: { title: 'Stop applying?', body: 'Tickets already applied stay applied. The rest go back to not applied, so you can apply them later.', label: 'Stop applying' } }) : null,
           diff.length ? postBtn(`${b}/use-settings`, 'Use these settings', ctx.csrf, { icon: 'rotate-ccw', confirm: { title: 'Use the settings from this run?', body: 'Your current triage settings (actions, label groups and prompt) are replaced with the ones this run used. New tickets use them right away.', label: 'Use these settings' } }) : null,
@@ -555,7 +556,7 @@ export function registerTriageRunRoutes(app: FastifyInstance, web: Web): void {
     if (!ctx) return reply;
     const rid = (req.params as { rid: string }).rid;
     try {
-      await web.triage.cancelRun(ctx.workspace.id, rid);
+      await web.triage.cancelRun(ctx.workspace.id, rid, ctx.user.id);
       setFlash(reply, 'success', 'Re-run stopped. You can still apply the results it has.');
     } catch (err) {
       if (!(err instanceof UserFacingError)) throw err;
@@ -593,7 +594,7 @@ export function registerTriageRunRoutes(app: FastifyInstance, web: Web): void {
     if (!ctx) return reply;
     const rid = (req.params as { rid: string }).rid;
     try {
-      const count = await web.triage.stopApplying(ctx.workspace.id, rid);
+      const count = await web.triage.stopApplying(ctx.workspace.id, rid, ctx.user.id);
       setFlash(reply, 'success', count ? `Stopped. ${plural(count, 'result').replace(/^\d+/, n(count))} weren’t applied and can be applied later.` : 'Nothing was waiting to be applied.');
     } catch (err) {
       if (!(err instanceof UserFacingError)) throw err;

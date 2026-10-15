@@ -55,7 +55,14 @@ export class TriageWorker {
    * Queues newly filed tickets and new issues opened on GitHub, and triages everything due.
    * Re-runs only use the time left over: new tickets and issues always go first. Exposed for tests.
    */
+  private prunedAt = 0;
+
   async drain(): Promise<number> {
+    // The activity log keeps 90 days; old entries go once an hour.
+    if (Date.now() - this.prunedAt > 3600_000) {
+      this.prunedAt = Date.now();
+      await this.engine.pruneLog().catch(() => 0);
+    }
     await this.engine.enqueueNew();
     let processed = 0;
     for (;;) {
