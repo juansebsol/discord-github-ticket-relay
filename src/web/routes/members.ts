@@ -212,9 +212,10 @@ export function registerMemberRoutes(app: FastifyInstance, web: Web): void {
     const toolSection = (m: Member, tool: Tool) => {
       const open = toolOpen(m, tool);
       const id = `acc-${m.id}-${tool}`;
-      return html`<section class="acc-tool${open ? ' on expanded' : ''}" data-tool="${tool}">
+      // Every tool starts folded: its summary line says what it gives; open it to change pages.
+      return html`<section class="acc-tool${open ? ' on' : ''}" data-tool="${tool}">
         <div class="acc-tool-h">
-          <button type="button" class="acc-expand" aria-expanded="${open ? 'true' : 'false'}" aria-controls="${id}" data-acc-expand>
+          <button type="button" class="acc-expand" aria-expanded="false" aria-controls="${id}" data-acc-expand>
             <span class="acc-tile">${icon(TOOL_ICONS[tool], 16)}</span>
             <span class="acc-tool-t"><span class="n">${TOOL_NAMES[tool]}</span><span class="s" data-tool-summary>${toolSummary(m, tool)}</span></span>
             ${icon('chevron-down', 16, 'chev')}

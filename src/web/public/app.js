@@ -788,11 +788,11 @@
       var r = radios(ed).filter(function (x) { return x.checked; })[0];
       if (r) r.dispatchEvent(new Event('change', { bubbles: true }));
     }
-    /** Sets many pages at once (quick sets, tool switches, copying), then opens the tools that are on. */
+    /** Sets many pages at once (quick sets, tool switches, copying). A tool's own switch also opens or folds it. */
     function apply(ed, scope, pick) {
       pages(scope).forEach(function (p) { set(ed, p.name, cap(p.levels, pick(p))); });
       summarize(ed);
-      (scope === ed ? $$('.acc-tool', ed) : [scope]).forEach(function (sec) { expand(sec, sec.classList.contains('on')); });
+      if (scope !== ed) expand(scope, scope.classList.contains('on'));
       save(ed);
     }
 
