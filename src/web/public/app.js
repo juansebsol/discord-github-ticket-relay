@@ -713,74 +713,192 @@
     });
     show();
   });
-  // ---- Members › Moderator access ---------------------------------------------------------------
+  // ---- Members › Moderator access: one moderator at a time, tool by tool ------------------------
+  //
+  // Every moderator's levels are radios of their own hidden form[data-async], so any change saves
+  // right away (the handler above posts the whole form). This adds picking a moderator, the tool
+  // switches, quick sets, copying another moderator's access, and keeps every summary current.
 
-  /** The level a page's select can take for "No access / View all / Edit all" (Inbox stays View, Activity tops out at View). */
-  function capLevel(select, level) {
-    var has = [].some.call(select.options, function (o) { return o.value === level; });
-    return has ? level : 'view';
-  }
-  /** Each "All pages" and tool select shows the level its pages share, or Custom when they differ. */
-  function syncSetLevels(formId) {
-    var selects = $$('select[form="' + formId + '"]');
-    $$('[data-set-levels="' + formId + '"]').forEach(function (ctl) {
-      var group = ctl.getAttribute('data-set-group');
-      var mine = group ? selects.filter(function (x) { return x.getAttribute('data-tool') === group; }) : selects;
-      var match = ['none', 'view', 'edit'].filter(function (l) {
-        return mine.every(function (x) { return x.value === capLevel(x, l); });
-      })[0];
-      ctl.value = match || '';
-      ctl.setAttribute('data-level', match || 'custom');
-    });
-    // A phone block's summary: "12 of 19 pages · 3 editable".
-    var block = selects[0] && selects[0].closest('details.mod-block');
-    var count = block && block.querySelector('summary .count');
-    if (count) {
-      var levels = selects.filter(function (x) { return x.classList.contains('level-select'); });
-      var open = levels.filter(function (x) { return x.value !== 'none'; }).length;
-      var edit = levels.filter(function (x) { return x.value === 'edit'; }).length;
-      count.textContent = open + ' of ' + levels.length + (levels.length === 1 ? ' page' : ' pages') + (edit ? ' · ' + edit + ' editable' : ' · view only');
+  var accCard = document.querySelector('[data-access-editor]');
+  if (accCard) (function () {
+    // Discord tickets always keeps the Inbox, so "closed" means only the inbox.
+    var INBOX_TOOL = 'tickets';
+    function radios(scope) { return $$('input[type="radio"][data-tool]', scope); }
+    /** Each page's name, its levels (the first is its minimum) and the one chosen. */
+    function pages(scope) {
+      var out = {};
+      radios(scope).forEach(function (r) {
+        var p = out[r.name] || (out[r.name] = { name: r.name, levels: [], value: null });
+        p.levels.push(r.value);
+        if (r.checked) p.value = r.value;
+      });
+      return Object.keys(out).map(function (k) { return out[k]; });
     }
-  }
-  // "All pages" sets every page of that moderator, a tool's select only that tool's pages; they're saved together.
-  $$('[data-set-levels]').forEach(function (ctl) {
-    var formId = ctl.getAttribute('data-set-levels');
-    var group = ctl.getAttribute('data-set-group');
-    ctl.addEventListener('change', function () {
-      var selects = $$('select[form="' + formId + '"]').filter(function (x) { return !group || x.getAttribute('data-tool') === group; });
-      selects.forEach(function (sel) {
-        sel.value = capLevel(sel, ctl.value);
-        sel.setAttribute('data-level', sel.value);
+    /** The nearest level a page offers: the Inbox can't go below View, Activity can't go above it. */
+    function cap(levels, l) {
+      if (levels.indexOf(l) !== -1) return l;
+      return l === 'none' ? levels[0] : levels.indexOf('view') !== -1 ? 'view' : levels[levels.length - 1];
+    }
+    function set(scope, name, level) {
+      radios(scope).forEach(function (r) { if (r.name === name) r.checked = r.value === level; });
+    }
+    function plural(n, word) { return n + ' ' + word + (n === 1 ? '' : 's'); }
+    /** Rewrites the tool lines, switches, header line and the moderator's chip from the radios. */
+    function summarize(ed) {
+      $$('.acc-tool', ed).forEach(function (sec) {
+        var ps = pages(sec);
+        var on = ps.some(function (p) { return p.value !== p.levels[0]; });
+        var open = ps.filter(function (p) { return p.value !== 'none'; }).length;
+        var edit = ps.filter(function (p) { return p.value === 'edit'; }).length;
+        sec.classList.toggle('on', on);
+        var sw = $('[data-tool-switch]', sec);
+        if (sw) sw.checked = on;
+        var line = $('[data-tool-summary]', sec);
+        if (line) {
+          line.textContent = !on ? (sec.getAttribute('data-tool') === INBOX_TOOL ? 'Only the inbox, view only' : 'No access')
+            : ps.length === 1 ? (edit ? 'Edit' : 'View')
+            : open + ' of ' + ps.length + ' pages' + (edit ? ' · ' + edit + ' editable' : ' · view only');
+        }
       });
-      if (selects[0]) selects[0].dispatchEvent(new Event('change', { bubbles: true }));
-      else syncSetLevels(formId);
-    });
-  });
-  /** The table and the phone blocks each have a form per moderator: the other one follows, so either saves what's shown. */
-  function mirrorLevels(form) {
-    var action = form.getAttribute('action');
-    $$('form[data-async]').forEach(function (twin) {
-      if (twin === form || twin.getAttribute('action') !== action) return;
-      $$('select.level-select[form="' + twin.id + '"]').forEach(function (x) {
-        var src = form.elements.namedItem(x.name);
-        if (!src || src.tagName !== 'SELECT') return;
-        x.value = src.value;
-        x.setAttribute('data-level', x.value);
+      var all = pages(ed);
+      var openAll = all.filter(function (p) { return p.value !== 'none'; }).length;
+      var editAll = all.filter(function (p) { return p.value === 'edit'; }).length;
+      var text = openAll + ' of ' + plural(all.length, 'page') + ' open' + (editAll ? ' · ' + editAll + ' editable' : ' · view only');
+      var sum = $('[data-acc-summary]', ed);
+      if (sum) sum.textContent = text;
+      var chip = accCard.querySelector('[data-mod-pick="' + ed.getAttribute('data-mod') + '"]');
+      if (chip) {
+        var c = $('[data-chip-count]', chip);
+        if (c) c.textContent = String(openAll);
+        chip.title = ($('.n', chip) ? $('.n', chip).textContent + ' · ' : '') + text;
+      }
+    }
+    function expand(sec, open) {
+      sec.classList.toggle('expanded', open);
+      var b = $('[data-acc-expand]', sec);
+      if (b) b.setAttribute('aria-expanded', open ? 'true' : 'false');
+    }
+    /** Saves this moderator: one change event posts their whole form. */
+    function save(ed) {
+      var r = radios(ed).filter(function (x) { return x.checked; })[0];
+      if (r) r.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    /** Sets many pages at once (quick sets, tool switches, copying), then opens the tools that are on. */
+    function apply(ed, scope, pick) {
+      pages(scope).forEach(function (p) { set(ed, p.name, cap(p.levels, pick(p))); });
+      summarize(ed);
+      (scope === ed ? $$('.acc-tool', ed) : [scope]).forEach(function (sec) { expand(sec, sec.classList.contains('on')); });
+      save(ed);
+    }
+
+    // Picking a moderator: their editor shows, the address follows (so a reload keeps them).
+    function pick(id, focus) {
+      var ed = accCard.querySelector('.acc-editor[data-mod="' + id + '"]');
+      if (!ed) return;
+      $$('.acc-editor', accCard).forEach(function (x) { x.hidden = x !== ed; });
+      $$('[data-mod-pick]', accCard).forEach(function (c) {
+        if (c === accCard.querySelector('[data-mod-pick="' + id + '"]')) c.setAttribute('aria-current', 'true');
+        else c.removeAttribute('aria-current');
       });
-      syncSetLevels(twin.id);
+      try {
+        var url = new URL(location.href);
+        url.searchParams.set('mod', id);
+        url.hash = 'moderator-access';
+        history.replaceState(null, '', url.toString());
+      } catch (err) { /* old browser: the link still works */ }
+      // Keep whose access this is in view.
+      var who = $('.acc-who', ed);
+      if (who && who.getBoundingClientRect().top < 0) ed.scrollIntoView({ block: 'start', behavior: reduceMotion ? 'auto' : 'smooth' });
+      if (focus) { var h = $('h3', ed); if (h) h.focus({ preventScroll: true }); }
+    }
+
+    accCard.addEventListener('click', function (e) {
+      var chip = e.target.closest('[data-mod-pick]');
+      if (chip) {
+        if (e.metaKey || e.ctrlKey || e.shiftKey || e.button > 0) return;
+        e.preventDefault();
+        pick(chip.getAttribute('data-mod-pick'), true);
+        return;
+      }
+      var ex = e.target.closest('[data-acc-expand]');
+      if (ex) {
+        var sec = ex.closest('.acc-tool');
+        expand(sec, !sec.classList.contains('expanded'));
+        return;
+      }
+      var preset = e.target.closest('[data-preset]');
+      if (preset) {
+        var ed = preset.closest('.acc-editor');
+        var level = preset.getAttribute('data-preset');
+        apply(ed, ed, function () { return level; });
+      }
     });
-  }
-  // Each page's select shows its level.
-  document.addEventListener('change', function (e) {
-    var sel = e.target;
-    if (!sel.classList || !sel.classList.contains('level-select')) return;
-    sel.setAttribute('data-level', sel.value);
-    var formId = sel.getAttribute('form');
-    if (!formId) return;
-    syncSetLevels(formId);
-    var form = document.getElementById(formId);
-    if (form) mirrorLevels(form);
-  });
+
+    accCard.addEventListener('change', function (e) {
+      var t = e.target;
+      var ed = t.closest('.acc-editor');
+      if (!ed) return;
+      if (t.hasAttribute('data-tool-switch')) {
+        // On: closed pages open as View (the rest keep their level). Off: back to the minimum.
+        var sec = t.closest('.acc-tool');
+        var on = t.checked;
+        apply(ed, sec, function (p) { return on ? (p.value === p.levels[0] ? 'view' : p.value) : 'none'; });
+        return;
+      }
+      if (t.hasAttribute('data-copy-from')) {
+        var src = accCard.querySelector('.acc-editor[data-mod="' + t.value + '"]');
+        var from = {};
+        if (src) pages(src).forEach(function (p) { from[p.name] = p.value; });
+        if (src) apply(ed, ed, function (p) { return from[p.name] || 'none'; });
+        t.value = '';
+        return;
+      }
+      if (t.type === 'radio' && t.hasAttribute('data-tool')) summarize(ed);
+    });
+
+    // With many moderators: type to find one, Enter picks the first match, arrows move along the bar.
+    var search = accCard.querySelector('[data-mod-search]');
+    if (search) {
+      search.addEventListener('input', function () {
+        var q = search.value.trim().toLowerCase();
+        var shown = 0;
+        $$('[data-mod-pick]', accCard).forEach(function (c) {
+          var hit = !q || c.getAttribute('data-find').indexOf(q) !== -1;
+          c.hidden = !hit;
+          if (hit) shown++;
+        });
+        var none = accCard.querySelector('[data-mod-none]');
+        if (none) none.hidden = shown > 0;
+      });
+      search.addEventListener('keydown', function (e) {
+        if (e.key !== 'Enter') return;
+        e.preventDefault();
+        var first = $$('[data-mod-pick]', accCard).filter(function (c) { return !c.hidden; })[0];
+        if (first) pick(first.getAttribute('data-mod-pick'), true);
+      });
+    }
+    var chips = accCard.querySelector('[data-mod-chips]');
+    if (chips) {
+      chips.addEventListener('keydown', function (e) {
+        if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+        var list = $$('[data-mod-pick]', chips).filter(function (c) { return !c.hidden; });
+        var i = list.indexOf(document.activeElement);
+        if (i === -1) return;
+        e.preventDefault();
+        var next = list[(i + (e.key === 'ArrowRight' ? 1 : -1) + list.length) % list.length];
+        next.focus();
+      });
+      // The chosen moderator is in view in the bar (scrolling the bar only, never the page).
+      var current = chips.querySelector('[aria-current="true"]');
+      if (current) chips.scrollLeft = current.offsetLeft - (chips.clientWidth - current.offsetWidth) / 2;
+      // More moderators than fit: the bar fades at its end until it's scrolled there.
+      var fade = function () { chips.classList.toggle('more', chips.scrollWidth - chips.scrollLeft - chips.clientWidth > 4); };
+      chips.addEventListener('scroll', fade, { passive: true });
+      window.addEventListener('resize', fade);
+      if (search) search.addEventListener('input', fade);
+      fade();
+    }
+  })();
 
   // ---- Triage › Actions: modes per source ------------------------------------------------------
 

@@ -105,7 +105,7 @@ describe('access map', () => {
 });
 
 describe('Members › Moderator access', () => {
-  it('shows every page by tool, one column per moderator, with the levels each page offers', async () => {
+  it('edits one moderator at a time, tool by tool, with one click per page', async () => {
     await grant(env, wid(), mod.user.id, { inbox: 'edit', 'triage.prompt': 'view' });
     const res = await page('/members', ws.owner);
     expect(res.statusCode).toBe(200);
@@ -113,22 +113,34 @@ describe('Members › Moderator access', () => {
     expect(body).not.toContain('style="');
     expect(body).toContain('id="moderator-access"');
     expect(body).not.toContain('id="page-access"');
-    // One form per moderator (and one for phones), saved right away.
+    // One form per moderator, saved on every change; their editor says whose access it is.
     expect(body).toContain(`<form id="acc-${mod.user.id}" method="post" action="${w()}/members/${mod.user.id}/access" data-async hidden>`);
-    expect(body).toContain(`<form id="acc-m-${mod.user.id}" method="post" action="${w()}/members/${mod.user.id}/access" data-async hidden>`);
-    expect(body).toContain(`id="mod-${mod.user.id}"`);
-    for (const a of AREA_KEYS) expect(body, a).toContain(`name="${a}" form="acc-${mod.user.id}"`);
-    // Inbox can't be turned off; Activity has nothing to edit.
-    const select = (name: string) => body.match(new RegExp(`<select name="${name.replace('.', '\\.')}" form="acc-${mod.user.id}"[^>]*>(.*?)</select>`))![0];
-    expect(select('inbox')).toContain('data-level="edit"');
-    expect(select('inbox')).not.toContain('value="none"');
-    expect(select('triage.activity')).not.toContain('value="edit"');
-    expect(select('triage.prompt')).toContain('<option value="view" selected>View</option>');
-    // A select for every page, and one per tool with more than one page; Custom when they differ.
-    expect(body).toMatch(new RegExp(`data-set-levels="acc-${mod.user.id}"\\s+data-level="custom"`));
-    for (const tool of ['tickets', 'issues', 'triage', 'contributors']) expect(body, tool).toContain(`data-set-levels="acc-${mod.user.id}" data-set-group="${tool}"`);
-    expect(body).not.toContain('data-set-group="setup"');
-    expect(body).toMatch(new RegExp(`data-set-group="issues" data-level="none"`));
+    expect(body).toContain(`<section class="acc-editor" id="mod-${mod.user.id}" data-mod="${mod.user.id}"`);
+    expect(body).toContain(`<h3 id="acc-name-${mod.user.id}" tabindex="-1">mia</h3>`);
+    expect(body).toContain('2 of 19 pages open · 1 editable');
+    // No Access / View / Edit per page: the Inbox can't be turned off, Activity has nothing to edit.
+    const radios = (name: string) => [...body.matchAll(new RegExp(`<input type="radio" name="${name.replace('.', '\\.')}" value="(\\w+)" form="acc-${mod.user.id}"[^>]*?( checked)?>`, 'g'))].map((m) => `${m[1]}${m[2] ? '*' : ''}`);
+    for (const a of AREA_KEYS) expect(radios(a).length, a).toBeGreaterThan(1);
+    expect(radios('inbox')).toEqual(['view', 'edit*']);
+    expect(radios('triage.activity')).toEqual(['none*', 'view']);
+    expect(radios('triage.prompt')).toEqual(['none', 'view*', 'edit']);
+    // Each tool: a switch that opens or closes all of it, and a summary.
+    expect(body).toMatch(/aria-label="mia: open AI triage"\s+checked\s+data-tool-switch/);
+    expect(body).toMatch(/aria-label="mia: open GitHub issues"\s+data-tool-switch/);
+    expect(body).toContain('1 of 6 pages · view only');
+    expect(body).toContain('1 of 5 pages · 1 editable');
+    expect(body).toContain('<section class="acc-tool" data-tool="issues">');
+    // Quick sets, and no moderator bar with only one moderator.
+    expect(body).toContain('data-preset="edit"');
+    expect(body).not.toContain('class="acc-switcher"');
+    const other = await makeAdmin(env, 'noah');
+    await env.server.inject({ method: 'POST', url: `/invite/${await createInvite(env.db, wid(), ws.owner.user.id, 'moderator')}`, ...form(other) });
+    const two = (await page(`/members?mod=${other.user.id}`, ws.owner)).body;
+    expect(two).toContain('class="acc-switcher"');
+    expect(two).toContain(`data-mod-pick="${other.user.id}"`);
+    expect(two).toMatch(new RegExp(`data-mod-pick="${other.user.id}"[^>]*aria-current="true"`));
+    expect(two).toContain(`<section class="acc-editor" id="mod-${mod.user.id}" data-mod="${mod.user.id}" aria-labelledby="acc-name-${mod.user.id}" hidden>`);
+    expect(two).toContain(`<option value="${mod.user.id}">mia</option>`);
     // The members table sums it up per tool.
     expect(body).toContain('Inbox: edit');
     expect(body).toContain('Prompt: view');
@@ -159,7 +171,7 @@ describe('Members › Moderator access', () => {
     // A plain form (no JavaScript) comes back to the card.
     const plain = await post(`/members/${mod.user.id}/access`, { 'triage.prompt': 'view' }, ws.owner);
     expect(plain.statusCode).toBe(302);
-    expect(plain.headers.location).toBe(`${w()}/members#moderator-access`);
+    expect(plain.headers.location).toBe(`${w()}/members?mod=${mod.user.id}#moderator-access`);
   });
 
   it('no longer has the old routes', async () => {

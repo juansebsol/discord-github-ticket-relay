@@ -38,7 +38,7 @@ describe('Apps & repositories access for moderators', () => {
     await grant(env, wid(), mod.user.id, { 'triage.actions': 'view' });
     const members = await page('/members', ws.owner);
     expect(members.body).toContain('id="moderator-access"');
-    expect(members.body).toContain(`name="apps" form="acc-${mod.user.id}"`);
+    expect(members.body).toContain(`name="apps" value="view" form="acc-${mod.user.id}"`);
     expect(members.body).toContain('AI triage');
 
     const res = await env.server.inject({

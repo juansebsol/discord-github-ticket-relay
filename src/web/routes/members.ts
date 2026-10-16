@@ -40,6 +40,7 @@ import {
   segRadios,
   selectWrap,
   submitBtn,
+  switchInput,
   tag,
   timeAgo,
   when,
@@ -97,18 +98,35 @@ function accessTags(m: MemberAccess): SafeHtml {
   })}`;
 }
 
-/** "6 of 19 pages · 2 editable", for a moderator's collapsed block on phones. */
+/** Pages a moderator can open (the Inbox included). */
+const openCount = (m: MemberAccess) => AREA_KEYS.filter((a) => levelOf(m.access, a) !== 'none').length;
+
+/** "6 of 19 pages open · 2 editable" (app.js writes the same after a change). */
 function accessCount(m: MemberAccess): string {
-  const open = AREA_KEYS.filter((a) => levelOf(m.access, a) !== 'none').length;
   const edit = AREA_KEYS.filter((a) => levelOf(m.access, a) === 'edit').length;
-  return `${open} of ${plural(AREA_KEYS.length, 'page')}${edit ? ` · ${edit} editable` : ' · view only'}`;
+  return `${openCount(m)} of ${plural(AREA_KEYS.length, 'page')} open${edit ? ` · ${edit} editable` : ' · view only'}`;
+}
+
+/** A tool is open when it gives more than the minimum (the Inbox is always visible, so it doesn't count). */
+function toolOpen(m: MemberAccess, tool: Tool): boolean {
+  return areasOf(tool).some((a) => levelOf(m.access, a) !== levelsFor(a)[0]);
+}
+
+/** "3 of 5 pages · 1 editable", "Edit", "No access" (app.js writes the same after a change). */
+function toolSummary(m: MemberAccess, tool: Tool): string {
+  const areas = areasOf(tool);
+  if (!toolOpen(m, tool)) return tool === 'tickets' ? 'Only the inbox, view only' : 'No access';
+  const open = areas.filter((a) => levelOf(m.access, a) !== 'none').length;
+  const edit = areas.filter((a) => levelOf(m.access, a) === 'edit').length;
+  if (areas.length === 1) return edit ? 'Edit' : 'View';
+  return `${open} of ${areas.length} pages${edit ? ` · ${edit} editable` : ' · view only'}`;
 }
 
 export function registerMemberRoutes(app: FastifyInstance, web: Web): void {
   const { deps } = web;
   const nameOf = (m: { display_name: string | null; username: string }) => m.display_name ?? m.username;
 
-  async function renderMembers(ctx: WorkspaceRequestContext, reply: FastifyReply, o: { invite?: boolean; inviteUrl?: string; inviteRole?: string } = {}) {
+  async function renderMembers(ctx: WorkspaceRequestContext, reply: FastifyReply, o: { invite?: boolean; inviteUrl?: string; inviteRole?: string; mod?: string } = {}) {
     const b = ctx.base;
     const ws = ctx.workspace;
     const [members, invites] = await Promise.all([listMembers(deps.db, ws.id), listInvites(deps.db, ws.id)]);
@@ -121,7 +139,7 @@ export function registerMemberRoutes(app: FastifyInstance, web: Web): void {
       if (m.role === 'owner' || m.id === ctx.user.id) return '';
       const name = nameOf(m);
       return menu([
-        m.role === 'moderator' ? { href: `#mod-${m.id}`, label: 'Edit access', icon: 'sliders-horizontal' } : null,
+        m.role === 'moderator' ? { href: `${b}/members?mod=${m.id}#moderator-access`, label: 'Edit access', icon: 'sliders-horizontal' } : null,
         owner ? { dialog: `role-${m.id}`, label: 'Change role…', icon: 'user-cog' } : null,
         owner ? 'sep' : null,
         owner ? { post: `${b}/members/${m.id}/remove`, label: 'Remove from workspace…', icon: 'user-x', danger: true, confirm: { title: `Remove ${name} from the workspace?`, body: `${name} loses access to the console right away. Their Discord roles aren’t affected.`, label: 'Remove', danger: true } } : null,
@@ -163,59 +181,67 @@ export function registerMemberRoutes(app: FastifyInstance, web: Web): void {
             ${owner ? menu([{ post: `${b}/members/invites/${i.id}/revoke`, label: 'Revoke invite', icon: 'link-2-off', danger: true, confirm: { title: 'Revoke this invite?', body: 'The link stops working right away.', label: 'Revoke invite', danger: true } }], { csrf: ctx.csrf, label: 'Invite actions' }) : ''}</div>`)}`
       : '';
 
-    // ---- Moderator access: pages (rows, grouped by tool) × moderators (columns) ----------------
+    // ---- Moderator access: one moderator at a time, tool by tool --------------------------------
 
-    // Each moderator's selects belong to a hidden form that saves right away (one for the table, one for phones).
-    const formId = (m: Member, mobile: boolean) => `acc-${mobile ? 'm-' : ''}${m.id}`;
-    const accessForm = (m: Member, mobile: boolean) => html`<form id="${formId(m, mobile)}" method="post" action="${b}/members/${m.id}/access" data-async hidden>${csrfField(ctx.csrf)}</form>`;
-    const levelSelect = (m: Member, a: Area, mobile: boolean) => {
-      const level = levelOf(m.access, a);
-      return selectWrap(html`<select name="${a}" form="${formId(m, mobile)}" class="level-select" data-level="${level}" data-tool="${AREAS[a].tool}" aria-label="${nameOf(m)}: ${areaLabel(a)}">${levelsFor(a).map((l) => html`<option value="${l}" ${l === level ? raw('selected') : ''}>${LEVEL_NAMES[l]}</option>`)}</select>`, { sm: true, cls: 'level' });
-    };
-    // Sets every page (or a whole tool) at once; shows Custom when those pages differ.
-    const setSelect = (m: Member, mobile: boolean, tool?: Tool) => {
-      const current = uniformLevel(m, tool ? areasOf(tool) : AREA_KEYS);
-      const label = tool ? `every ${TOOL_NAMES[tool]} page` : 'every page';
-      return selectWrap(html`<select class="set-select" data-set-levels="${formId(m, mobile)}" ${tool ? html`data-set-group="${tool}"` : ''} data-level="${current ?? 'custom'}" aria-label="${nameOf(m)}: ${label}"><option value="" ${current ? '' : raw('selected')} disabled hidden>Custom</option>${(['none', 'view', 'edit'] as const).map((l) => html`<option value="${l}" ${l === current ? raw('selected') : ''}>${SET_NAMES[l]}</option>`)}</select>`, { sm: true, cls: 'level' });
-    };
-    const who = (m: Member) => html`<span class="who-cell">${avatar(nameOf(m), 24, { src: discordAvatar(m) })}<span><span class="name"><span class="truncate">${nameOf(m)}</span></span><span class="sub truncate">@${m.username}</span></span></span>`;
-    const cells = (render: (m: Member) => SafeHtml | string) => mods.map((m) => html`<td class="lv" data-col="${m.id}">${render(m)}</td>`);
+    // The moderator being edited: picked in the floating bar (?mod=), else the first.
+    const selected = mods.find((m) => m.id === o.mod) ?? mods[0];
+    // Each moderator's levels belong to a hidden form that saves on every change (JSON reply).
+    const formId = (m: Member) => `acc-${m.id}`;
+    const accessForm = (m: Member) => html`<form id="${formId(m)}" method="post" action="${b}/members/${m.id}/access" data-async hidden>${csrfField(ctx.csrf)}</form>`;
     // The Inbox can't be turned off: say so next to its name.
     const always = (a: Area) => ((AREAS[a] as AreaDef).min ? tag('Always visible', { cls: 'subtle', title: 'Moderators can always see the tickets inbox.' }) : '');
-    const pageLabel = (name: SafeHtml | string, desc: string) => html`<div class="l">${name}</div><div class="d">${desc}</div>`;
+    // One page: No access / View / Edit, one click.
+    const levelSeg = (m: Member, a: Area) => {
+      const level = levelOf(m.access, a);
+      return html`<div class="lvl-seg" role="radiogroup" aria-label="${nameOf(m)}: ${areaLabel(a)}">${levelsFor(a).map((l) => html`<label><input type="radio" name="${a}" value="${l}" form="${formId(m)}" data-tool="${AREAS[a].tool}" ${l === level ? raw('checked') : ''}><span>${LEVEL_NAMES[l]}</span></label>`)}</div>`;
+    };
+    const toolSection = (m: Member, tool: Tool) => {
+      const open = toolOpen(m, tool);
+      const id = `acc-${m.id}-${tool}`;
+      return html`<section class="acc-tool${open ? ' on expanded' : ''}" data-tool="${tool}">
+        <div class="acc-tool-h">
+          <button type="button" class="acc-expand" aria-expanded="${open ? 'true' : 'false'}" aria-controls="${id}" data-acc-expand>
+            <span class="acc-tile">${icon(TOOL_ICONS[tool], 16)}</span>
+            <span class="acc-tool-t"><span class="n">${TOOL_NAMES[tool]}</span><span class="s" data-tool-summary>${toolSummary(m, tool)}</span></span>
+            ${icon('chevron-down', 16, 'chev')}
+          </button>
+          <span class="js-only">${switchInput({ name: '', checked: open, label: `${nameOf(m)}: ${tool === 'tickets' ? 'open every Discord tickets page' : `open ${TOOL_NAMES[tool]}`}`, attrs: html`data-tool-switch` })}</span>
+        </div>
+        <div class="acc-pages" id="${id}">${areasOf(tool).map((a) => html`<div class="acc-page">
+          <div class="acc-page-t"><div class="l">${AREAS[a].name}${always(a)}</div><div class="d">${AREAS[a].desc}</div></div>
+          ${levelSeg(m, a)}</div>`)}</div>
+      </section>`;
+    };
+    const editor = (m: Member) => html`<section class="acc-editor" id="mod-${m.id}" data-mod="${m.id}" aria-labelledby="acc-name-${m.id}" ${m.id === selected?.id ? '' : raw('hidden')}>
+      <div class="acc-who">
+        ${avatar(nameOf(m), 32, { src: discordAvatar(m) })}
+        <div class="acc-who-t"><h3 id="acc-name-${m.id}" tabindex="-1">${nameOf(m)}</h3><div class="sub">@${m.username} · <span data-acc-summary>${accessCount(m)}</span></div></div>
+        <div class="acc-quick js-only">
+          <div class="seg" role="group" aria-label="Quick set for ${nameOf(m)}">
+            <button type="button" class="seg-item" data-preset="none" title="Only the tickets inbox, view only">Inbox only</button>
+            <button type="button" class="seg-item" data-preset="view" title="View on every page">View all</button>
+            <button type="button" class="seg-item" data-preset="edit" title="Edit on every page">Edit all</button>
+          </div>
+          ${mods.length > 1 ? selectWrap(html`<select data-copy-from aria-label="Copy another moderator’s access to ${nameOf(m)}"><option value="">Copy from…</option>${mods.filter((x) => x.id !== m.id).map((x) => html`<option value="${x.id}">${nameOf(x)}</option>`)}</select>`, { sm: true }) : ''}
+        </div>
+      </div>
+      ${TOOLS.map((tool) => toolSection(m, tool))}
+      <div class="nojs acc-save"><button type="submit" class="btn sm" form="${formId(m)}">Save ${nameOf(m)}’s access</button></div>
+    </section>`;
+    // Floats at the bottom while the card is in view: pick whose access to change.
+    const switcher = html`<nav class="acc-switcher" aria-label="Choose a moderator">
+      ${mods.length > 6 ? html`<label class="acc-find js-only">${icon('search', 14)}<input type="search" placeholder="Find a moderator" aria-label="Find a moderator" autocomplete="off" data-mod-search></label>` : ''}
+      <div class="acc-chips" data-mod-chips>${mods.map((m) => html`<a class="acc-chip" href="${b}/members?mod=${m.id}#moderator-access" data-mod-pick="${m.id}" data-find="${`${nameOf(m)} ${m.username}`.toLowerCase()}" title="${nameOf(m)} · ${accessCount(m)}" ${m.id === selected?.id ? raw('aria-current="true"') : ''}>${avatar(nameOf(m), 24, { src: discordAvatar(m) })}<span class="n">${nameOf(m)}</span><span class="c" data-chip-count>${String(openCount(m))}</span></a>`)}</div>
+      <span class="acc-none small muted" data-mod-none hidden>No moderator matches.</span>
+    </nav>`;
 
-    const matrix = html`<div class="table-wrap only-desktop"><table class="access-matrix">
-        <thead><tr><th class="page-col" scope="col">Page</th>${mods.map((m) => html`<th class="lv" scope="col" id="mod-${m.id}" title="${nameOf(m)}" data-flash data-flash-col="${m.id}" data-flash-alt="mod-m-${m.id}">${who(m)}</th>`)}</tr></thead>
-        <tbody class="all"><tr><th class="page-col" scope="row">${pageLabel('All pages', 'Set every page at once.')}</th>${cells((m) => setSelect(m, false))}</tr></tbody>
-        ${TOOLS.map((tool) => {
-          const areas = areasOf(tool);
-          return html`<tbody>
-            <tr class="tool-h"><th class="page-col" scope="rowgroup"><span class="tool-name">${icon(TOOL_ICONS[tool], 16)}${TOOL_NAMES[tool]}</span></th>${cells((m) => (areas.length > 1 ? setSelect(m, false, tool) : ''))}</tr>
-            ${areas.map((a) => html`<tr><th class="page-col" scope="row">${pageLabel(html`${AREAS[a].name}${always(a)}`, AREAS[a].desc)}</th>${cells((m) => levelSelect(m, a, false))}</tr>`)}
-          </tbody>`;
-        })}
-        <tfoot class="nojs"><tr><th class="page-col"></th>${cells((m) => html`<button type="submit" class="btn sm" form="${formId(m, false)}">Save</button>`)}</tr></tfoot>
-      </table></div>`;
-
-    const mobileBlocks = html`<div class="only-mobile">${mods.map((m) => html`<details class="mod-block" id="mod-m-${m.id}" data-flash ${mods.length === 1 ? raw('open') : ''}>
-        <summary>${who(m)}<span class="count">${accessCount(m)}</span>${icon('chevron-down', 16, 'chev')}</summary>
-        <div class="acc-row all"><div><div class="lbl">All pages</div><div class="desc">Set every page at once.</div></div>${setSelect(m, true)}</div>
-        ${TOOLS.map((tool) => {
-          const areas = areasOf(tool);
-          return html`<div class="acc-tool"><span class="tool-name">${icon(TOOL_ICONS[tool], 16)}${TOOL_NAMES[tool]}</span>${areas.length > 1 ? setSelect(m, true, tool) : ''}</div>
-            ${areas.map((a) => html`<div class="acc-row"><div><div class="lbl">${AREAS[a].name}${always(a)}</div><div class="desc">${AREAS[a].desc}</div></div>${levelSelect(m, a, true)}</div>`)}`;
-        })}
-        <div class="nojs card-b tight"><button type="submit" class="btn sm" form="${formId(m, true)}">Save</button></div></details>`)}</div>`;
-
-    // A few moderators fit a readable width (and the moderators' names follow you down the page);
-    // more use the whole window, then scroll sideways beside the page names.
-    const modAccess = html`<div class="card access-card${mods.length <= 4 ? ` readable cols-${mods.length}` : ''}" id="moderator-access">
-      <div class="card-h"><div><h2>Moderator access</h2><div class="desc">What each moderator can open, tool by tool. <strong>View</strong> shows a page with its controls turned off; <strong>Edit</strong> lets them change it. GitHub and Discord connections, workspace settings, deployment and members stay with admins.</div></div></div>
+    const modAccess = html`<div class="card access-card readable" id="moderator-access" data-access-editor>
+      <div class="card-h"><div><h2>Moderator access</h2><div class="desc">${mods.length > 1 ? 'Pick a moderator in the bar at the bottom, then open the tools they need. ' : ''}<strong>View</strong> shows a page with its controls turned off; <strong>Edit</strong> lets them change it. GitHub and Discord connections, workspace settings, deployment and members stay with admins.</div></div></div>
       ${mods.length
-        ? html`${mods.map((m) => html`${accessForm(m, false)}${accessForm(m, true)}`)}
-            ${matrix}
-            ${mobileBlocks}
-            <div class="card-note">Changes apply right away. Applying or dismissing AI suggestions, on Review, tickets or issues, needs Edit on Review. “Use these settings” on a re-run also needs Edit on Actions, Label groups and Prompt. Edit on Apps &amp; repositories lets them add, change and remove apps; updating the panel in Discord needs Edit on Discord tickets › Panel.</div>`
+        ? html`${mods.map(accessForm)}
+            ${mods.map(editor)}
+            <div class="card-note">Changes save right away. Applying or dismissing AI suggestions, on Review, tickets or issues, needs Edit on Review. “Use these settings” on a re-run also needs Edit on Actions, Label groups and Prompt. Updating the panel in Discord needs Edit on Discord tickets › Panel.</div>
+            ${mods.length > 1 ? switcher : ''}`
         : empty('users', 'No moderators yet', 'Moderators can read the tickets inbox. Invite someone as a moderator, then choose what else they can open here.', owner ? linkBtn(`${b}/members?invite=1#invite`, 'Invite', { icon: 'user-plus' }) : null)}
     </div>`;
 
@@ -255,7 +281,8 @@ export function registerMemberRoutes(app: FastifyInstance, web: Web): void {
   app.get('/w/:wid/members', async (req, reply) => {
     const ctx = await web.requireWorkspace(req, reply);
     if (!ctx) return reply;
-    return renderMembers(ctx, reply, { invite: (req.query as { invite?: string }).invite === '1' });
+    const q = req.query as { invite?: string; mod?: string };
+    return renderMembers(ctx, reply, { invite: q.invite === '1', mod: q.mod });
   });
 
   app.post('/w/:wid/members/invites', async (req, reply) => {
@@ -321,7 +348,7 @@ export function registerMemberRoutes(app: FastifyInstance, web: Web): void {
       if (web.wantsJson(req)) return reply.code(err.status).send({ ok: false, error: err.message });
       setFlash(reply, 'error', err.message);
     }
-    return reply.redirect(`${ctx.base}/members#moderator-access`);
+    return reply.redirect(`${ctx.base}/members?mod=${encodeURIComponent(userId)}#moderator-access`);
   });
 
   app.post('/w/:wid/members/:userId/remove', async (req, reply) => {

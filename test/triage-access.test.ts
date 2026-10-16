@@ -42,7 +42,7 @@ describe('Triage access for moderators', () => {
   it('is set page by page on the Members page, and saved right away', async () => {
     const members = await page('/members', ws.owner);
     expect(members.body).toContain('id="moderator-access"');
-    expect(members.body).toContain(`name="triage.labels" form="acc-${mod.user.id}"`);
+    expect(members.body).toContain(`name="triage.labels" value="edit" form="acc-${mod.user.id}"`);
 
     const res = await env.server.inject({
       method: 'POST', url: `${w()}/members/${mod.user.id}/access`,
