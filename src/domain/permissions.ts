@@ -33,6 +33,7 @@ export const AREAS = {
   'triage.actions': { tool: 'triage', name: 'Actions', desc: 'Switches, actions, rules and limits.', levels: ['view', 'edit'] },
   'triage.labels': { tool: 'triage', name: 'Label groups', desc: 'Label groups and their options.', levels: ['view', 'edit'] },
   'triage.prompt': { tool: 'triage', name: 'Prompt', desc: 'What Claude is told.', levels: ['view', 'edit'] },
+  'triage.knowledge': { tool: 'triage', name: 'Knowledge', desc: 'Each app’s TRIAGE.md and the questions Claude asks. Edit: write them.', levels: ['view', 'edit'] },
   'triage.runs': { tool: 'triage', name: 'Re-run', desc: 'Previews and applying their results.', levels: ['view', 'edit'] },
   'triage.activity': { tool: 'triage', name: 'Activity', desc: 'What triage did, live.', levels: ['view'] },
   'verifications': { tool: 'contributors', name: 'Verifications', desc: 'Who verified and their role. Edit: revoke roles.', levels: ['view', 'edit'] },

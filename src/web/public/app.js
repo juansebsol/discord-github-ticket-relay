@@ -363,6 +363,87 @@
     update();
   });
 
+  // AI triage › Knowledge: an app's TRIAGE.md editor.
+  (function () {
+    var editor = document.querySelector('form[data-kn-editor]');
+    var text = editor && editor.querySelector('textarea[name="body"]');
+    if (!text) return;
+    var meter = document.querySelector('[data-kn-meter-for="' + text.id + '"]');
+    var max = Number(meter ? meter.getAttribute('data-max') : text.getAttribute('maxlength')) || 10000;
+    function fmt(x) { return x.toLocaleString('en-US'); }
+    function tokens(chars) {
+      var t = Math.ceil(chars / 4);
+      return 'about ' + fmt(t >= 1000 ? Math.round(t / 100) * 100 : t >= 100 ? Math.round(t / 10) * 10 : t) + ' tokens';
+    }
+    function measure() {
+      if (!meter) return;
+      meter.textContent = fmt(text.value.length) + ' / ' + fmt(max) + ' · ' + tokens(text.value.length);
+      meter.classList.toggle('near', text.value.length > max * 0.9);
+    }
+    // Puts text at the end, leaves the cursor there and tells the dirty check.
+    function append(add) {
+      var v = text.value.replace(/\s+$/, '');
+      text.value = (v ? v + '\n\n' : '') + add;
+      text.focus();
+      text.setSelectionRange(text.value.length, text.value.length);
+      text.scrollTop = text.scrollHeight;
+      text.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    var tpl = editor.querySelector('[data-kn-template]');
+    text.addEventListener('input', measure);
+    // Cancel puts everything back: the text, the template button and the Answer buttons.
+    editor.addEventListener('reset', function () {
+      setTimeout(function () {
+        measure();
+        if (tpl) tpl.hidden = Boolean(text.value.trim());
+        $$('[data-kn-add]').forEach(function (b) { b.disabled = false; b.lastChild.textContent = 'Answer'; });
+      }, 0);
+    });
+
+    if (tpl) {
+      tpl.addEventListener('click', function () {
+        var t = tpl.getAttribute('data-kn-template');
+        if (text.value.trim()) append(t);
+        else {
+          text.value = t;
+          text.focus();
+          // The cursor goes to the first empty line, under Known issues.
+          var at = t.indexOf('- ') + 2;
+          text.setSelectionRange(at, at);
+          text.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+        tpl.hidden = true;
+      });
+    }
+
+    // "Answer" on one of Claude's questions: adds it to TRIAGE.md, ready for the answer.
+    var HEADING = '## Answers to Claude’s questions';
+    document.addEventListener('click', function (e) {
+      var b = e.target.closest('[data-kn-add]');
+      if (!b || text.disabled) return;
+      var line = '- ' + b.getAttribute('data-kn-add') + ' ';
+      if (text.value.indexOf(HEADING) === -1) append(HEADING + '\n' + line);
+      else {
+        text.value = text.value.replace(/\s+$/, '') + '\n' + line;
+        text.focus();
+        text.setSelectionRange(text.value.length, text.value.length);
+        text.scrollTop = text.scrollHeight;
+        text.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+      b.disabled = true;
+      b.lastChild.textContent = 'Added';
+    });
+
+    // ⌘S / Ctrl+S saves (when there's something to save).
+    editor.addEventListener('keydown', function (e) {
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 's') {
+        e.preventDefault();
+        var save = editor.querySelector('button[type="submit"]');
+        if (save && !save.disabled) save.click();
+      }
+    });
+  })();
+
   // "Reset to default" puts each field's default (its placeholder) back.
   document.addEventListener('click', function (e) {
     var b = e.target.closest('[data-reset-fields]');

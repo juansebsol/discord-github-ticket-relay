@@ -10,6 +10,7 @@ import { UserFacingError } from '../../domain/types.js';
 import { html, raw } from '../../lib/html.js';
 import { verdictSchema } from '../../triage/ai.js';
 import { systemPromptFor } from '../../triage/engine.js';
+import { isBlank, listKnowledge } from '../../triage/knowledge.js';
 import { buildUserPrompt, DEFAULT_CHECK_RULES, DEFAULT_EXAMPLES } from '../../triage/prompt.js';
 import {
   FLAGS,
@@ -28,9 +29,9 @@ import {
 } from '../../triage/settings.js';
 import { setFlash } from '../session.js';
 import type { Web, WorkspaceRequestContext } from '../server.js';
-import { csrfField, empty, icon, labelTag, linkBtn, notice, pageHeader, pill, postBtn, segRadios, selectWrap, submitBtn, type Tone } from '../ui.js';
+import { csrfField, empty, icon, labelTag, linkBtn, notice, pageHeader, pill, postBtn, segRadios, selectWrap, submitBtn, timeAgo, type Tone } from '../ui.js';
 import { textField } from './panel.js';
-import { areaHref, pageLink, toolHeader, toolHref } from './tool.js';
+import { areaHref, canOpen, knowledgeHref, pageLink, toolHeader, toolHref } from './tool.js';
 import { FLAG_COPY, MODE_NAMES, MODE_OPTIONS, viewOnlyFooter } from './triage.js';
 
 const PICK_NAMES: Record<LabelGroup['pick'], string> = { one: 'One option', two: 'Up to two options', any: 'Any number of options' };
@@ -65,7 +66,7 @@ function tokensOf(text: string): string {
 
 /** " Edit it in Prompt and Actions.": the pages that shape the prompt this person can change (empty: none). */
 function editIn(m: MemberAccess): string {
-  const pages = ([['triage.prompt', 'Prompt'], ['triage.actions', 'Actions'], ['triage.labels', 'Label groups']] as const)
+  const pages = ([['triage.prompt', 'Prompt'], ['triage.actions', 'Actions'], ['triage.labels', 'Label groups'], ['triage.knowledge', 'Knowledge']] as const)
     .filter(([a]) => can(m, `${a}.edit`))
     .map(([, name]) => name);
   if (!pages.length) return '';
@@ -211,10 +212,11 @@ export function registerTriageConfigRoutes(app: FastifyInstance, web: Web): void
   app.get('/w/:wid/triage/prompt', async (req, reply) => {
     const ctx = await web.requireWorkspace(req, reply, { permission: 'triage.prompt.view' });
     if (!ctx) return reply;
-    const [settings, apps] = await Promise.all([getTriageSettings(deps.db, ctx.workspace.id), listApps(deps.db, ctx.workspace.id)]);
+    const [settings, apps, knowledge] = await Promise.all([getTriageSettings(deps.db, ctx.workspace.id), listApps(deps.db, ctx.workspace.id), listKnowledge(deps.db, ctx.workspace.id)]);
     const c = settings.config;
     const b = promptUrl(ctx);
-    const system = systemPromptFor(c, apps);
+    const system = systemPromptFor(c, apps, knowledge);
+    const notes = canOpen(ctx.membership, 'triage.knowledge');
     const modeOf = (f: (typeof FLAGS)[number]) => c[f].mode;
     const edit = can(ctx.membership, 'triage.prompt.edit');
     const body = html`
@@ -223,9 +225,15 @@ export function registerTriageConfigRoutes(app: FastifyInstance, web: Web): void
         ${csrfField(ctx.csrf)}
         <fieldset class="plain stack${edit ? '' : ' view-only'}" ${edit ? '' : raw('disabled')}>
         <div class="card">
-          <div class="card-h"><div><h2>About your products</h2><div class="desc">Claude reads this with every ticket. It already gets each app’s name, repository and description.</div></div>${can(ctx.membership, 'apps.view') ? linkBtn(`${ctx.base}/apps`, can(ctx.membership, 'apps.edit') ? 'Edit apps' : 'See apps', { size: 'sm', variant: 'ghost', trail: 'arrow-right' }) : ''}</div>
+          <div class="card-h"><div><h2>About your products</h2><div class="desc">Claude reads this with every ticket. It already gets each app’s name, repository, description and TRIAGE.md.</div></div>${can(ctx.membership, 'apps.view') ? linkBtn(`${ctx.base}/apps`, can(ctx.membership, 'apps.edit') ? 'Edit apps' : 'See apps', { size: 'sm', variant: 'ghost', trail: 'arrow-right' }) : ''}</div>
           <div class="card-b tight">${apps.length
-            ? html`<ul class="tri-effects">${apps.map((a) => html`<li><span><strong>${a.name}</strong> <span class="muted mono xs">${a.repo_owner}/${a.repo_name}</span>${a.description ? html`<span class="muted"> · ${a.description}</span>` : html`<span class="em"> · no description</span>`}</span></li>`)}</ul>`
+            ? html`<ul class="tri-effects">${apps.map((a) => {
+                const k = knowledge.get(a.id);
+                const written = k && !isBlank(k.body);
+                const file = html`${icon('file-text', 12)}TRIAGE.md ${written ? html`updated ${timeAgo(k.updated_at)}` : 'not written'}`;
+                return html`<li><span><strong>${a.name}</strong> <span class="muted mono xs">${a.repo_owner}/${a.repo_name}</span>${a.description ? html`<span class="muted"> · ${a.description}</span>` : html`<span class="em"> · no description</span>`}
+                  <span class="muted"> · </span>${notes ? html`<a class="small" href="${knowledgeHref(ctx, a.id)}">${file}</a>` : html`<span class="small muted">${file}</span>`}</span></li>`;
+              })}</ul>`
             : html`<p class="small muted">No apps yet.</p>`}</div>
           <div class="section">${textField({ id: 'products', label: 'More about your products (optional)', value: c.products, max: 6000, rows: 6, placeholder: 'PhotoCraft and VectorCraft share the same canvas engine and installer. Members often say “PC” for PhotoCraft. The web version is in beta.', hint: 'How the apps relate, what they share, words members use for them, what’s in beta. Shared code helps Claude spot problems shared across apps; names help it spot tickets filed under the wrong app.' })}</div>
         </div>
@@ -294,9 +302,9 @@ export function registerTriageConfigRoutes(app: FastifyInstance, web: Web): void
   app.get('/w/:wid/triage/prompt/full', async (req, reply) => {
     const ctx = await web.requireWorkspace(req, reply, { permission: 'triage.prompt.view' });
     if (!ctx) return reply;
-    const [settings, apps] = await Promise.all([getTriageSettings(deps.db, ctx.workspace.id), listApps(deps.db, ctx.workspace.id)]);
+    const [settings, apps, knowledge] = await Promise.all([getTriageSettings(deps.db, ctx.workspace.id), listApps(deps.db, ctx.workspace.id), listKnowledge(deps.db, ctx.workspace.id)]);
     const c = settings.config;
-    const system = systemPromptFor(c, apps);
+    const system = systemPromptFor(c, apps, knowledge);
     const groups = c.labelGroups.filter((g) => g.mode !== 'off');
     const sample = buildUserPrompt(
       { app: apps[0]?.name ?? 'Your app', type: 'Bug Report', title: 'Example: the app closes when I export to PNG', description: 'Every time I export a two-page spread to PNG the app closes. Version 0.9 on Windows 11.' },
@@ -312,7 +320,7 @@ export function registerTriageConfigRoutes(app: FastifyInstance, web: Web): void
           <pre class="prompt-pre">${system}</pre>
         </div>
         <div class="card">
-          <div class="card-h"><div><h2>Then, for each ticket</h2><div class="desc">The ticket and up to 40 similar issues from your repositories (each shortened to 800 characters). A made-up ticket here.</div></div></div>
+          <div class="card-h"><div><h2>Then, for each ticket</h2><div class="desc">The ticket${c.screenshots ? ', its screenshots (up to 5, before the text)' : ''} and up to 40 similar issues from your repositories (each shortened to 800 characters). A made-up ticket here.</div></div></div>
           <pre class="prompt-pre">${sample}</pre>
         </div>
         <div class="card">

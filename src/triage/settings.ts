@@ -241,6 +241,8 @@ export const TriageConfigSchema = z.object({
   checkRules: z.record(z.string(), z.string().max(2000)).catch({}),
   /** Worked examples for the prompt; null uses the built-in ones, '' none. */
   examples: z.string().max(6000).nullable().catch(null),
+  /** Claude also sees the screenshots attached to Discord tickets (more tokens per ticket, so it starts off). */
+  screenshots: z.boolean().catch(false),
   /**
    * For issues opened directly on GitHub: each action's own mode, by key ('priority', a check,
    * or 'group:<id>'). Separate from the modes for Discord tickets; anything missing is Off.

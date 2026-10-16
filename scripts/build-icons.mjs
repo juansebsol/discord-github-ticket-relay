@@ -21,6 +21,8 @@ const NAMES = [
   'bell', 'file-text', 'flask-conical', 'git-compare-arrows', 'history', 'message-square', 'play', 'split', 'tags',
   // Alerts and dev mode
   'circle-alert', 'circle-pause', 'external-link', 'minus', 'wrench',
+  // Triage knowledge and screenshots
+  'book-open', 'corner-down-left', 'image',
 ];
 
 const require = createRequire(import.meta.url);

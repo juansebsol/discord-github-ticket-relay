@@ -10,14 +10,15 @@ import { randomUUID } from 'node:crypto';
 import type { Queryable } from '../db/database.js';
 import { createdWithNoteMessage } from '../discord/messages.js';
 import { recordKeyCheck, stateFromPause } from '../domain/claude-key.js';
-import { cleanUpSpam, fileCounts } from '../domain/files.js';
+import { cleanUpSpam, fileCounts, screenshotsFor } from '../domain/files.js';
 import { decryptPayload, getSubmission, addEvent } from '../domain/submissions.js';
 import { getDiscordConnection, getGitHubConnection, listApps } from '../domain/store.js';
 import { MARKER_PREFIX, neutralizeGitHubMentions } from '../github/issue-content.js';
 import { labelColor } from '../domain/ticket-types.js';
 import { UserFacingError, type AppRow, type Deps, type SubmissionRow } from '../domain/types.js';
 import { GitHubApiError, type IssueDetail } from '../github/client.js';
-import { normalizeVerdict, TriageAiError, verdictSchema, type TriageAi, type Verdict } from './ai.js';
+import { normalizeVerdict, TriageAiError, verdictSchema, type TicketImage, type TriageAi, type Verdict } from './ai.js';
+import { listKnowledge, type AppKnowledge } from './knowledge.js';
 import { actionMatcher } from './state.js';
 import { buildSystemPrompt, buildUserPrompt, extractDescription, searchTerms, type Candidate } from './prompt.js';
 import {
@@ -169,12 +170,16 @@ export interface TriageResultRow {
   error: string | null;
   input_tokens: number | null;
   output_tokens: number | null;
+  /** Team-only: what Claude says would have made it surer (a copy of verdict.missing_context). */
+  question: string | null;
   created_at: Date;
   updated_at: Date;
   completed_at: Date | null;
 }
 
 const LEASE_SECONDS = 180;
+/** Screenshots Claude is shown per ticket when Screenshots is on. */
+const MAX_SCREENSHOTS = 5;
 /** Waits between attempts after rate limits and outages (seconds); then the ticket is left untriaged. */
 const RETRY_DELAYS = [60, 300, 900, 3600, 10800];
 /** Best matches from the issue index shown to Claude; more only while the index is still loading. */
@@ -372,11 +377,14 @@ function githubMessage(err: unknown): string {
   return err instanceof GitHubApiError ? `${err.status} ${err.message}` : (err as Error)?.message ?? 'unknown error';
 }
 
-/** The system prompt for these settings. Label groups that are off everywhere are left out. */
-export function systemPromptFor(c: TriageConfig, apps: AppRow[]): string {
+/**
+ * The system prompt for these settings, with each app's TRIAGE.md. Label groups that are off
+ * everywhere are left out.
+ */
+export function systemPromptFor(c: TriageConfig, apps: AppRow[], knowledge: Map<string, Pick<AppKnowledge, 'body'>> = new Map()): string {
   return buildSystemPrompt(
     { ...c, labelGroups: c.labelGroups.filter((g) => g.mode !== 'off') },
-    { apps: apps.map((a) => ({ name: a.name, repo: `${a.repo_owner}/${a.repo_name}`, description: a.description ?? '' })) },
+    { apps: apps.map((a) => ({ name: a.name, repo: `${a.repo_owner}/${a.repo_name}`, description: a.description ?? '', knowledge: knowledge.get(a.id)?.body ?? '' })) },
   );
 }
 
@@ -414,6 +422,7 @@ function resultFields(e: Evaluation, applied: TriageAction[], suggested: TriageA
     is_spam: v.spam && c.spam.mode !== 'off' ? 1 : 0,
     is_support: v.not_dev_issue && c.support.mode !== 'off' ? 1 : 0,
     suggestion_count: suggested.length,
+    question: v.missing_context ?? null,
   };
 }
 
@@ -1029,7 +1038,7 @@ export class TriageEngine {
       if (issue.body.includes(MARKER_PREFIX)) return skip('Filed through Discord, so it’s triaged as a ticket');
     }
 
-    const apps = await listApps(deps.db, workspaceId);
+    const [apps, knowledge] = await Promise.all([listApps(deps.db, workspaceId), listKnowledge(deps.db, workspaceId)]);
     const own = `${target.repo_owner}/${target.repo_name}`;
     const repoRef: RepoRef = { repo_id: target.repo_id, owner: target.repo_owner, name: target.repo_name, installation_id: inst };
     const candidates = await this.findCandidates(issue, repoRef, c, apps);
@@ -1038,20 +1047,33 @@ export class TriageEngine {
     const groups = c.labelGroups.filter((g) => effective.labelGroups.find((b) => b.id === g.id)?.mode !== 'off');
     const groupsOff = groups.filter((g) => g.mode === 'off').map((g) => g.id);
     const title = resolved.title ?? issue.title;
+    // Screenshots: only a ticket's (they're kept on this server), and only when the admins turned it on.
+    const ticket = ticketOf(target);
+    const shots = ticket && c.screenshots ? await screenshotsFor(deps, ticket.id, MAX_SCREENSHOTS) : { images: [], skipped: 0 };
+    const images: TicketImage[] = shots.images.map((i) => ({ mediaType: i.contentType, data: i.data.toString('base64') }));
+    const ask = (withImages: TicketImage[]) => this.ai.classify(
+      key.key,
+      c.model,
+      systemPromptFor(effective, apps, knowledge),
+      buildUserPrompt(
+        { app: resolved.app, type: resolved.type, title, description: extractDescription(issue.body), screenshots: withImages.length ? { shown: withImages.length, skipped: shots.skipped } : undefined },
+        candidates,
+        [...off].filter((k) => !k.startsWith('group:')),
+        groupsOff,
+      ),
+      verdictSchema({ groups, apps: appNames }),
+      withImages,
+    );
     let result;
     try {
-      result = await this.ai.classify(
-        key.key,
-        c.model,
-        systemPromptFor(effective, apps),
-        buildUserPrompt(
-          { app: resolved.app, type: resolved.type, title, description: extractDescription(issue.body) },
-          candidates,
-          [...off].filter((k) => !k.startsWith('group:')),
-          groupsOff,
-        ),
-        verdictSchema({ groups, apps: appNames }),
-      );
+      try {
+        result = await ask(images);
+      } catch (err) {
+        // A screenshot Claude won't take mustn't pause triage: the ticket is read without them.
+        if (!images.length || !(err instanceof TriageAiError) || err.pauseReason !== 'rejected') throw err;
+        deps.log.warn({ ticket: target.ref, err: err.message }, 'Claude refused the screenshots; triaging the text alone');
+        result = await ask([]);
+      }
     } catch (err) {
       const e = err instanceof TriageAiError ? err : new TriageAiError('retry', (err as Error).message);
       if (e.action === 'pause') {

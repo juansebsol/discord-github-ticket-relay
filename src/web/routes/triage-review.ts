@@ -16,7 +16,7 @@ import { actionEffectsShort, actionTitle } from '../triage-view.js';
 import { empty, formatDate, icon, linkBtn, notice, postBtn, selectWrap, tag, timeAgo, type IconName } from '../ui.js';
 import { bulkBanner, bulkBar } from './triage-bulk.js';
 import { pausedText } from './alerts.js';
-import { areaHref, canOpen, canOpenIssue, IN_WORKSPACE_REPOS, landOn, pageLink, toolHeader } from './tool.js';
+import { areaHref, canOpen, canOpenIssue, IN_WORKSPACE_REPOS, knowledgeLink, landOn, pageLink, toolHeader } from './tool.js';
 
 const PAGE = 50;
 const WEEK_MS = 7 * 86_400_000;
@@ -95,6 +95,9 @@ interface ReviewRow {
   html_url: string | null;
   suggestions: TriageAction[] | null;
   completed_at: Date | null;
+  /** Team-only: what Claude says would have made it surer, and the app whose TRIAGE.md answers it. */
+  question: string | null;
+  app_id: string | null;
 }
 
 /** The list as SQL, newest first: tickets and issues opened on GitHub with matching suggestions waiting. */
@@ -107,17 +110,17 @@ function listSql(wid: string, f: ReviewFilters): { sql: string; params: unknown[
   const match = matchSql(f, bind);
   const tickets = `SELECT 'ticket' AS kind, s.id AS submission_id, NULL AS repo_id, NULL AS number, s.ref AS ref, s.payload_enc AS payload_enc,
       s.reporter_display_name AS who, s.repo_owner AS owner, s.repo_name AS name, s.issue_number AS issue_number, x.title AS title,
-      s.issue_url AS html_url, t.suggestions AS suggestions, t.completed_at AS completed_at
+      s.issue_url AS html_url, t.suggestions AS suggestions, t.completed_at AS completed_at, t.question AS question, s.app_id AS app_id
     FROM triage_results t JOIN submissions s ON s.id = t.submission_id
     LEFT JOIN issue_index x ON x.repo_id = s.repo_id AND x.number = s.issue_number
     WHERE t.workspace_id = $1 AND ${WAITING}${match}`;
   const issues = `SELECT 'issue' AS kind, NULL AS submission_id, t.repo_id AS repo_id, t.number AS number, NULL AS ref, NULL AS payload_enc,
       x.author AS who, COALESCE(ir.owner, ap.repo_owner) AS owner, COALESCE(ir.name, ap.repo_name) AS name, t.number AS issue_number, x.title AS title,
-      x.html_url AS html_url, t.suggestions AS suggestions, t.completed_at AS completed_at
+      x.html_url AS html_url, t.suggestions AS suggestions, t.completed_at AS completed_at, t.question AS question, ap.app_id AS app_id
     FROM issue_triage t
     LEFT JOIN issue_index x ON x.repo_id = t.repo_id AND x.number = t.number
     LEFT JOIN issue_index_repos ir ON ir.repo_id = t.repo_id
-    LEFT JOIN (SELECT repo_id, min(repo_owner) AS repo_owner, min(repo_name) AS repo_name FROM apps WHERE workspace_id = $1 GROUP BY repo_id) ap ON ap.repo_id = t.repo_id
+    LEFT JOIN (SELECT repo_id, min(repo_owner) AS repo_owner, min(repo_name) AS repo_name, min(id) AS app_id FROM apps WHERE workspace_id = $1 GROUP BY repo_id) ap ON ap.repo_id = t.repo_id
     WHERE t.workspace_id = $1 AND ${ISSUE_WAITING}${match}`;
   const parts = f.source === 'discord' ? [tickets] : f.source === 'github' ? [issues] : [tickets, issues];
   return { sql: `SELECT * FROM (${parts.join(' UNION ALL ')}) ORDER BY completed_at DESC, kind, submission_id, repo_id, number`, params, bind };
@@ -266,6 +269,8 @@ export function registerTriageReviewRoutes(app: FastifyInstance, web: Web): void
         who: r.who,
         at: r.completed_at,
         suggestions: r.suggestions ?? [],
+        question: r.question,
+        knowledge: knowledgeLink(ctx, r.app_id),
       };
     });
     type Item = (typeof view)[number];
@@ -298,6 +303,9 @@ export function registerTriageReviewRoutes(app: FastifyInstance, web: Web): void
             <span class="rv-ref">${[v.ref, v.who].filter(Boolean).join(' · ')}${v.at ? html`${v.ref || v.who ? ' · ' : ''}<time datetime="${v.at.toISOString()}" title="Triaged ${formatDate(v.at)}">${timeAgo(v.at)}</time>` : ''}</span>
           </div>
           <div class="rv-suggs">${v.suggestions.map((a) => card(v, a))}</div>
+          ${v.question
+            ? html`<p class="rv-ask" title="Only your team sees this">${icon('lightbulb', 14)}<span>Claude would be surer if it knew: <q>${v.question}</q>${v.knowledge ? html` · <a href="${v.knowledge.href}">${v.knowledge.edit ? 'Answer in TRIAGE.md' : 'See TRIAGE.md'}</a>` : ''}</span></p>`
+            : ''}
         </div>
       </li>`)}</ul>`;
 

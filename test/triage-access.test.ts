@@ -53,7 +53,7 @@ describe('Triage access for moderators', () => {
     expect(res.json()).toMatchObject({ ok: true, message: 'mia: Actions → View, Label groups → Edit, Re-run → View, Activity → View' });
     // Activity is a log: Edit becomes View. No access isn't stored; other pages keep theirs.
     expect(await access()).toEqual({ verifications: 'view', 'triage.actions': 'view', 'triage.labels': 'edit', 'triage.runs': 'view', 'triage.activity': 'view' });
-    expect((await page('/members', ws.owner)).body).toContain('Triage · 4 of 6');
+    expect((await page('/members', ws.owner)).body).toContain('Triage · 4 of 7');
     // Moderators can't change their own access.
     expect((await post(`/members/${mod.user.id}/access`, { 'triage.actions': 'edit' })).statusCode).toBe(403);
   });

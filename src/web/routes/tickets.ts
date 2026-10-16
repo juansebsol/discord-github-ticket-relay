@@ -18,7 +18,7 @@ import { updateTicketLimits, userNames } from '../../domain/workspaces.js';
 import { html, raw, type SafeHtml } from '../../lib/html.js';
 import { setFlash } from '../session.js';
 import type { Web } from '../server.js';
-import { toolHeader, viewOnlyText } from './tool.js';
+import { knowledgeLink, toolHeader, viewOnlyText } from './tool.js';
 import { viewOnlyFooter } from './triage.js';
 import {
   avatar,
@@ -267,9 +267,19 @@ function duplicateNote(t: Pick<TriageResultRow, 'verdict'>, s: RepoOf): SafeHtml
   return parts.length ? html`<p class="small muted mt-8">${parts.map((p, i) => html`${i ? ' ' : ''}${p}`)}</p>` : '';
 }
 
-/** What triage decided for this ticket, with Apply and Dismiss for suggestions. */
+/**
+ * What Claude says would have made it surer, with a link to answer it in the app's TRIAGE.md.
+ * Only the team sees it: it's never part of a comment or a member message.
+ */
+function triageQuestion(question: string, knowledge: { href: string; edit: boolean } | null | undefined): SafeHtml {
+  return html`<div class="tri-ask" title="Only your team sees this">${icon('lightbulb', 14)}<div>
+    <span class="k">Claude would be surer if it knew</span><p>${question}</p>
+    ${knowledge ? html`<a href="${knowledge.href}">${knowledge.edit ? 'Answer in TRIAGE.md' : 'See TRIAGE.md'}${icon('arrow-right', 12)}</a>` : ''}
+  </div></div>`;
+}
+
 /** What triage decided, with Apply and Dismiss for suggestions (tickets, and issues opened on GitHub). */
-export function triageCard(t: Omit<TriageResultRow, 'submission_id'>, s: RepoOf, o: { act: boolean; csrf: string; actionBase: string }): SafeHtml {
+export function triageCard(t: Omit<TriageResultRow, 'submission_id'>, s: RepoOf, o: { act: boolean; csrf: string; actionBase: string; knowledge?: { href: string; edit: boolean } | null }): SafeHtml {
   const state = triageState(t);
   const status = pill(TRIAGE_STATES[state].label, TRIAGE_STATE_TONE[state]);
   let content: SafeHtml;
@@ -288,6 +298,7 @@ export function triageCard(t: Omit<TriageResultRow, 'submission_id'>, s: RepoOf,
       ${!applied.length && !suggestions.length ? html`<p class="small muted">Nothing to flag.</p>` : ''}
       ${duplicateNote(t, s)}
       ${t.verdict?.reason ? html`<p class="small muted mt-8">“${t.verdict.reason}”</p>` : ''}
+      ${t.verdict?.missing_context ? triageQuestion(t.verdict.missing_context, o.knowledge) : ''}
       ${t.error ? html`<p class="small mt-8">${icon('triangle-alert', 14, 'warn')} ${t.error}</p>` : ''}
       <p class="xs faint mt-8">${t.model ?? ''}${t.completed_at ? ` · ${timeAgo(t.completed_at)}` : ''}</p>`;
   } else if (t.status === 'pending') {
@@ -578,7 +589,7 @@ export function registerTicketRoutes(app: FastifyInstance, web: Web): void {
             <dt>Member</dt><dd class="small">${s.member_notice ? s.member_notice : s.source === 'admin_test' ? html`<span class="muted">Not notified (test)</span>` : html`<span class="muted">Not notified yet</span>`}</dd>
           </dl>
         </aside>
-        ${triageRow ? triageCard(triageRow, s, { act: can(ctx.membership, 'triage.review.edit'), csrf: ctx.csrf, actionBase }) : ''}</div>
+        ${triageRow ? triageCard(triageRow, s, { act: can(ctx.membership, 'triage.review.edit'), csrf: ctx.csrf, actionBase, knowledge: knowledgeLink(ctx, s.app_id) }) : ''}</div>
       </div>
 
       ${unresolved && act ? html`

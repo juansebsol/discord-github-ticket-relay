@@ -60,6 +60,8 @@ export function verdictSchema(ctx: VerdictContext) {
     labels,
     priority: z.enum(PRIORITIES),
     priority_confidence: int(),
+    /** Team-only: a question about the product whose answer would have made Claude surer (AI triage › Knowledge). */
+    missing_context: z.string().nullable(),
   });
 }
 
@@ -91,6 +93,13 @@ export interface ModelOption {
   id: string;
   name: string;
   deprecated: boolean;
+}
+
+/** A screenshot from the ticket, sent to Claude as an image. */
+export interface TicketImage {
+  mediaType: 'image/png' | 'image/jpeg';
+  /** Base64. */
+  data: string;
 }
 
 export interface Classification {
@@ -175,14 +184,20 @@ export class TriageAi {
     }
   }
 
-  async classify(apiKey: string, model: string, system: string, user: string, schema: ReturnType<typeof verdictSchema> = VerdictSchema): Promise<Classification> {
+  async classify(apiKey: string, model: string, system: string, user: string, schema: ReturnType<typeof verdictSchema> = VerdictSchema, images: TicketImage[] = []): Promise<Classification> {
     try {
       const response = await this.client(apiKey).messages.parse({
         model,
         max_tokens: 8000,
         // The system prompt is the same for every ticket in a workspace, so cache it.
         system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }],
-        messages: [{ role: 'user', content: user }],
+        // Screenshots go before the text that refers to them.
+        messages: [{
+          role: 'user',
+          content: images.length
+            ? [...images.map((i) => ({ type: 'image' as const, source: { type: 'base64' as const, media_type: i.mediaType, data: i.data } })), { type: 'text' as const, text: user }]
+            : user,
+        }],
         output_config: { format: zodOutputFormat(schema) },
       });
       if (response.stop_reason === 'refusal') throw new TriageAiError('skip', 'Claude declined to classify this ticket.');
@@ -260,5 +275,6 @@ export function normalizeVerdict(v: AiVerdict, ctx: NormalizeContext | Set<numbe
     version: v.version ? text(v.version, 40) || null : null,
     labels,
     reason: text(v.reason, 600),
+    missing_context: text(v.missing_context, 300) || null,
   };
 }

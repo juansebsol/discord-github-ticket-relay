@@ -10,6 +10,7 @@ import { checkPanel, type PanelState } from '../../domain/panel.js';
 import { AREAS, areasOf, can, firstArea, hasEdit, TOOL_NAMES, type Area, type MemberAccess, type Tool } from '../../domain/permissions.js';
 import { getDiscordConnection, listApps } from '../../domain/store.js';
 import { html, type SafeHtml } from '../../lib/html.js';
+import { questionCounts } from '../../triage/knowledge.js';
 import { getTriageSettings, monthlyUsage } from '../../triage/settings.js';
 import type { Web, WorkspaceRequestContext } from '../server.js';
 import { chip, pageHeader, pill, plural, postBtn, tabs, timeAgo, viewOnlyTag, type IconName } from '../ui.js';
@@ -34,6 +35,7 @@ export const AREA_PATHS: Record<Area, string> = {
   'triage.actions': '/triage/actions',
   'triage.labels': '/triage/labels',
   'triage.prompt': '/triage/prompt',
+  'triage.knowledge': '/triage/knowledge',
   'triage.runs': '/triage/runs',
   'triage.activity': '/triage/activity',
   'verifications': '/contributors',
@@ -46,6 +48,19 @@ export const AREA_PATHS: Record<Area, string> = {
 /** A page's address. */
 export function areaHref(ctx: Pick<WorkspaceRequestContext, 'base'> | string, area: Area): string {
   return `${typeof ctx === 'string' ? ctx : ctx.base}${AREA_PATHS[area]}`;
+}
+
+/** An app's TRIAGE.md page (AI triage › Knowledge). */
+export function knowledgeHref(ctx: Pick<WorkspaceRequestContext, 'base'>, appId: string): string {
+  return `${ctx.base}${AREA_PATHS['triage.knowledge']}/${appId}`;
+}
+
+/**
+ * The link from Claude's question on a ticket or issue to its app's TRIAGE.md, for someone who
+ * can open Knowledge (null otherwise).
+ */
+export function knowledgeLink(ctx: Pick<WorkspaceRequestContext, 'base' | 'membership'>, appId: string | null | undefined): { href: string; edit: boolean } | null {
+  return appId && canOpen(ctx.membership, 'triage.knowledge') ? { href: `${knowledgeHref(ctx, appId)}#questions`, edit: can(ctx.membership, 'triage.knowledge.edit') } : null;
 }
 
 /** Whether this person can open a page (its route checks the same). */
@@ -107,6 +122,7 @@ const VIEW_ONLY: Partial<Record<Area, string>> = {
   'triage.actions': 'You can see the triage settings. Ask an admin if you need to change them.',
   'triage.labels': 'You can see the label groups. Ask an admin if you need to change them.',
   'triage.prompt': 'You can see the prompt. Ask an admin if you need to change it.',
+  'triage.knowledge': 'You can read each app’s TRIAGE.md and Claude’s questions. Writing them needs Edit on Knowledge. Ask an admin if you need it.',
   'triage.runs': 'You can see re-runs and their results. Ask an admin if you need to start, stop or apply them.',
   'verifications': 'You can see verifications. Ask an admin if you need to revoke roles.',
   'panel': 'You can see the panel, its health and preview. Changing, publishing and removing it need Edit on Panel. Ask an admin if you need it.',
@@ -163,7 +179,11 @@ async function toolState(web: Web, ctx: WorkspaceRequestContext, tool: ToolName,
     };
   }
   if (tool === 'triage') {
-    const [settings, usage] = await Promise.all([getTriageSettings(db, wid), monthlyUsage(db, wid)]);
+    const [settings, usage, questions] = await Promise.all([
+      getTriageSettings(db, wid),
+      monthlyUsage(db, wid),
+      canOpen(m, 'triage.knowledge') ? questionCounts(db, wid) : null,
+    ]);
     const c = settings.config;
     const anyOn = settings.enabled || settings.githubEnabled;
     const full = usage.triaged >= c.monthlyLimit;
@@ -171,7 +191,8 @@ async function toolState(web: Web, ctx: WorkspaceRequestContext, tool: ToolName,
       status: !anyOn ? pill('Off', 'neutral') : settings.paused ? pill('Paused', 'warn') : pill('On', 'ok'),
       description: 'Claude reads every new Discord ticket and every issue opened on GitHub, and flags priority, duplicates, spam and labels.',
       actions: [chip(`${c.model} · ${usage.triaged.toLocaleString('en-US')} of ${c.monthlyLimit.toLocaleString('en-US')} this month`, { tone: anyOn && full ? 'warn' : null, title: 'Tickets and issues triaged this month, re-runs included, and the monthly limit' })],
-      counts: { 'triage.review': ctx.progress?.review ?? 0 },
+      // Knowledge: questions Claude asked since each app's TRIAGE.md was last saved.
+      counts: { 'triage.review': ctx.progress?.review ?? 0, 'triage.knowledge': [...(questions?.values() ?? [])].reduce((n, q) => n + q.fresh, 0) },
     };
   }
   const [settings, conn] = await Promise.all([getContributorSettings(db, wid), getDiscordConnection(db, wid)]);

@@ -241,6 +241,8 @@ export function registerTriageRoutes(app: FastifyInstance, web: Web): void {
           ${setting('Confidence threshold', 'Automatic actions only happen at or above this confidence.', html`<input type="number" name="threshold" value="${String(c.threshold)}" min="50" max="100" required aria-label="Confidence threshold"><span class="connector">%</span>`)}
           ${setting('Monthly limit', 'Triage stops for the rest of the month after this many tickets. Filing isn’t affected.', html`<input type="number" class="wide" name="monthly_limit" value="${String(c.monthlyLimit)}" min="1" max="100000" required aria-label="Monthly limit"><span class="connector">tickets</span>`)}
           ${setting('Apps', 'Which apps’ tickets are triaged. While all are selected, new apps are included too.', html`<div class="check-list">${apps.map((a) => html`<label class="check"><input type="checkbox" name="app_ids" value="${a.id}" ${!c.appIds || c.appIds.includes(a.id) ? raw('checked') : ''}> ${a.name}</label>`)}</div>`, { stacked: true })}
+          ${setting('Screenshots', 'Claude also looks at the screenshots members attach to Discord tickets (up to 5 per ticket), so it can read error messages and see what’s on screen. Each adds up to about 1,600 tokens. Issues opened on GitHub are read as text.', switchInput({ name: 'screenshots', checked: c.screenshots, label: 'Show Claude the screenshots' }), { switchRow: true })}
+          ${setting('Knowledge', 'A TRIAGE.md for each app: what your team knows that a ticket doesn’t say. Claude reads it with every ticket, and asks when it’s missing something.', canOpen(ctx.membership, 'triage.knowledge') ? linkBtn(areaHref(ctx, 'triage.knowledge'), can(ctx.membership, 'triage.knowledge.edit') ? 'Edit TRIAGE.md files' : 'See TRIAGE.md files', { size: 'sm', trail: 'arrow-right' }) : locked('No access'))}
           ${setting('Prompt', 'What Claude is told about your products, each check and examples.', canOpen(ctx.membership, 'triage.prompt') ? linkBtn(areaHref(ctx, 'triage.prompt'), can(ctx.membership, 'triage.prompt.edit') ? 'Edit the prompt' : 'See the prompt', { size: 'sm', trail: 'arrow-right' }) : locked('No access'))}
           <div class="card-f">${anyActionOn(c) ? html`<span></span>` : html`<span class="small muted">Every action is off, so triage won’t do anything yet.</span>`}${edit ? html`<div class="end">
             <button type="button" class="btn" data-discard data-dirty-enable>Cancel</button>
@@ -327,6 +329,7 @@ export function registerTriageRoutes(app: FastifyInstance, web: Web): void {
         }])),
         helpChannel,
         githubModes,
+        screenshots: b.screenshots !== undefined,
         labelGroups: currentConfig.labelGroups.map((g) => ({ ...g, mode: b[`group_${g.id}_mode`] === undefined ? g.mode : mode(`group_${g.id}_mode`) })),
       });
       await saveTriageConfig(deps.db, ctx.workspace.id, config);

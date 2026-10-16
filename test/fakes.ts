@@ -427,7 +427,7 @@ export class FakeAnthropic {
     spam: false, spam_confidence: 5, no_action: false, no_action_confidence: 5, not_dev_issue: false, not_dev_issue_confidence: 5,
     duplicates: [], regression_of: null, regression_confidence: 0, needs_info: false, needs_info_confidence: 10, missing: [],
     parts: [], parts_confidence: 0, related: [], related_confidence: 0, shared: false, shared_confidence: 0, shared_apps: [], shared_issue: null,
-    right_app: null, right_app_confidence: 0, version: null, labels: {}, priority: 'medium', priority_confidence: 80,
+    right_app: null, right_app_confidence: 0, version: null, labels: {}, priority: 'medium', priority_confidence: 80, missing_context: null,
   };
   queue: ClaudeBehavior[] = [];
   requests: { key: string; body: Json }[] = [];

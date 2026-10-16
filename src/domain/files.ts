@@ -14,7 +14,7 @@
  * - Each workspace has a storage limit, and a minimum of free disk is always kept.
  * - Attaching files never blocks filing: anything that can't be saved is noted instead.
  */
-import { mkdir, rename, rm, statfs, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, statfs, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { Queryable } from '../db/database.js';
 import { AttachmentError } from '../discord/client.js';
@@ -280,6 +280,52 @@ export async function storageUsage(q: Queryable, workspaceId: string): Promise<{
 export async function listTicketFiles(q: Queryable, submissionId: string): Promise<TicketFile[]> {
   const { rows } = await q.query<TicketFile>('SELECT * FROM ticket_files WHERE submission_id = $1 ORDER BY created_at, rowid', [submissionId]);
   return rows;
+}
+
+// ---- Screenshots for AI triage -----------------------------------------------------------------
+
+/** Width and height of a PNG or JPEG, from its header; null when it can't be read. */
+export function imageSize(b: Buffer): { width: number; height: number } | null {
+  if (b.length >= 24 && b.subarray(0, 8).equals(PNG_SIG)) return { width: b.readUInt32BE(16), height: b.readUInt32BE(20) };
+  if (b.length < 4 || b[0] !== 0xff || b[1] !== 0xd8) return null;
+  let i = 2;
+  while (i + 9 <= b.length) {
+    if (b[i] !== 0xff) return null;
+    const marker = b[i + 1]!;
+    if (marker === 0xff) { i++; continue; }
+    // Markers without a length.
+    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd8)) { i += 2; continue; }
+    // Start of frame (every SOF except DHT, JPG and DAC, which share the range).
+    if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) return { height: b.readUInt16BE(i + 5), width: b.readUInt16BE(i + 7) };
+    if (marker === 0xda || marker === 0xd9) return null;
+    const len = b.readUInt16BE(i + 2);
+    if (len < 2) return null;
+    i += 2 + len;
+  }
+  return null;
+}
+
+/** Limits Claude's API sets on images (5 MB each once encoded, 8000 pixels a side). */
+const SCREENSHOT_MAX_BYTES = 3_700_000;
+const SCREENSHOT_MAX_SIDE = 8000;
+
+/**
+ * A ticket's screenshots for Claude, oldest first: stored PNG and JPG files within the API's
+ * limits, up to max. skipped counts the ones left out (too large, or no longer on disk).
+ */
+export async function screenshotsFor(deps: Pick<Deps, 'db' | 'config'>, submissionId: string, max: number): Promise<{ images: { contentType: 'image/png' | 'image/jpeg'; data: Buffer }[]; skipped: number }> {
+  const files = (await listTicketFiles(deps.db, submissionId)).filter((f) => f.status === 'stored' && f.kind === 'image' && f.ext);
+  const images: { contentType: 'image/png' | 'image/jpeg'; data: Buffer }[] = [];
+  let skipped = 0;
+  for (const f of files) {
+    if (images.length >= max) { skipped++; continue; }
+    const data = f.size <= SCREENSHOT_MAX_BYTES ? await readFile(filePathFor(deps, f)).catch(() => null) : null;
+    const type = data ? sniff(data) : null;
+    const size = data ? imageSize(data) : null;
+    if (!data || !type || data.length > SCREENSHOT_MAX_BYTES || !size || size.width > SCREENSHOT_MAX_SIDE || size.height > SCREENSHOT_MAX_SIDE) { skipped++; continue; }
+    images.push({ contentType: type.contentType as 'image/png' | 'image/jpeg', data });
+  }
+  return { images, skipped };
 }
 
 /** For the member's confirmation in Discord: how many files were attached, and how many weren't. */

@@ -18,7 +18,7 @@ import { setFlash } from '../session.js';
 import type { Web } from '../server.js';
 import { avatar, empty, formatDate, icon, labelTag, linkBtn, notice, pageHeader, pill, segLinks, selectWrap, tag, timeAgo, when } from '../ui.js';
 import { triageCard, triageCell } from './tickets.js';
-import { areaHref, canOpen, IN_WORKSPACE_REPOS, pageLink, toolHeader, toolHref } from './tool.js';
+import { areaHref, canOpen, IN_WORKSPACE_REPOS, knowledgeLink, pageLink, toolHeader, toolHref } from './tool.js';
 
 const PAGE = 50;
 const LIVE_TIMEOUT_MS = 5000;
@@ -136,7 +136,7 @@ export function registerIssueTriageRoutes(app: FastifyInstance, web: Web): void 
   /** The workspace's repositories (only issues in these can be shown). */
   async function repoOf(workspaceId: string, repoId: number) {
     const a = (await listApps(deps.db, workspaceId)).filter((x) => x.repo_id === repoId);
-    return a.length ? { owner: a[0]!.repo_owner, name: a[0]!.repo_name, apps: a.map((x) => x.name) } : null;
+    return a.length ? { owner: a[0]!.repo_owner, name: a[0]!.repo_name, apps: a.map((x) => x.name), appId: a[0]!.id } : null;
   }
 
   app.get('/w/:wid/issues/github', async (req, reply) => {
@@ -299,7 +299,7 @@ export function registerIssueTriageRoutes(app: FastifyInstance, web: Web): void 
             ${issue?.labels.length ? html`<dt>Labels</dt><dd>${issue.labels.map((l) => labelTag(l))}</dd>` : ''}
             ${issue ? html`<dt>Opened</dt><dd>${when(issue.createdAt)}</dd>` : ''}
           </dl></aside>
-          ${t ? triageCard(t, { repo_owner: repo.owner, repo_name: repo.name }, { act: can(ctx.membership, 'triage.review.edit'), csrf: ctx.csrf, actionBase }) : html`<div class="card"><div class="card-h"><div class="title">${icon('bot', 16)}<h2>Triage</h2></div></div><div class="card-b tight"><p class="small muted">Not triaged. Issues opened on GitHub are triaged when they’re opened while triage for them is on, or by a re-run.</p></div></div>`}
+          ${t ? triageCard(t, { repo_owner: repo.owner, repo_name: repo.name }, { act: can(ctx.membership, 'triage.review.edit'), csrf: ctx.csrf, actionBase, knowledge: knowledgeLink(ctx, repo.appId) }) : html`<div class="card"><div class="card-h"><div class="title">${icon('bot', 16)}<h2>Triage</h2></div></div><div class="card-b tight"><p class="small muted">Not triaged. Issues opened on GitHub are triaged when they’re opened while triage for them is on, or by a re-run.</p></div></div>`}
         </div>
       </div>`;
     return web.render(reply, ctx, issue?.title ?? `Issue #${number}`, 'issues', body);

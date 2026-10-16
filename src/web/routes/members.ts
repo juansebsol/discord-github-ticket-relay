@@ -101,7 +101,7 @@ function accessTags(m: MemberAccess): SafeHtml {
 /** Pages a moderator can open (the Inbox included). */
 const openCount = (m: MemberAccess) => AREA_KEYS.filter((a) => levelOf(m.access, a) !== 'none').length;
 
-/** "6 of 19 pages open · 2 editable" (app.js writes the same after a change). */
+/** "6 of 20 pages open · 2 editable" (app.js writes the same after a change). */
 function accessCount(m: MemberAccess): string {
   const edit = AREA_KEYS.filter((a) => levelOf(m.access, a) === 'edit').length;
   return `${openCount(m)} of ${plural(AREA_KEYS.length, 'page')} open${edit ? ` · ${edit} editable` : ' · view only'}`;
