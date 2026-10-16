@@ -107,6 +107,20 @@ function accessCount(m: MemberAccess): string {
   return `${openCount(m)} of ${plural(AREA_KEYS.length, 'page')} open${edit ? ` · ${edit} editable` : ' · view only'}`;
 }
 
+/** For the moderator list's filters: can edit something, view only, or just the inbox. */
+function accessKind(m: MemberAccess): 'edit' | 'view' | 'inbox' {
+  if (AREA_KEYS.some((a) => levelOf(m.access, a) === 'edit')) return 'edit';
+  return openCount(m) <= 1 ? 'inbox' : 'view';
+}
+
+/** "3 pages · 2 edit", "6 pages · view only", "Inbox only" (app.js writes the same after a change). */
+function pickSummary(m: MemberAccess): string {
+  const kind = accessKind(m);
+  if (kind === 'inbox') return 'Inbox only';
+  const edit = AREA_KEYS.filter((a) => levelOf(m.access, a) === 'edit').length;
+  return `${openCount(m)} pages · ${edit ? `${edit} edit` : 'view only'}`;
+}
+
 /** A tool is open when it gives more than the minimum (the Inbox is always visible, so it doesn't count). */
 function toolOpen(m: MemberAccess, tool: Tool): boolean {
   return areasOf(tool).some((a) => levelOf(m.access, a) !== levelsFor(a)[0]);
@@ -212,36 +226,62 @@ export function registerMemberRoutes(app: FastifyInstance, web: Web): void {
           ${levelSeg(m, a)}</div>`)}</div>
       </section>`;
     };
+    // Moderators in order, for "‹ 7 of 50 ›".
+    const position = (m: Member) => mods.findIndex((x) => x.id === m.id);
+    const pickHref = (m: Member) => `${b}/members?mod=${m.id}#moderator-access`;
+    const stepper = (m: Member) => {
+      const i = position(m);
+      const prev = mods[(i - 1 + mods.length) % mods.length]!;
+      const next = mods[(i + 1) % mods.length]!;
+      const arrow = (to: Member, dir: 'prev' | 'next') => html`<a class="acc-step-btn" href="${pickHref(to)}" data-mod-step="${to.id}" aria-label="${dir === 'prev' ? 'Previous' : 'Next'} moderator: ${nameOf(to)}" title="${dir === 'prev' ? 'Previous' : 'Next'}: ${nameOf(to)}">${icon(dir === 'prev' ? 'chevron-left' : 'chevron-right', 14)}</a>`;
+      return html`<div class="acc-step">${arrow(prev, 'prev')}<span>${String(i + 1)} of ${String(mods.length)}</span>${arrow(next, 'next')}</div>`;
+    };
     const editor = (m: Member) => html`<section class="acc-editor" id="mod-${m.id}" data-mod="${m.id}" aria-labelledby="acc-name-${m.id}" ${m.id === selected?.id ? '' : raw('hidden')}>
       <div class="acc-who">
-        ${avatar(nameOf(m), 32, { src: discordAvatar(m) })}
-        <div class="acc-who-t"><h3 id="acc-name-${m.id}" tabindex="-1">${nameOf(m)}</h3><div class="sub">@${m.username} · <span data-acc-summary>${accessCount(m)}</span></div></div>
-        <div class="acc-quick js-only">
-          <div class="seg" role="group" aria-label="Quick set for ${nameOf(m)}">
+        ${mods.length > 1
+          ? html`<button type="button" class="acc-name" data-acc-open aria-haspopup="dialog" aria-expanded="false" aria-controls="acc-picker" title="Choose another moderator (⌘K)">
+              ${avatar(nameOf(m), 32, { src: discordAvatar(m) })}<span class="acc-name-t"><span class="nm" id="acc-name-${m.id}">${nameOf(m)}</span><span class="hd">@${m.username}</span></span>${icon('chevron-down', 16, 'chev')}</button>`
+          : html`<div class="acc-name static">${avatar(nameOf(m), 32, { src: discordAvatar(m) })}<span class="acc-name-t"><span class="nm" id="acc-name-${m.id}">${nameOf(m)}</span><span class="hd">@${m.username}</span></span></div>`}
+        <span class="acc-who-sum" data-acc-summary>${accessCount(m)}</span>
+        <div class="acc-quick">
+          ${mods.length > 1 ? stepper(m) : ''}
+          <div class="seg js-only" role="group" aria-label="Quick set for ${nameOf(m)}">
             <button type="button" class="seg-item" data-preset="none" title="Only the tickets inbox, view only">Inbox only</button>
             <button type="button" class="seg-item" data-preset="view" title="View on every page">View all</button>
             <button type="button" class="seg-item" data-preset="edit" title="Edit on every page">Edit all</button>
           </div>
-          ${mods.length > 1 ? selectWrap(html`<select data-copy-from aria-label="Copy another moderator’s access to ${nameOf(m)}"><option value="">Copy from…</option>${mods.filter((x) => x.id !== m.id).map((x) => html`<option value="${x.id}">${nameOf(x)}</option>`)}</select>`, { sm: true }) : ''}
+          ${mods.length > 1 ? html`<span class="js-only">${selectWrap(html`<select data-copy-from aria-label="Copy another moderator’s access to ${nameOf(m)}"><option value="">Copy from…</option>${mods.filter((x) => x.id !== m.id).map((x) => html`<option value="${x.id}">${nameOf(x)}</option>`)}</select>`, { sm: true })}</span>` : ''}
         </div>
       </div>
       ${TOOLS.map((tool) => toolSection(m, tool))}
       <div class="nojs acc-save"><button type="submit" class="btn sm" form="${formId(m)}">Save ${nameOf(m)}’s access</button></div>
     </section>`;
-    // Floats at the bottom while the card is in view: pick whose access to change.
-    const switcher = html`<nav class="acc-switcher" aria-label="Choose a moderator">
-      ${mods.length > 6 ? html`<label class="acc-find js-only">${icon('search', 14)}<input type="search" placeholder="Find a moderator" aria-label="Find a moderator" autocomplete="off" data-mod-search></label>` : ''}
-      <div class="acc-chips" data-mod-chips>${mods.map((m) => html`<a class="acc-chip" href="${b}/members?mod=${m.id}#moderator-access" data-mod-pick="${m.id}" data-find="${`${nameOf(m)} ${m.username}`.toLowerCase()}" title="${nameOf(m)} · ${accessCount(m)}" ${m.id === selected?.id ? raw('aria-current="true"') : ''}>${avatar(nameOf(m), 24, { src: discordAvatar(m) })}<span class="n">${nameOf(m)}</span><span class="c" data-chip-count>${String(openCount(m))}</span></a>`)}</div>
-      <span class="acc-none small muted" data-mod-none hidden>No moderator matches.</span>
-    </nav>`;
+    // Choosing a moderator: opened from the name (or ⌘K). Search, filter, keyboard; one list for everyone.
+    const kinds = { all: mods.length, edit: 0, view: 0, inbox: 0 };
+    for (const m of mods) kinds[accessKind(m)]++;
+    const filterBtn = (k: keyof typeof kinds, label: string) => html`<button type="button" class="acc-filter" data-mod-filter="${k}" aria-pressed="${k === 'all' ? 'true' : 'false'}">${label} <span data-kind-count="${k}">${String(kinds[k])}</span></button>`;
+    const picker = html`<div class="acc-picker" id="acc-picker" role="dialog" aria-label="Choose a moderator" hidden>
+      <label class="acc-picker-search">${icon('search', 16)}<input type="search" placeholder="Find a moderator by name or @handle" aria-label="Find a moderator" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="true" aria-controls="acc-options" aria-autocomplete="list" data-mod-search><kbd>⌘K</kbd></label>
+      <div class="acc-filters" role="group" aria-label="Show">${filterBtn('all', 'All')}${filterBtn('edit', 'Can edit')}${filterBtn('view', 'View only')}${filterBtn('inbox', 'Inbox only')}</div>
+      <div class="acc-options-wrap">
+        <div class="acc-options-h">All moderators</div>
+        <div class="acc-options" id="acc-options" role="listbox" aria-label="Moderators">${mods.map((m) => html`<a class="acc-opt" id="acc-opt-${m.id}" role="option" href="${pickHref(m)}" data-mod-pick="${m.id}" data-kind="${accessKind(m)}" data-find="${`${nameOf(m)} ${m.username}`.toLowerCase()}" aria-selected="${m.id === selected?.id ? 'true' : 'false'}" tabindex="-1">
+          ${avatar(nameOf(m), 28, { src: discordAvatar(m) })}<span class="acc-opt-t"><span class="nm">${nameOf(m)}</span><span class="hd">@${m.username}</span></span><span class="acc-opt-sum" data-opt-summary>${pickSummary(m)}</span>${icon('check', 14, 'tick')}</a>`)}</div>
+        <p class="acc-none" data-mod-none hidden>No moderator matches.</p>
+      </div>
+      <div class="acc-keys" aria-hidden="true"><span><kbd>↑</kbd> <kbd>↓</kbd> move</span><span><kbd>↵</kbd> choose</span><span><kbd>esc</kbd> close</span></div>
+    </div>`;
+    // Without JavaScript: a plain list of links to each moderator.
+    const fallback = html`<nav class="nojs acc-fallback" aria-label="Moderators"><span class="small muted">Moderators:</span> ${mods.map((m) => html`<a href="${pickHref(m)}" ${m.id === selected?.id ? raw('aria-current="true"') : ''}>${nameOf(m)}</a>`)}</nav>`;
 
     const modAccess = html`<div class="card access-card readable" id="moderator-access" data-access-editor>
-      <div class="card-h"><div><h2>Moderator access</h2><div class="desc">${mods.length > 1 ? 'Pick a moderator in the bar at the bottom, then open the tools they need. ' : ''}<strong>View</strong> shows a page with its controls turned off; <strong>Edit</strong> lets them change it. GitHub and Discord connections, workspace settings, deployment and members stay with admins.</div></div></div>
+      <div class="card-h"><div><h2>Moderator access</h2><div class="desc">${mods.length > 1 ? 'Click a moderator’s name (or press ⌘K) to choose another, then open the tools they need. ' : ''}<strong>View</strong> shows a page with its controls turned off; <strong>Edit</strong> lets them change it. GitHub and Discord connections, workspace settings, deployment and members stay with admins.</div></div></div>
       ${mods.length
         ? html`${mods.map(accessForm)}
+            ${mods.length > 1 ? html`${picker}${fallback}` : ''}
             ${mods.map(editor)}
             <div class="card-note">Changes save right away. Applying or dismissing AI suggestions, on Review, tickets or issues, needs Edit on Review. “Use these settings” on a re-run also needs Edit on Actions, Label groups and Prompt. Updating the panel in Discord needs Edit on Discord tickets › Panel.</div>
-            ${mods.length > 1 ? switcher : ''}`
+`
         : empty('users', 'No moderators yet', 'Moderators can read the tickets inbox. Invite someone as a moderator, then choose what else they can open here.', owner ? linkBtn(`${b}/members?invite=1#invite`, 'Invite', { icon: 'user-plus' }) : null)}
     </div>`;
 

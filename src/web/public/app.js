@@ -766,11 +766,16 @@
       var text = openAll + ' of ' + plural(all.length, 'page') + ' open' + (editAll ? ' · ' + editAll + ' editable' : ' · view only');
       var sum = $('[data-acc-summary]', ed);
       if (sum) sum.textContent = text;
-      var chip = accCard.querySelector('[data-mod-pick="' + ed.getAttribute('data-mod') + '"]');
-      if (chip) {
-        var c = $('[data-chip-count]', chip);
-        if (c) c.textContent = String(openAll);
-        chip.title = ($('.n', chip) ? $('.n', chip).textContent + ' · ' : '') + text;
+      // Their row in the picker, and the filters' counts.
+      var opt = document.getElementById('acc-opt-' + ed.getAttribute('data-mod'));
+      if (opt) {
+        var kind = editAll ? 'edit' : openAll <= 1 ? 'inbox' : 'view';
+        opt.setAttribute('data-kind', kind);
+        var os = $('[data-opt-summary]', opt);
+        if (os) os.textContent = kind === 'inbox' ? 'Inbox only' : openAll + ' pages · ' + (editAll ? editAll + ' edit' : 'view only');
+        var counts = { all: 0, edit: 0, view: 0, inbox: 0 };
+        $$('.acc-opt').forEach(function (o) { counts.all++; counts[o.getAttribute('data-kind')]++; });
+        $$('[data-kind-count]').forEach(function (c) { c.textContent = String(counts[c.getAttribute('data-kind-count')]); });
       }
     }
     function expand(sec, open) {
@@ -792,32 +797,140 @@
     }
 
     // Picking a moderator: their editor shows, the address follows (so a reload keeps them).
-    function pick(id, focus) {
+    function pick(id) {
       var ed = accCard.querySelector('.acc-editor[data-mod="' + id + '"]');
       if (!ed) return;
       $$('.acc-editor', accCard).forEach(function (x) { x.hidden = x !== ed; });
-      $$('[data-mod-pick]', accCard).forEach(function (c) {
-        if (c === accCard.querySelector('[data-mod-pick="' + id + '"]')) c.setAttribute('aria-current', 'true');
-        else c.removeAttribute('aria-current');
-      });
+      $$('.acc-opt').forEach(function (o) { o.setAttribute('aria-selected', o.getAttribute('data-mod-pick') === id ? 'true' : 'false'); });
       try {
         var url = new URL(location.href);
         url.searchParams.set('mod', id);
         url.hash = 'moderator-access';
         history.replaceState(null, '', url.toString());
-      } catch (err) { /* old browser: the link still works */ }
+      } catch (err) { /* old browser: the links still work */ }
       // Keep whose access this is in view.
       var who = $('.acc-who', ed);
       if (who && who.getBoundingClientRect().top < 0) ed.scrollIntoView({ block: 'start', behavior: reduceMotion ? 'auto' : 'smooth' });
-      if (focus) { var h = $('h3', ed); if (h) h.focus({ preventScroll: true }); }
+      var name = $('[data-acc-open]', ed);
+      if (name) name.focus({ preventScroll: true });
+    }
+
+    // ---- The moderator picker: opened from the name (or ⌘K) ----
+    var picker = document.getElementById('acc-picker');
+    var search = picker && $('[data-mod-search]', picker);
+    var opener = null;
+    var active = null;
+    var filter = 'all';
+    function visibleOpts() { return $$('.acc-opt', picker).filter(function (o) { return !o.hidden; }); }
+    function setActive(o) {
+      if (active) active.classList.remove('active');
+      active = o || null;
+      if (active) {
+        active.classList.add('active');
+        search.setAttribute('aria-activedescendant', active.id);
+        var list = active.parentNode;
+        if (active.offsetTop < list.scrollTop) list.scrollTop = active.offsetTop;
+        else if (active.offsetTop + active.offsetHeight > list.scrollTop + list.clientHeight) list.scrollTop = active.offsetTop + active.offsetHeight - list.clientHeight;
+      } else search.removeAttribute('aria-activedescendant');
+    }
+    function applyFilter() {
+      var q = search.value.trim().toLowerCase();
+      $$('.acc-opt', picker).forEach(function (o) {
+        o.hidden = !((filter === 'all' || o.getAttribute('data-kind') === filter) && (!q || o.getAttribute('data-find').indexOf(q) !== -1));
+      });
+      var shown = visibleOpts();
+      $('[data-mod-none]', picker).hidden = shown.length > 0;
+      setActive(shown.filter(function (o) { return o.getAttribute('aria-selected') === 'true'; })[0] || shown[0]);
+    }
+    function place() {
+      if (!picker || picker.hidden || !opener) return;
+      var r = opener.getBoundingClientRect();
+      var w = Math.min(420, document.documentElement.clientWidth - 24);
+      picker.style.width = w + 'px';
+      picker.style.left = Math.max(12, Math.min(r.left, document.documentElement.clientWidth - w - 12)) + 'px';
+      picker.style.top = Math.min(r.bottom + 8, window.innerHeight - 160) + 'px';
+      picker.style.maxHeight = Math.max(240, window.innerHeight - r.bottom - 24) + 'px';
+    }
+    function openPicker(from) {
+      if (!picker) return;
+      opener = from || $('.acc-editor:not([hidden]) [data-acc-open]', accCard);
+      if (!opener) return;
+      picker.hidden = false;
+      opener.setAttribute('aria-expanded', 'true');
+      search.value = '';
+      applyFilter();
+      place();
+      search.focus({ preventScroll: true });
+    }
+    function closePicker(focusBack) {
+      if (!picker || picker.hidden) return;
+      picker.hidden = true;
+      if (opener) {
+        opener.setAttribute('aria-expanded', 'false');
+        if (focusBack) opener.focus({ preventScroll: true });
+      }
+    }
+    if (picker) {
+      // Out of the card, so it can float over the page.
+      document.body.appendChild(picker);
+      window.addEventListener('scroll', place, { passive: true });
+      window.addEventListener('resize', place);
+      document.addEventListener('mousedown', function (e) {
+        if (!picker.hidden && !picker.contains(e.target) && !(opener && opener.contains(e.target))) closePicker(false);
+      });
+      search.addEventListener('input', applyFilter);
+      search.addEventListener('keydown', function (e) {
+        var shown = visibleOpts();
+        var i = shown.indexOf(active);
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+          e.preventDefault();
+          if (shown.length) setActive(shown[(i + (e.key === 'ArrowDown' ? 1 : -1) + shown.length) % shown.length]);
+        } else if (e.key === 'Enter') {
+          e.preventDefault();
+          if (active) { closePicker(false); pick(active.getAttribute('data-mod-pick')); }
+        }
+      });
+      picker.addEventListener('keydown', function (e) { if (e.key === 'Escape') { e.preventDefault(); closePicker(true); } });
+      picker.addEventListener('click', function (e) {
+        var f = e.target.closest('[data-mod-filter]');
+        if (f) {
+          filter = f.getAttribute('data-mod-filter');
+          $$('[data-mod-filter]', picker).forEach(function (x) { x.setAttribute('aria-pressed', x === f ? 'true' : 'false'); });
+          applyFilter();
+          search.focus({ preventScroll: true });
+          return;
+        }
+        var o = e.target.closest('.acc-opt');
+        if (o && !(e.metaKey || e.ctrlKey || e.shiftKey || e.button > 0)) {
+          e.preventDefault();
+          closePicker(false);
+          pick(o.getAttribute('data-mod-pick'));
+        }
+      });
+      picker.addEventListener('mousemove', function (e) {
+        var o = e.target.closest('.acc-opt');
+        if (o && o !== active) setActive(o);
+      });
+      // ⌘K / Ctrl+K opens it from anywhere on the page.
+      document.addEventListener('keydown', function (e) {
+        if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
+          e.preventDefault();
+          if (picker.hidden) openPicker(null); else closePicker(true);
+        }
+      });
     }
 
     accCard.addEventListener('click', function (e) {
-      var chip = e.target.closest('[data-mod-pick]');
-      if (chip) {
+      var open = e.target.closest('[data-acc-open]');
+      if (open) {
+        if (picker && !picker.hidden && opener === open) closePicker(true); else openPicker(open);
+        return;
+      }
+      var step = e.target.closest('[data-mod-step]');
+      if (step) {
         if (e.metaKey || e.ctrlKey || e.shiftKey || e.button > 0) return;
         e.preventDefault();
-        pick(chip.getAttribute('data-mod-pick'), true);
+        pick(step.getAttribute('data-mod-step'));
         return;
       }
       var ex = e.target.closest('[data-acc-expand]');
@@ -855,49 +968,6 @@
       }
       if (t.type === 'radio' && t.hasAttribute('data-tool')) summarize(ed);
     });
-
-    // With many moderators: type to find one, Enter picks the first match, arrows move along the bar.
-    var search = accCard.querySelector('[data-mod-search]');
-    if (search) {
-      search.addEventListener('input', function () {
-        var q = search.value.trim().toLowerCase();
-        var shown = 0;
-        $$('[data-mod-pick]', accCard).forEach(function (c) {
-          var hit = !q || c.getAttribute('data-find').indexOf(q) !== -1;
-          c.hidden = !hit;
-          if (hit) shown++;
-        });
-        var none = accCard.querySelector('[data-mod-none]');
-        if (none) none.hidden = shown > 0;
-      });
-      search.addEventListener('keydown', function (e) {
-        if (e.key !== 'Enter') return;
-        e.preventDefault();
-        var first = $$('[data-mod-pick]', accCard).filter(function (c) { return !c.hidden; })[0];
-        if (first) pick(first.getAttribute('data-mod-pick'), true);
-      });
-    }
-    var chips = accCard.querySelector('[data-mod-chips]');
-    if (chips) {
-      chips.addEventListener('keydown', function (e) {
-        if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
-        var list = $$('[data-mod-pick]', chips).filter(function (c) { return !c.hidden; });
-        var i = list.indexOf(document.activeElement);
-        if (i === -1) return;
-        e.preventDefault();
-        var next = list[(i + (e.key === 'ArrowRight' ? 1 : -1) + list.length) % list.length];
-        next.focus();
-      });
-      // The chosen moderator is in view in the bar (scrolling the bar only, never the page).
-      var current = chips.querySelector('[aria-current="true"]');
-      if (current) chips.scrollLeft = current.offsetLeft - (chips.clientWidth - current.offsetWidth) / 2;
-      // More moderators than fit: the bar fades at its end until it's scrolled there.
-      var fade = function () { chips.classList.toggle('more', chips.scrollWidth - chips.scrollLeft - chips.clientWidth > 4); };
-      chips.addEventListener('scroll', fade, { passive: true });
-      window.addEventListener('resize', fade);
-      if (search) search.addEventListener('input', fade);
-      fade();
-    }
   })();
 
   // ---- Triage › Actions: modes per source ------------------------------------------------------

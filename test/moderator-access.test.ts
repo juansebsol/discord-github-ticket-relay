@@ -116,7 +116,7 @@ describe('Members › Moderator access', () => {
     // One form per moderator, saved on every change; their editor says whose access it is.
     expect(body).toContain(`<form id="acc-${mod.user.id}" method="post" action="${w()}/members/${mod.user.id}/access" data-async hidden>`);
     expect(body).toContain(`<section class="acc-editor" id="mod-${mod.user.id}" data-mod="${mod.user.id}"`);
-    expect(body).toContain(`<h3 id="acc-name-${mod.user.id}" tabindex="-1">mia</h3>`);
+    expect(body).toContain(`<span class="nm" id="acc-name-${mod.user.id}">mia</span>`);
     expect(body).toContain('2 of 19 pages open · 1 editable');
     // No Access / View / Edit per page: the Inbox can't be turned off, Activity has nothing to edit.
     const radios = (name: string) => [...body.matchAll(new RegExp(`<input type="radio" name="${name.replace('.', '\\.')}" value="(\\w+)" form="acc-${mod.user.id}"[^>]*?( checked)?>`, 'g'))].map((m) => `${m[1]}${m[2] ? '*' : ''}`);
@@ -130,15 +130,24 @@ describe('Members › Moderator access', () => {
     expect(body).toContain('1 of 6 pages · view only');
     expect(body).toContain('1 of 5 pages · 1 editable');
     expect(body).toContain('<section class="acc-tool" data-tool="issues">');
-    // Quick sets, and no moderator bar with only one moderator.
+    // Quick sets; with one moderator there's nobody to pick, so no picker.
     expect(body).toContain('data-preset="edit"');
-    expect(body).not.toContain('class="acc-switcher"');
+    expect(body).not.toContain('id="acc-picker"');
+    expect(body).not.toContain('data-acc-open');
     const other = await makeAdmin(env, 'noah');
     await env.server.inject({ method: 'POST', url: `/invite/${await createInvite(env.db, wid(), ws.owner.user.id, 'moderator')}`, ...form(other) });
     const two = (await page(`/members?mod=${other.user.id}`, ws.owner)).body;
-    expect(two).toContain('class="acc-switcher"');
-    expect(two).toContain(`data-mod-pick="${other.user.id}"`);
-    expect(two).toMatch(new RegExp(`data-mod-pick="${other.user.id}"[^>]*aria-current="true"`));
+    // The name opens the picker: search, filters with counts, everyone, the chosen one marked.
+    expect(two).toContain('<div class="acc-picker" id="acc-picker" role="dialog" aria-label="Choose a moderator" hidden>');
+    expect(two).toContain('data-acc-open aria-haspopup="dialog" aria-expanded="false" aria-controls="acc-picker"');
+    expect(two).toMatch(/data-mod-filter="all" aria-pressed="true">All <span data-kind-count="all">2<\/span>/);
+    expect(two).toMatch(/data-mod-filter="edit" aria-pressed="false">Can edit <span data-kind-count="edit">1<\/span>/);
+    expect(two).toMatch(new RegExp(`data-mod-pick="${other.user.id}" data-kind="view"[^>]*aria-selected="true"`));
+    expect(two).toMatch(new RegExp(`data-mod-pick="${mod.user.id}" data-kind="edit"[^>]*aria-selected="false"`));
+    expect(two).toContain('2 pages · 1 edit');
+    // ‹ 2 of 2 › steps through everyone, as links that work without JavaScript too.
+    expect(two).toContain('<span>2 of 2</span>');
+    expect(two).toContain(`href="${w()}/members?mod=${mod.user.id}#moderator-access" data-mod-step="${mod.user.id}"`);
     expect(two).toContain(`<section class="acc-editor" id="mod-${mod.user.id}" data-mod="${mod.user.id}" aria-labelledby="acc-name-${mod.user.id}" hidden>`);
     expect(two).toContain(`<option value="${mod.user.id}">mia</option>`);
     // The members table sums it up per tool.
