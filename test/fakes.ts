@@ -15,6 +15,11 @@ export interface FakeRepo {
   archived: boolean;
   labels: string[];
   issues: { number: number; title: string; body: string; labels: string[]; created_at: string; updated_at?: string; user: string; state?: 'open' | 'closed'; state_reason?: string | null; closed_at?: string | null; comments?: string[]; bodyEdits?: number }[];
+  /** Files on the default branch, by path (README.md, docs/FAQ.md…). */
+  files?: Record<string, string>;
+  releases?: { tag: string; name?: string; published_at?: string; body?: string; draft?: boolean; prerelease?: boolean }[];
+  description?: string | null;
+  topics?: string[];
 }
 
 /** How the next create-issue call behaves. */
@@ -84,6 +89,10 @@ export class FakeGitHub {
         archived: r.archived ?? false,
         labels: r.labels ?? ['bug', 'support'],
         issues: [],
+        files: r.files ?? {},
+        releases: r.releases ?? [],
+        description: r.description ?? null,
+        topics: r.topics ?? [],
       };
       this.repos.set(repo.id, repo);
       ids.push(repo.id);
@@ -186,6 +195,26 @@ export class FakeGitHub {
         return json(201, { name: body.name, color: body.color });
       }
       return json(200, r!.labels.map((name) => ({ name })));
+    }
+    // Repository files and releases (Contents: read, needed for private repositories).
+    if ((m = /^\/repos\/([^/]+)\/([^/]+)$/.exec(path)) && method === 'GET') {
+      const r = this.repoByName(decodeURIComponent(m[1]!), decodeURIComponent(m[2]!));
+      if (!accessible(r)) return json(404, { message: 'Not Found' });
+      return json(200, { ...this.repoJson(r!), description: r!.description ?? null, homepage: null, topics: r!.topics ?? [] });
+    }
+    if ((m = /^\/repos\/([^/]+)\/([^/]+)\/(readme|contents\/(.+)|releases)$/.exec(path)) && method === 'GET') {
+      const r = this.repoByName(decodeURIComponent(m[1]!), decodeURIComponent(m[2]!));
+      if (!accessible(r)) return json(404, { message: 'Not Found' });
+      if (r!.private && !this.installationPermissions.contents) return json(403, { message: 'Resource not accessible by integration' });
+      const files = r!.files ?? {};
+      if (m[3] === 'releases') {
+        return json(200, (r!.releases ?? []).map((x) => ({ tag_name: x.tag, name: x.name ?? null, published_at: x.published_at ?? null, body: x.body ?? '', draft: Boolean(x.draft), prerelease: Boolean(x.prerelease) })));
+      }
+      const want = m[3] === 'readme' ? Object.keys(files).find((f) => /^readme(\.|$)/i.test(f)) : m[4]!.split('/').map(decodeURIComponent).join('/');
+      if (want && files[want] !== undefined) return json(200, { type: 'file', path: want, size: files[want]!.length, encoding: 'base64', content: Buffer.from(files[want]!).toString('base64') });
+      const inside = want ? Object.keys(files).filter((f) => f.startsWith(`${want}/`) && !f.slice(want.length + 1).includes('/')) : [];
+      if (m[4] && inside.length) return json(200, inside.map((f) => ({ type: 'file', path: f, size: files[f]!.length })));
+      return json(404, { message: 'Not Found' });
     }
     if ((m = /^\/repos\/([^/]+)\/([^/]+)\/commits$/.exec(path))) {
       const r = this.repoByName(decodeURIComponent(m[1]!), decodeURIComponent(m[2]!));
@@ -429,6 +458,8 @@ export class FakeAnthropic {
     parts: [], parts_confidence: 0, related: [], related_confidence: 0, shared: false, shared_confidence: 0, shared_apps: [], shared_issue: null,
     right_app: null, right_app_confidence: 0, version: null, labels: {}, priority: 'medium', priority_confidence: 80, missing_context: null,
   };
+  /** The default answer to a request to write an app's TRIAGE.md. */
+  knowledge: Json = { triage_md: '## What it is\n- A test app.', answers: [] };
   queue: ClaudeBehavior[] = [];
   requests: { key: string; body: Json }[] = [];
   models = [
@@ -451,7 +482,8 @@ export class FakeAnthropic {
     if (url.pathname === '/v1/messages' && init.method === 'POST') {
       const body = JSON.parse(String(init.body));
       this.requests.push({ key, body });
-      const behavior = this.queue.shift() ?? this.verdict;
+      const writing = String(body.system?.[0]?.text ?? '').startsWith('You write TRIAGE.md');
+      const behavior = this.queue.shift() ?? (writing ? this.knowledge : this.verdict);
       if (typeof behavior === 'object' && 'status' in behavior && typeof behavior.status === 'number') {
         return this.error(behavior.status, String(behavior.type), String(behavior.message ?? 'error'));
       }

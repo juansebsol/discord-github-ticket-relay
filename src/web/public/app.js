@@ -363,7 +363,7 @@
     update();
   });
 
-  // AI triage › Knowledge: an app's TRIAGE.md editor.
+  // AI triage › Knowledge: the team's notes on an app.
   (function () {
     var editor = document.querySelector('form[data-kn-editor]');
     var text = editor && editor.querySelector('textarea[name="body"]');
@@ -389,34 +389,16 @@
       text.scrollTop = text.scrollHeight;
       text.dispatchEvent(new Event('input', { bubbles: true }));
     }
-    var tpl = editor.querySelector('[data-kn-template]');
     text.addEventListener('input', measure);
-    // Cancel puts everything back: the text, the template button and the Answer buttons.
+    // Cancel puts everything back: the text and the Answer buttons.
     editor.addEventListener('reset', function () {
       setTimeout(function () {
         measure();
-        if (tpl) tpl.hidden = Boolean(text.value.trim());
         $$('[data-kn-add]').forEach(function (b) { b.disabled = false; b.lastChild.textContent = 'Answer'; });
       }, 0);
     });
 
-    if (tpl) {
-      tpl.addEventListener('click', function () {
-        var t = tpl.getAttribute('data-kn-template');
-        if (text.value.trim()) append(t);
-        else {
-          text.value = t;
-          text.focus();
-          // The cursor goes to the first empty line, under Known issues.
-          var at = t.indexOf('- ') + 2;
-          text.setSelectionRange(at, at);
-          text.dispatchEvent(new Event('input', { bubbles: true }));
-        }
-        tpl.hidden = true;
-      });
-    }
-
-    // "Answer" on one of Claude's questions: adds it to TRIAGE.md, ready for the answer.
+    // "Answer" on one of Claude's questions: adds it to the notes, ready for the answer.
     var HEADING = '## Answers to Claude’s questions';
     document.addEventListener('click', function (e) {
       var b = e.target.closest('[data-kn-add]');

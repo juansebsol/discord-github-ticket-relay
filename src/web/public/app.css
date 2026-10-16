@@ -1315,6 +1315,9 @@ a.feed-row:focus-visible { outline-offset: -2px; }
 
 /* ---- AI triage › Knowledge (each app's TRIAGE.md) ---------------------------------------------- */
 .kn-of { font-size: 13px; font-weight: 400; color: var(--muted); }
+.kn-spin { animation: spin 1s linear infinite; }
+.kn-busy { display: inline-flex; align-items: center; gap: 8px; height: 32px; font-size: 13px; color: var(--muted); white-space: nowrap; }
+.kn-auto { border-top: 1px solid var(--border); }
 .kn-grid { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr)); gap: 16px; }
 .kn-card { display: flex; flex-direction: column; gap: 12px; height: 100%; padding: 16px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); box-shadow: var(--shadow); color: var(--text); text-decoration: none; transition: border-color var(--t-fast), background var(--t-fast); }
 .kn-card:hover { border-color: var(--border-hover); text-decoration: none; }
@@ -1326,43 +1329,80 @@ a.feed-row:focus-visible { outline-offset: -2px; }
 .kn-new { display: inline-flex; align-items: center; gap: 4px; height: 22px; padding: 0 8px; border-radius: var(--r-full); background: var(--accent-soft); color: var(--accent-text); font: 500 12px/1 var(--font); white-space: nowrap; flex: none; }
 .kn-file { display: inline-flex; align-items: center; gap: 6px; min-width: 0; font-size: 13px; line-height: 20px; color: var(--text); }
 .kn-file > .ic { color: var(--muted); flex: none; }
-.kn-file > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kn-file-state { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+.kn-file.is-done .kn-file-state { color: var(--text); }
+.kn-file.is-running .kn-file-state, .kn-file.is-queued .kn-file-state { color: var(--accent-text); }
+.kn-file.is-failed .kn-file-state { color: var(--warn-text); }
+.kn-file.is-failed > .ic { color: var(--warn); }
 .kn-card-text { flex: 1; font-size: 13px; line-height: 20px; color: var(--muted); }
-.kn-excerpt { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; white-space: pre-line; font: 12px/18px var(--mono); }
 .kn-card-f { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 12px; border-top: 1px solid var(--border); font-size: 12px; line-height: 16px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.kn-card-meta { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
 .kn-open { display: inline-flex; align-items: center; gap: 4px; color: var(--accent-text); font-weight: 500; }
 .kn-open .ic { transition: transform var(--t-fast) var(--ease); }
 .kn-card:hover .kn-open .ic { transform: translateX(2px); }
 
 .kn-title { display: inline-flex; align-items: center; gap: 10px; }
 .kn-layout { grid-template-columns: minmax(0, 1fr) 360px; }
+.kn-written .card-h .title .ic { color: var(--accent-text); }
+.kn-progress { display: flex; align-items: flex-start; gap: 12px; padding: 16px 20px; border-bottom: 1px solid var(--border); background: var(--accent-soft); }
+.kn-progress > .ic { color: var(--accent-text); flex: none; }
+.kn-progress strong { font-size: 13px; line-height: 20px; font-weight: 500; }
+.kn-progress p { margin: 2px 0 0; }
+.kn-empty { padding: 28px 20px 24px; }
+.kn-empty-ic { display: inline-grid; place-items: center; width: 40px; height: 40px; border-radius: var(--r); background: var(--accent-soft); color: var(--accent-text); }
+.kn-empty h3 { margin: 12px 0 4px; font-size: 15px; line-height: 22px; font-weight: 600; }
+.kn-empty > p { margin: 0 0 12px; max-width: 640px; font-size: 13px; line-height: 20px; color: var(--muted); }
+.kn-sections { list-style: none; margin: 0 0 20px; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr)); gap: 8px 24px; }
+.kn-sections li { display: grid; gap: 2px; padding-left: 12px; border-left: 2px solid var(--border); font-size: 13px; line-height: 18px; }
+.kn-sections span { color: var(--muted); font-size: 12px; line-height: 16px; }
+
+/* Claude's TRIAGE.md, rendered. */
+.kn-doc { font-size: 13px; line-height: 21px; max-width: 860px; }
+.kn-doc h3 { margin: 22px 0 6px; font-size: 14px; line-height: 20px; font-weight: 600; }
+.kn-doc h4 { margin: 16px 0 4px; font-size: 13px; line-height: 20px; font-weight: 600; }
+.kn-doc > :first-child { margin-top: 0; }
+.kn-doc p { margin: 0 0 10px; }
+.kn-doc ul, .kn-doc ol { margin: 0 0 10px; padding-left: 20px; }
+.kn-doc li { margin: 3px 0; }
+.kn-doc li::marker { color: var(--faint); }
+.kn-doc code { padding: 1px 4px; border-radius: var(--r-xs); background: var(--surface-2); }
+.kn-doc a { font-variant-numeric: tabular-nums; }
+.kn-raw { border-top: 1px solid var(--border); }
+.kn-raw > summary { display: flex; align-items: center; gap: 4px; padding: 10px 20px; font-size: 12px; line-height: 16px; font-weight: 500; cursor: pointer; list-style: none; }
+.kn-raw > summary::-webkit-details-marker { display: none; }
+.kn-raw > summary .chev, .kn-answered > summary .chev { color: var(--muted); transition: transform var(--t) var(--ease); }
+.kn-raw[open] > summary .chev, .kn-answered[open] > summary .chev { transform: rotate(90deg); }
+.kn-raw .prompt-pre { border-top: 1px solid var(--border); max-height: 480px; }
+
 .kn-editor { display: flex; flex-direction: column; overflow: hidden; }
-.kn-file-h { display: flex; align-items: center; gap: 12px; min-height: 44px; padding: 6px 16px; background: var(--surface-2); border-bottom: 1px solid var(--border); }
-.kn-file-h .kn-file { flex: 1; }
+.kn-editor .card-h { align-items: flex-start; }
 .kn-meter { font-size: 12px; line-height: 16px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .kn-meter.near { color: var(--warn-text); }
-textarea.kn-text { min-height: 520px; padding: 16px 20px; border: 0; border-radius: 0; background: var(--surface); font: 13px/22px var(--mono); tab-size: 2; }
-textarea.kn-text:hover { border-color: transparent; }
-textarea.kn-text:focus { box-shadow: inset 0 0 0 2px var(--ring); }
-.kn-editor .card-f { margin-top: 0; }
+textarea.kn-text { min-height: 200px; padding: 14px 20px; border: 0; border-top: 1px solid var(--border); border-radius: 0; background: var(--surface); font: 13px/22px var(--mono); tab-size: 2; }
+textarea.kn-text:hover { border-color: var(--border); }
+textarea.kn-text:focus { border-color: var(--border); box-shadow: inset 0 0 0 2px var(--ring); }
 .kn-keys kbd { font: 500 11px/1 var(--mono); padding: 2px 5px; margin-left: 2px; border-radius: 4px; border: 1px solid var(--border-strong); background: var(--surface-2); color: var(--muted); }
 
+.kn-qg + .kn-qg { border-top: 1px solid var(--border); }
+.kn-qg-h { display: grid; gap: 2px; padding: 12px 20px 4px; }
+.kn-qg-h .t { font-size: 12px; line-height: 16px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+.kn-qg-h .d { font-size: 12px; line-height: 16px; color: var(--muted); }
+.kn-answered > summary { display: flex; align-items: center; gap: 4px; padding: 12px 20px; font-size: 12px; line-height: 16px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); cursor: pointer; list-style: none; }
+.kn-answered > summary::-webkit-details-marker { display: none; }
 .kn-qs { list-style: none; margin: 0; padding: 0; }
-.kn-q { padding: 12px 20px; border-top: 1px solid var(--border); }
-.kn-q:first-child { border-top: 0; }
+.kn-q { padding: 10px 20px; }
+.kn-q + .kn-q { border-top: 1px solid var(--border); }
 .kn-q.fresh { box-shadow: inset 2px 0 0 var(--accent); }
-.kn-q:not(.fresh) .kn-q-text { color: var(--muted); }
 .kn-q-text { margin: 0; font-size: 13px; line-height: 20px; }
+.kn-q-answer { display: grid; grid-template-columns: 12px minmax(0, 1fr); gap: 6px; margin-top: 4px; font-size: 12px; line-height: 18px; color: var(--muted); }
+.kn-q-answer > .ic { margin-top: 3px; color: var(--ok); }
+.kn-q-answer p { margin: 0; }
 .kn-q-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-top: 6px; font-size: 12px; line-height: 16px; color: var(--muted); }
 .kn-q-new { color: var(--accent-text); font-weight: 600; }
 .kn-q-add { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; font-size: 12px; font-weight: 500; }
-.kn-tips { list-style: none; margin: 0; padding: 0 20px 4px; }
-.kn-tips li { display: grid; gap: 2px; padding: 10px 0; border-top: 1px solid var(--border); font-size: 13px; line-height: 20px; }
-.kn-tips li:first-child { border-top: 0; }
-.kn-tips span { color: var(--muted); }
-.kn-tips .kn-eg { font-size: 12px; line-height: 16px; font-style: italic; }
-.kn-tips .kn-eg::before { content: 'e.g. '; font-style: normal; }
-@media (max-width: 1100px) { .kn-layout { grid-template-columns: minmax(0, 1fr); } textarea.kn-text { min-height: 360px; } }
+.kn-props dd { flex-wrap: wrap; min-width: 0; font-size: 13px; }
+.kn-paths { display: flex; flex-wrap: wrap; gap: 4px 10px; min-width: 0; }
+@media (max-width: 1100px) { .kn-layout { grid-template-columns: minmax(0, 1fr); } }
 
 /* "Claude would be surer if it knew…": on a ticket's triage card and on Review (team-only). */
 .tri-ask { display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 8px; margin-top: 12px; padding: 10px 12px; border-radius: var(--r-sm); background: var(--accent-soft); border: 1px solid var(--info-border); font-size: 13px; line-height: 20px; }

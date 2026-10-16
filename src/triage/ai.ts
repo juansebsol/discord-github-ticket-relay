@@ -161,6 +161,31 @@ export class TriageAi {
     });
   }
 
+  /**
+   * Anything else Claude writes with a fixed answer format, such as an app's TRIAGE.md. Longer
+   * than a ticket's triage, so it gets more time. Errors are classified like triage's.
+   */
+  async write<T>(apiKey: string, model: string, system: string, user: string, schema: z.ZodType<T>): Promise<Written<T>> {
+    try {
+      const response = await this.client(apiKey).messages.parse(
+        {
+          model,
+          max_tokens: 8000,
+          system: [{ type: 'text', text: system }],
+          messages: [{ role: 'user', content: user }],
+          output_config: { format: zodOutputFormat(schema) },
+        },
+        { timeout: 180_000 },
+      );
+      if (response.stop_reason === 'refusal') throw new TriageAiError('skip', 'Claude declined to write it.');
+      if (response.stop_reason === 'max_tokens') throw new TriageAiError('skip', 'Claude’s answer was cut off.');
+      if (!response.parsed_output) throw new TriageAiError('skip', 'Claude’s answer couldn’t be read.');
+      return { output: response.parsed_output as T, inputTokens: response.usage.input_tokens + (response.usage.cache_read_input_tokens ?? 0) + (response.usage.cache_creation_input_tokens ?? 0), outputTokens: response.usage.output_tokens };
+    } catch (err) {
+      throw classifyAiError(err);
+    }
+  }
+
   /** Models this key can use that support structured output, newest first. */
   async listModels(apiKey: string): Promise<ModelOption[]> {
     const out: ModelOption[] = [];
@@ -184,13 +209,17 @@ export class TriageAi {
     }
   }
 
-  async classify(apiKey: string, model: string, system: string, user: string, schema: ReturnType<typeof verdictSchema> = VerdictSchema, images: TicketImage[] = []): Promise<Classification> {
+  /**
+   * system: the instructions, then optionally the ticket's app's TRIAGE.md. Each part is cached
+   * on its own: the instructions are the same for every ticket in a workspace, and the TRIAGE.md
+   * for every ticket of that app.
+   */
+  async classify(apiKey: string, model: string, system: string | string[], user: string, schema: ReturnType<typeof verdictSchema> = VerdictSchema, images: TicketImage[] = []): Promise<Classification> {
     try {
       const response = await this.client(apiKey).messages.parse({
         model,
         max_tokens: 8000,
-        // The system prompt is the same for every ticket in a workspace, so cache it.
-        system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }],
+        system: (Array.isArray(system) ? system : [system]).filter(Boolean).map((text) => ({ type: 'text' as const, text, cache_control: { type: 'ephemeral' as const } })),
         // Screenshots go before the text that refers to them.
         messages: [{
           role: 'user',
@@ -208,6 +237,13 @@ export class TriageAi {
       throw classifyAiError(err);
     }
   }
+}
+
+/** A structured answer to one of the other requests (writing an app's TRIAGE.md). */
+export interface Written<T> {
+  output: T;
+  inputTokens: number;
+  outputTokens: number;
 }
 
 /** What Claude was shown, to check every reference in its answer against. */

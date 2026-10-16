@@ -7,7 +7,7 @@ import { can } from '../../domain/permissions.js';
 import { createApp, deleteApp, getApp, getGitHubConnection, listApps, moveApp, setAppEnabled, updateApp } from '../../domain/store.js';
 import { UserFacingError, type AppRow, type Deps } from '../../domain/types.js';
 import { html, raw } from '../../lib/html.js';
-import { isBlank, listKnowledge } from '../../triage/knowledge.js';
+import { isWritten, listKnowledge, notesOf } from '../../triage/knowledge.js';
 import { avatar, badge, csrfField, empty, formatDate, icon, iconBtn, labelTag, linkBtn, menu, notice, pageHeader, pill, plural, selectWrap, submitBtn, tag, timeAgo, viewOnlyTag } from '../ui.js';
 import { setFlash } from '../session.js';
 import type { Web, WorkspaceRequestContext } from '../server.js';
@@ -126,9 +126,10 @@ export function registerAppRoutes(app: FastifyInstance, web: Web): void {
                   <td>${a.labels.length ? html`<div class="tags">${a.labels.map((l) => labelTag(l))}</div>` : html`<span class="em">—</span>`}</td>
                   ${knowledge ? html`<td class="nowrap">${(() => {
                     const k = knowledge.get(a.id);
-                    return k && !isBlank(k.body)
-                      ? html`<a class="inline" href="${knowledgeHref(ctx, a.id)}">${icon('file-text', 14, 'muted')}<span>Updated <time datetime="${k.updated_at.toISOString()}" title="${formatDate(k.updated_at)}${k.updated_by_name ? ` by ${k.updated_by_name}` : ''}">${timeAgo(k.updated_at)}</time></span></a>`
-                      : html`<a class="inline muted" href="${knowledgeHref(ctx, a.id)}">${icon('file-text', 14)}<span>${can(ctx.membership, 'triage.knowledge.edit') ? 'Write it' : 'Not written'}</span></a>`;
+                    if (k?.auto_status === 'queued' || k?.auto_status === 'running') return html`<a class="inline muted" href="${knowledgeHref(ctx, a.id)}">${icon('loader-circle', 14, 'kn-spin')}<span>Writing…</span></a>`;
+                    return isWritten(k) && k.auto_at
+                      ? html`<a class="inline" href="${knowledgeHref(ctx, a.id)}">${icon('sparkles', 14, 'muted')}<span>Written <time datetime="${k.auto_at.toISOString()}" title="${formatDate(k.auto_at)}">${timeAgo(k.auto_at)}</time></span></a>`
+                      : html`<a class="inline muted" href="${knowledgeHref(ctx, a.id)}">${icon('file-text', 14)}<span>${notesOf(k) ? 'Team notes only' : 'Not written'}</span></a>`;
                   })()}</td>` : ''}
                   ${edit ? html`<td class="actions"><div class="row">
                     ${iconBtn('pencil', `Edit ${a.name}`, { size: 'sm', href: `${b}/apps/${a.id}/edit` })}

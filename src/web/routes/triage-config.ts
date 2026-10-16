@@ -9,8 +9,8 @@ import { listApps } from '../../domain/store.js';
 import { UserFacingError } from '../../domain/types.js';
 import { html, raw } from '../../lib/html.js';
 import { verdictSchema } from '../../triage/ai.js';
-import { systemPromptFor } from '../../triage/engine.js';
-import { isBlank, listKnowledge } from '../../triage/knowledge.js';
+import { knowledgePromptFor, systemPromptFor } from '../../triage/engine.js';
+import { isWritten, listKnowledge, notesOf } from '../../triage/knowledge.js';
 import { buildUserPrompt, DEFAULT_CHECK_RULES, DEFAULT_EXAMPLES } from '../../triage/prompt.js';
 import {
   FLAGS,
@@ -215,7 +215,7 @@ export function registerTriageConfigRoutes(app: FastifyInstance, web: Web): void
     const [settings, apps, knowledge] = await Promise.all([getTriageSettings(deps.db, ctx.workspace.id), listApps(deps.db, ctx.workspace.id), listKnowledge(deps.db, ctx.workspace.id)]);
     const c = settings.config;
     const b = promptUrl(ctx);
-    const system = systemPromptFor(c, apps, knowledge);
+    const system = systemPromptFor(c, apps);
     const notes = canOpen(ctx.membership, 'triage.knowledge');
     const modeOf = (f: (typeof FLAGS)[number]) => c[f].mode;
     const edit = can(ctx.membership, 'triage.prompt.edit');
@@ -229,8 +229,7 @@ export function registerTriageConfigRoutes(app: FastifyInstance, web: Web): void
           <div class="card-b tight">${apps.length
             ? html`<ul class="tri-effects">${apps.map((a) => {
                 const k = knowledge.get(a.id);
-                const written = k && !isBlank(k.body);
-                const file = html`${icon('file-text', 12)}TRIAGE.md ${written ? html`updated ${timeAgo(k.updated_at)}` : 'not written'}`;
+                const file = html`${icon('file-text', 12)}TRIAGE.md ${isWritten(k) && k.auto_at ? html`written ${timeAgo(k.auto_at)}` : notesOf(k) ? 'team notes only' : 'not written'}`;
                 return html`<li><span><strong>${a.name}</strong> <span class="muted mono xs">${a.repo_owner}/${a.repo_name}</span>${a.description ? html`<span class="muted"> · ${a.description}</span>` : html`<span class="em"> · no description</span>`}
                   <span class="muted"> · </span>${notes ? html`<a class="small" href="${knowledgeHref(ctx, a.id)}">${file}</a>` : html`<span class="small muted">${file}</span>`}</span></li>`;
               })}</ul>`
@@ -265,7 +264,7 @@ export function registerTriageConfigRoutes(app: FastifyInstance, web: Web): void
         <div class="card">
           <div class="card-h"><div><h2>Notes for Claude</h2><div class="desc">Anything else Claude should know: what’s urgent for you, what to ignore. Added at the end, as trusted instructions.</div></div></div>
           <div class="section">${textField({ id: 'instructions', label: 'Notes (optional)', value: c.instructions, max: 2000, rows: 4, placeholder: 'Anything about payments or sign-in is high priority. Questions about pricing are low priority.' })}</div>
-          <div class="card-f"><span class="small muted">The prompt is ${tokensOf(system)} before each ticket.</span>${edit ? html`<div class="end">
+          <div class="card-f"><span class="small muted">The prompt is ${tokensOf(system)} before each ticket, plus its app’s TRIAGE.md.</span>${edit ? html`<div class="end">
             <button type="button" class="btn" data-discard data-dirty-enable>Cancel</button>
             ${submitBtn('Save prompt', { variant: 'primary', loading: 'Saving…', attrs: raw('data-dirty-enable') })}
           </div>` : viewOnlyFooter('the prompt')}</div>
@@ -304,7 +303,10 @@ export function registerTriageConfigRoutes(app: FastifyInstance, web: Web): void
     if (!ctx) return reply;
     const [settings, apps, knowledge] = await Promise.all([getTriageSettings(deps.db, ctx.workspace.id), listApps(deps.db, ctx.workspace.id), listKnowledge(deps.db, ctx.workspace.id)]);
     const c = settings.config;
-    const system = systemPromptFor(c, apps, knowledge);
+    const system = systemPromptFor(c, apps);
+    // The TRIAGE.md block, for the first app that has one.
+    const shown = apps.find((a) => knowledgePromptFor(apps, knowledge, [a.id]));
+    const known = shown ? knowledgePromptFor(apps, knowledge, [shown.id]) : '';
     const groups = c.labelGroups.filter((g) => g.mode !== 'off');
     const sample = buildUserPrompt(
       { app: apps[0]?.name ?? 'Your app', type: 'Bug Report', title: 'Example: the app closes when I export to PNG', description: 'Every time I export a two-page spread to PNG the app closes. Version 0.9 on Windows 11.' },
@@ -318,6 +320,12 @@ export function registerTriageConfigRoutes(app: FastifyInstance, web: Web): void
         <div class="card">
           <div class="card-h"><div><h2>Instructions</h2><div class="desc">Sent with every Discord ticket: ${tokensOf(system)}. Issues opened on GitHub get the same, with the label groups that are on for them.</div></div></div>
           <pre class="prompt-pre">${system}</pre>
+        </div>
+        <div class="card">
+          <div class="card-h"><div><h2>Then, the app’s TRIAGE.md</h2><div class="desc">${shown
+            ? html`Each ticket gets its own app’s, cached on its own. ${shown.name}’s here: ${tokensOf(known)}.`
+            : 'Each ticket gets its own app’s TRIAGE.md, once Claude has written it.'}${canOpen(ctx.membership, 'triage.knowledge') ? html` ${pageLink(ctx, 'triage.knowledge', 'See every app’s in Knowledge')}.` : ''}</div></div></div>
+          ${known ? html`<pre class="prompt-pre">${known}</pre>` : ''}
         </div>
         <div class="card">
           <div class="card-h"><div><h2>Then, for each ticket</h2><div class="desc">The ticket${c.screenshots ? ', its screenshots (up to 5, before the text)' : ''} and up to 40 similar issues from your repositories (each shortened to 800 characters). A made-up ticket here.</div></div></div>

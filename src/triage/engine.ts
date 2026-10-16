@@ -18,9 +18,10 @@ import { labelColor } from '../domain/ticket-types.js';
 import { UserFacingError, type AppRow, type Deps, type SubmissionRow } from '../domain/types.js';
 import { GitHubApiError, type IssueDetail } from '../github/client.js';
 import { normalizeVerdict, TriageAiError, verdictSchema, type TicketImage, type TriageAi, type Verdict } from './ai.js';
-import { listKnowledge, type AppKnowledge } from './knowledge.js';
+import { knowledgeTexts, listKnowledge, type AppKnowledge } from './knowledge.js';
+import { KnowledgeWriter } from './knowledge-writer.js';
 import { actionMatcher } from './state.js';
-import { buildSystemPrompt, buildUserPrompt, extractDescription, searchTerms, type Candidate } from './prompt.js';
+import { buildKnowledgeBlock, buildSystemPrompt, buildUserPrompt, extractDescription, searchTerms, type Candidate } from './prompt.js';
 import {
   appOf,
   chooseOriginal,
@@ -377,15 +378,20 @@ function githubMessage(err: unknown): string {
   return err instanceof GitHubApiError ? `${err.status} ${err.message}` : (err as Error)?.message ?? 'unknown error';
 }
 
-/**
- * The system prompt for these settings, with each app's TRIAGE.md. Label groups that are off
- * everywhere are left out.
- */
-export function systemPromptFor(c: TriageConfig, apps: AppRow[], knowledge: Map<string, Pick<AppKnowledge, 'body'>> = new Map()): string {
+/** The system prompt for these settings. Label groups that are off everywhere are left out. */
+export function systemPromptFor(c: TriageConfig, apps: AppRow[]): string {
   return buildSystemPrompt(
     { ...c, labelGroups: c.labelGroups.filter((g) => g.mode !== 'off') },
-    { apps: apps.map((a) => ({ name: a.name, repo: `${a.repo_owner}/${a.repo_name}`, description: a.description ?? '', knowledge: knowledge.get(a.id)?.body ?? '' })) },
+    { apps: apps.map((a) => ({ name: a.name, repo: `${a.repo_owner}/${a.repo_name}`, description: a.description ?? '' })) },
   );
+}
+
+/**
+ * The TRIAGE.md block sent after the instructions: the ticket's app, or for an issue opened on
+ * GitHub every app in its repository. Empty when none of them has one.
+ */
+export function knowledgePromptFor(apps: AppRow[], knowledge: Map<string, AppKnowledge>, appIds: (string | null)[]): string {
+  return buildKnowledgeBlock(knowledgeTexts(apps, knowledge, appIds));
 }
 
 /** What one triage pass decided for a ticket. Nothing is applied yet. */
@@ -798,12 +804,15 @@ export async function addIssueEvent(q: Queryable, triageId: string, kind: string
 
 export class TriageEngine {
   readonly indexer: IssueIndexer;
+  /** Writes each app's TRIAGE.md (AI triage › Knowledge). */
+  readonly knowledge: KnowledgeWriter;
 
   constructor(
     readonly deps: Deps,
     readonly ai: TriageAi,
   ) {
     this.indexer = new IssueIndexer(deps);
+    this.knowledge = new KnowledgeWriter(deps, ai);
   }
 
   /** Queues newly filed tickets, and new issues opened on GitHub, where triage is on for them (only those after it was switched on). */
@@ -1051,10 +1060,12 @@ export class TriageEngine {
     const ticket = ticketOf(target);
     const shots = ticket && c.screenshots ? await screenshotsFor(deps, ticket.id, MAX_SCREENSHOTS) : { images: [], skipped: 0 };
     const images: TicketImage[] = shots.images.map((i) => ({ mediaType: i.contentType, data: i.data.toString('base64') }));
+    // The instructions, then this ticket's app's TRIAGE.md: each is cached on its own.
+    const known = knowledgePromptFor(apps, knowledge, ticket ? [ticket.app_id] : apps.filter((a) => a.repo_id === target.repo_id).map((a) => a.id));
     const ask = (withImages: TicketImage[]) => this.ai.classify(
       key.key,
       c.model,
-      systemPromptFor(effective, apps, knowledge),
+      known ? [systemPromptFor(effective, apps), known] : systemPromptFor(effective, apps),
       buildUserPrompt(
         { app: resolved.app, type: resolved.type, title, description: extractDescription(issue.body), screenshots: withImages.length ? { shown: withImages.length, skipped: shots.skipped } : undefined },
         candidates,

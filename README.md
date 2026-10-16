@@ -33,7 +33,8 @@ and filed by a GitHub App. Reporters never need a GitHub account.
 - **AI triage (optional):** Claude flags priority, duplicates, regressions, spam and more, and sorts tickets with your own label groups. Each action can be off, a suggestion, or automatic above a confidence threshold, with separate settings for issues opened directly on GitHub.
   - AI triage › Review lists everything with suggestions waiting, from Discord tickets and GitHub issues. Every ticket shows its triage state (To review, Partly applied, Applied…), and suggestions say exactly what applying them does.
   - Apply or dismiss in bulk, e.g. all duplicates at 80%+ confidence.
-  - AI triage › Knowledge keeps a TRIAGE.md for each app (known issues, what works as intended, versions, names members use) that Claude reads with every ticket. When a fact would have made Claude surer, it asks; the question shows on the ticket, on Review and on that app's TRIAGE.md, for the team only.
+  - AI triage › Knowledge: Claude writes a TRIAGE.md for each app from its repository (README, changelog, docs, releases) and its issues, open and closed (known issues, recent fixes, what works as intended, common questions), and reads it with every ticket for that app. It can keep them up to date every week. Your team can add notes on top, which Claude never changes.
+  - When a fact would have made Claude surer, it asks. It answers its own questions from the repository when it can; the rest show on the ticket, on Review and on the app's TRIAGE.md, for the team only.
   - Optionally, Claude also looks at the screenshots members attach (off by default).
   - Re-run triage on older tickets and compare settings before applying anything.
   - AI triage › Activity shows what it's doing live, with a log kept 90 days.

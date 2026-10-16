@@ -275,6 +275,57 @@ export class GitHubClient {
     return toRepo(data);
   }
 
+  // ---- Repository files, for AI triage › Knowledge ----------------------------------------------
+  // Read-only. Private repositories need Contents: read (contributor roles ask for it too): GitHub
+  // answers 403 without it, which callers catch. A file that doesn't exist is null.
+
+  /** The repository's own description, website and topics. */
+  async getRepoAbout(installationId: number, owner: string, repo: string): Promise<{ description: string | null; homepage: string | null; topics: string[] }> {
+    const { data } = await this.request('GET', `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`, await this.asInstallation(installationId));
+    return { description: data.description ?? null, homepage: data.homepage || null, topics: Array.isArray(data.topics) ? data.topics : [] };
+  }
+
+  /** The README, whatever its name (README.md, readme.rst…). */
+  async getReadme(installationId: number, owner: string, repo: string): Promise<{ path: string; text: string } | null> {
+    return this.fileAt(installationId, `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/readme`);
+  }
+
+  /** A text file on the default branch. */
+  async getRepoFile(installationId: number, owner: string, repo: string, path: string): Promise<{ path: string; text: string } | null> {
+    return this.fileAt(installationId, `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${path.split('/').map(encodeURIComponent).join('/')}`);
+  }
+
+  /** The files directly in a folder on the default branch (null when there's no such folder). */
+  async listRepoFolder(installationId: number, owner: string, repo: string, path: string): Promise<{ path: string; size: number }[] | null> {
+    try {
+      const { data } = await this.request('GET', `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${path.split('/').map(encodeURIComponent).join('/')}`, await this.asInstallation(installationId));
+      return Array.isArray(data) ? data.filter((f: any) => f.type === 'file').map((f: any) => ({ path: String(f.path), size: Number(f.size ?? 0) })) : null;
+    } catch (err) {
+      if (err instanceof GitHubApiError && err.status === 404) return null;
+      throw err;
+    }
+  }
+
+  /** The latest published releases, newest first (drafts left out). */
+  async listReleases(installationId: number, owner: string, repo: string, limit = 10): Promise<{ tag: string; name: string | null; publishedAt: Date | null; prerelease: boolean; body: string }[]> {
+    const { data } = await this.request('GET', `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/releases?per_page=${Math.min(limit, 100)}`, await this.asInstallation(installationId));
+    return (Array.isArray(data) ? data : [])
+      .filter((r: any) => !r.draft)
+      .map((r: any) => ({ tag: String(r.tag_name ?? ''), name: r.name || null, publishedAt: r.published_at ? new Date(r.published_at) : null, prerelease: Boolean(r.prerelease), body: String(r.body ?? '') }));
+  }
+
+  private async fileAt(installationId: number, path: string): Promise<{ path: string; text: string } | null> {
+    try {
+      const { data } = await this.request('GET', path, await this.asInstallation(installationId));
+      // Files over 1 MB come without their content; they're never what's wanted here.
+      if (data?.type !== 'file' || typeof data.content !== 'string' || !data.content) return null;
+      return { path: String(data.path ?? ''), text: Buffer.from(data.content, data.encoding === 'base64' ? 'base64' : 'utf8').toString('utf8') };
+    } catch (err) {
+      if (err instanceof GitHubApiError && err.status === 404) return null;
+      throw err;
+    }
+  }
+
   async listLabels(installationId: number, owner: string, repo: string): Promise<string[]> {
     const auth = await this.asInstallation(installationId);
     const labels: string[] = [];

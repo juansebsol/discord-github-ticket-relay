@@ -57,6 +57,7 @@ export class TriageWorker {
    */
   private prunedAt = 0;
   private pauseCheckedAt = 0;
+  private knowledgeCheckedAt = 0;
 
   async drain(): Promise<number> {
     // The activity log keeps 90 days; old entries go once an hour.
@@ -68,6 +69,11 @@ export class TriageWorker {
     if (Date.now() - this.pauseCheckedAt > 60_000) {
       this.pauseCheckedAt = Date.now();
       await this.engine.checkPaused().catch((err) => this.engine.deps.log.warn({ err: (err as Error).message }, 'pause check failed'));
+    }
+    // AI triage › Knowledge with Keep up to date on: TRIAGE.md files that are due get queued.
+    if (Date.now() - this.knowledgeCheckedAt > 600_000) {
+      this.knowledgeCheckedAt = Date.now();
+      await this.engine.knowledge.scheduleUpdates().catch((err) => this.engine.deps.log.warn({ err: (err as Error).message }, 'TRIAGE.md schedule failed'));
     }
     await this.engine.enqueueNew();
     let processed = 0;
@@ -82,6 +88,13 @@ export class TriageWorker {
       const issue = await this.engine.claimIssue();
       if (issue) {
         await this.engine.processIssue(issue);
+        processed++;
+        continue;
+      }
+      // Then an app's TRIAGE.md (one at a time, so new tickets never wait long).
+      const knowledge = await this.engine.knowledge.claim();
+      if (knowledge) {
+        await this.engine.knowledge.process(knowledge);
         processed++;
         continue;
       }

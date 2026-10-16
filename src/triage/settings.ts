@@ -243,6 +243,8 @@ export const TriageConfigSchema = z.object({
   examples: z.string().max(6000).nullable().catch(null),
   /** Claude also sees the screenshots attached to Discord tickets (more tokens per ticket, so it starts off). */
   screenshots: z.boolean().catch(false),
+  /** AI triage › Knowledge: Claude rewrites each app's TRIAGE.md every week, and sooner when it has new questions. */
+  knowledgeAuto: z.boolean().catch(false),
   /**
    * For issues opened directly on GitHub: each action's own mode, by key ('priority', a check,
    * or 'group:<id>'). Separate from the modes for Discord tickets; anything missing is Off.

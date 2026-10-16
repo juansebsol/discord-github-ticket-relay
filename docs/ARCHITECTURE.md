@@ -44,6 +44,15 @@ Discord endpoint, OAuth), one or more queue workers, and an optional triage work
   live in AI triage › Activity with the queues and what the worker is doing. Bulk Apply from
   the inbox or Opened on GitHub (`triage_bulk`) takes only the suggestions the list's filters are
   about and applies them one ticket at a time, with the same GitHub-budget guard.
+  AI triage › Knowledge (`app_knowledge`): the triage worker also writes each app's TRIAGE.md
+  with Claude (`src/triage/knowledge-writer.ts`), one app at a time after new tickets and issues,
+  from the repository's README, changelog, docs and releases (read-only; private repositories need
+  Contents: read) and the app's issues in the issue index (most reported open, recently fixed,
+  closed as not planned), plus recent ticket summaries and the questions triage asked
+  (`missing_context`, copied to `question`). Each ticket then gets its own app's TRIAGE.md as a
+  second cached system block, as background facts (it comes from public text); the team's own
+  notes stay separate, are never rewritten, and win. With Keep up to date on, the worker rewrites
+  them weekly, and sooner after three new questions.
 - **No Discord gateway.** The bot is driven entirely by Discord's HTTP interactions endpoint and
   REST API. It needs no privileged intents and no slash-command registration.
 - **GitHub App auth.** Short-lived installation tokens are minted from the app's private key
