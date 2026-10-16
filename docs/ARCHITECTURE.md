@@ -33,7 +33,7 @@ Discord endpoint, OAuth), one or more queue workers, and an optional triage work
   With its own switch, triage also covers issues opened directly on GitHub: the issue sync
   (polling, no webhooks) queues new ones in `issue_triage`, skipping pull requests, bots and
   issues this app filed. Each action has a separate mode for these issues (`githubModes`);
-  labels, comments and closing are shared. Their results are reviewed in Issues › Triage.
+  labels, comments and closing are shared. Their results are reviewed in GitHub issues › Opened on GitHub and in AI triage › Review.
   Re-runs (`triage_runs`, `triage_run_items`) evaluate already-filed tickets and/or open GitHub issues with a saved copy
   of the settings: a preview never touches GitHub; applying it later (or an "apply" run) writes
   `triage_results` the way normal triage does, in bulk if asked (optionally approving the
@@ -41,8 +41,8 @@ Discord endpoint, OAuth), one or more queue workers, and an optional triage work
   time, and a run waits instead of failing when Claude rate-limits it or when the
   installation's GitHub budget drops below a reserve (a fifth of the hourly limit, at least
   500 calls), so filing always has room. Every step is written to `triage_log` (kept 90 days), shown
-  live in Triage › Activity with the queues and what the worker is doing. Bulk Apply from
-  the inbox or Issues › Triage (`triage_bulk`) takes only the suggestions the list's filters are
+  live in AI triage › Activity with the queues and what the worker is doing. Bulk Apply from
+  the inbox or Opened on GitHub (`triage_bulk`) takes only the suggestions the list's filters are
   about and applies them one ticket at a time, with the same GitHub-budget guard.
 - **No Discord gateway.** The bot is driven entirely by Discord's HTTP interactions endpoint and
   REST API. It needs no privileged intents and no slash-command registration.
@@ -61,9 +61,15 @@ Discord endpoint, OAuth), one or more queue workers, and an optional triage work
 - A Discord server maps to exactly one workspace, because interactions are routed by `guild_id`.
   This is enforced by a unique constraint.
 - People sign in with Discord OAuth and hold an `owner`, `admin` or `moderator` role per
-  workspace. Moderators see the tickets inbox; admins grant them *Act on tickets* and
-  *See verifications* per person. Routes need `manage` unless they opt in to a lower
-  permission (`src/domain/permissions.ts`). Non-members receive 404 on workspace routes.
+  workspace. Moderators always see the tickets inbox; admins give each one *No access*, *View*
+  or *Edit* page by page (one access map per moderator, `AREAS` in `src/domain/permissions.ts`).
+  Routes need `manage` unless they opt in to a lower permission such as `inbox.edit` or
+  `triage.prompt.view`. Non-members receive 404 on workspace routes.
+- The console has four tools (Discord tickets `/tickets`, GitHub issues `/issues`, AI triage
+  `/triage`, Contributor roles `/contributors`), each with one tab per page in `AREAS` order and a
+  shared header (`src/web/routes/tool.ts`). A tool opens on the first page the person can see;
+  pages they can't open show locked. Addresses from before (`/tickets/triage…`,
+  `/tickets/issues…`) redirect: 301 for GET, 307 for forms.
 - Workspace creation is limited to `PLATFORM_ADMIN_DISCORD_IDS`. If that list is empty, only the
   first user of a fresh deployment can create one. `OPEN_WORKSPACE_CREATION=true` lifts the limit.
 

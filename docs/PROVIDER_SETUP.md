@@ -97,4 +97,4 @@ the Discord member who reported it.
 
 Restart the app with the new variables. The **Deployment** page then shows both providers
 as *Working*. Admins can sign in and follow the three setup steps (GitHub, Discord, Apps &
-repositories), then publish the panels from **Tickets › Panel** and **Contributor Roles › Panel**.
+repositories), then publish the panels from **Discord tickets › Panel** and **Contributor roles › Panel**.

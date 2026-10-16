@@ -4,7 +4,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { html, raw, type SafeHtml } from '../lib/html.js';
 import type { Membership } from '../domain/workspaces.js';
-import { can, PAGE_AREAS, ROLE_LABELS, TRIAGE_AREAS, type MemberAccess } from '../domain/permissions.js';
+import { AREA_KEYS, can, ROLE_LABELS, TOOL_NAMES, type MemberAccess } from '../domain/permissions.js';
+import { areaHref, firstPage, TOOL_ICONS, type ToolName } from './routes/tool.js';
 import type { Role, UserRow, WorkspaceRow } from '../domain/types.js';
 import { avatar, csrfField, discordAvatar, icon, iconBtn, initials, menu, notice, type IconName } from './ui.js';
 
@@ -16,6 +17,8 @@ export interface SetupProgress {
   apps: StepState;
   panel: StepState;
   attention: number;
+  /** Tickets and issues with triage suggestions waiting for someone (the AI triage badge). */
+  review?: number;
   /** Dev mode is on (the whole server): the sidebar shows it next to Server health. */
   devMode?: boolean;
 }
@@ -73,7 +76,6 @@ function navItem(href: string, label: string, name: IconName, active: boolean, t
   return html`<a href="${href}" class="nav-item" ${active ? raw('aria-current="page"') : ''}>${icon(name)}<span>${label}</span>${trail ? html`<span class="trail">${trail}</span>` : ''}</a>`;
 }
 
-/** A page this person can't open: shown greyed out with a lock, so they know it exists. */
 /** A page this person can't open: greyed out with a lock. `grantable` pages can be opened to moderators by an admin. */
 function lockedNavItem(label: string, name: IconName, o: { grantable?: boolean } = {}): SafeHtml {
   const why = o.grantable ? `You don’t have access to ${label}. Ask an admin if you need it.` : `Only admins can open ${label}. Ask an admin if you need access.`;
@@ -87,9 +89,8 @@ function stepMark(state: StepState): SafeHtml {
 }
 
 export function roleLabel(access: MemberAccess): string {
-  // View only: can't act on tickets or change any page.
-  const changes = access.can_act_tickets || TRIAGE_AREAS.some((a) => can(access, `triage.${a}.edit`)) || PAGE_AREAS.some((a) => can(access, `${a}.edit`));
-  if (access.role === 'moderator' && !changes) return 'Moderator · View only';
+  // View only: a moderator who can't change anything anywhere.
+  if (access.role === 'moderator' && !AREA_KEYS.some((a) => can(access, `${a}.edit`))) return 'Moderator · View only';
   return ROLE_LABELS[access.role];
 }
 
@@ -111,22 +112,30 @@ export function layout(ctx: PageContext, opts: { title: string; active: string; 
   const a = opts.active;
   const attention = p?.attention ? badge(p.attention) : '';
   const manage = access ? can(access, 'manage') : false;
+  /** A tool opens on the first of its pages this person can see; with none, it's locked. */
+  const tool = (m: MemberAccess, name: ToolName, trail: SafeHtml | string = '') => {
+    const first = firstPage(m, name);
+    return first ? navItem(areaHref(base, first), TOOL_NAMES[name], TOOL_ICONS[name], a === name, trail) : lockedNavItem(TOOL_NAMES[name], TOOL_ICONS[name], { grantable: true });
+  };
+  const review = access && p?.review && can(access, 'triage.review.view') ? badge(p.review, 'accent', `${String(p.review)} to review`) : '';
 
   const nav = ws && access
     ? html`<nav class="nav" aria-label="Main">
         ${navItem(base, 'Overview', 'layout-dashboard', a === 'overview')}
-        <div class="nav-label">General setup</div>
+        <div class="nav-label">Setup</div>
         ${manage ? navItem(`${base}/setup/github`, 'GitHub', 'github', a === 'github', stepMark(p?.github ?? 'todo')) : lockedNavItem('GitHub', 'github')}
         ${manage ? navItem(`${base}/setup/discord`, 'Discord', 'message-circle', a === 'discord', stepMark(p?.discord ?? 'todo')) : lockedNavItem('Discord', 'message-circle')}
         ${can(access, 'apps.view') ? navItem(`${base}/apps`, 'Apps & repositories', 'boxes', a === 'apps', stepMark(p?.apps ?? 'todo')) : lockedNavItem('Apps & repositories', 'boxes', { grantable: true })}
-        <div class="nav-label">Utilities</div>
-        ${navItem(`${base}/tickets`, 'Tickets', 'ticket', a === 'tickets', attention)}
-        ${can(access, 'contrib.view') ? navItem(`${base}/contributors`, 'Contributor Roles', 'award', a === 'contributors') : lockedNavItem('Contributor Roles', 'award')}
+        <div class="nav-label">Tools</div>
+        ${tool(access, 'tickets', attention)}
+        ${tool(access, 'issues')}
+        ${tool(access, 'triage', review)}
+        ${tool(access, 'contributors')}
         <div class="nav-label">Workspace</div>
         ${manage ? navItem(`${base}/members`, 'Members & permissions', 'users', a === 'members') : lockedNavItem('Members & permissions', 'users')}
         ${manage ? navItem(`${base}/settings`, 'Settings', 'settings', a === 'settings') : lockedNavItem('Settings', 'settings')}
         ${manage ? navItem(`${base}/deployment`, 'Deployment', 'server', a === 'deployment') : lockedNavItem('Deployment', 'server')}
-        ${can(access, 'health.view') ? navItem(`${base}/health`, 'Server health', 'activity', a === 'health', html`<span class="nav-tag" data-dev-tag title="Dev mode is on: restarts aren’t counted" ${p?.devMode ? '' : raw('hidden')}>Dev mode</span>`) : lockedNavItem('Server health', 'activity')}
+        ${can(access, 'health.view') ? navItem(`${base}/health`, 'Server health', 'activity', a === 'health', html`<span class="nav-tag" data-dev-tag title="Dev mode is on: restarts aren’t counted" ${p?.devMode ? '' : raw('hidden')}>Dev mode</span>`) : lockedNavItem('Server health', 'activity', { grantable: true })}
       </nav>`
     : html``;
 
@@ -181,8 +190,8 @@ ${ICON_TEMPLATES}
   return page.value;
 }
 
-function badge(n: number): SafeHtml {
-  return html`<span class="badge warn" title="${String(n)} need attention">${String(n)}</span>`;
+function badge(n: number, tone: 'warn' | 'accent' = 'warn', title = `${String(n)} need attention`): SafeHtml {
+  return html`<span class="badge ${tone}" title="${title}">${String(n)}</span>`;
 }
 
 /** Standalone pages (sign-in, invitations, errors) without the app shell. */

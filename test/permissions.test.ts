@@ -35,8 +35,9 @@ const w = () => `/w/${ws.workspace.id}`;
 
 describe('moderators', () => {
   it('join through a moderator invite and start view-only', async () => {
-    const row = (await env.db.query('SELECT role, can_act_tickets, can_view_contributors FROM workspace_members WHERE user_id = $1', [mod.user.id])).rows[0];
-    expect(row).toEqual({ role: 'moderator', can_act_tickets: false, can_view_contributors: true });
+    const row = (await env.db.query('SELECT role, access FROM workspace_members WHERE user_id = $1', [mod.user.id])).rows[0];
+    expect(row).toEqual({ role: 'moderator', access: { verifications: 'view' } });
+    expect((await env.server.inject({ method: 'GET', url: w(), ...get(mod) })).body).toContain('<div class="who-role">Moderator · View only</div>');
   });
 
   it('can see the overview, tickets and verifications', async () => {
@@ -62,7 +63,7 @@ describe('moderators', () => {
       '/tickets/panel', '/tickets/panel/remove', '/tickets/panel/test', '/tickets/settings', '/apps', `/apps/${ws.apps[0]!.id}/delete`, '/tickets/types', '/tickets/types/create-labels',
       '/contributors/panel', '/contributors/publish', '/contributors/tiers', '/contributors/apps', '/settings', '/members/invites',
       '/setup/github/install', '/setup/github/disconnect', '/setup/discord/install', '/setup/discord/disconnect',
-      `/members/${mod.user.id}/permissions`, `/members/${mod.user.id}/role`, `/members/${mod.user.id}/remove`,
+      `/members/${mod.user.id}/access`, `/members/${mod.user.id}/role`, `/members/${mod.user.id}/remove`,
     ];
     for (const p of posts) {
       expect((await env.server.inject({ method: 'POST', url: w() + p, ...form(mod) })).statusCode, p).toBe(403);
@@ -77,8 +78,8 @@ describe('moderators', () => {
     expect(detail.body).not.toContain('/dismiss');
     expect((await env.server.inject({ method: 'POST', url: `${w()}/tickets/${sub.id}/dismiss`, ...form(mod, { note: 'x' }) })).statusCode).toBe(403);
 
-    // An admin grants "Act on tickets".
-    await env.server.inject({ method: 'POST', url: `${w()}/members/${mod.user.id}/permissions`, ...form(ws.owner, { can_act_tickets: '1', can_view_contributors: '1' }) });
+    // An admin gives them Edit on the Inbox.
+    await env.server.inject({ method: 'POST', url: `${w()}/members/${mod.user.id}/access`, ...form(ws.owner, { inbox: 'edit' }) });
     expect((await env.server.inject({ method: 'GET', url: `${w()}/tickets/${sub.id}`, ...get(mod) })).body).toContain('/dismiss');
     const res = await env.server.inject({ method: 'POST', url: `${w()}/tickets/${sub.id}/dismiss`, ...form(mod, { reason: 'Spam' }) });
     expect(res.statusCode).toBe(302);
@@ -89,7 +90,7 @@ describe('moderators', () => {
     const page = await env.server.inject({ method: 'GET', url: `${w()}/contributors`, ...get(mod) });
     expect(page.body).toContain('View only');
     expect(page.body).not.toContain('/revoke');
-    await env.server.inject({ method: 'POST', url: `${w()}/members/${mod.user.id}/permissions`, ...form(ws.owner, {}) });
+    await env.server.inject({ method: 'POST', url: `${w()}/members/${mod.user.id}/access`, ...form(ws.owner, { verifications: 'none' }) });
     expect((await env.server.inject({ method: 'GET', url: `${w()}/contributors`, ...get(mod) })).statusCode).toBe(403);
     expect((await env.server.inject({ method: 'POST', url: `${w()}/contributors/verifications/x/revoke`, ...form(mod) })).statusCode).toBe(403);
   });
@@ -102,8 +103,8 @@ describe('roles', () => {
     await env.server.inject({ method: 'POST', url: `/invite/${token}`, ...form(admin) });
 
     expect((await env.server.inject({ method: 'POST', url: `${w()}/members/${mod.user.id}/role`, ...form(admin, { role: 'admin' }) })).statusCode).toBe(403);
-    await env.server.inject({ method: 'POST', url: `${w()}/members/${mod.user.id}/permissions`, ...form(admin, { can_act_tickets: '1' }) });
-    expect((await env.db.query('SELECT can_act_tickets, can_view_contributors FROM workspace_members WHERE user_id = $1', [mod.user.id])).rows[0]).toEqual({ can_act_tickets: true, can_view_contributors: false });
+    await env.server.inject({ method: 'POST', url: `${w()}/members/${mod.user.id}/access`, ...form(admin, { inbox: 'edit', verifications: 'none' }) });
+    expect((await env.db.query('SELECT access FROM workspace_members WHERE user_id = $1', [mod.user.id])).rows[0].access).toEqual({ inbox: 'edit' });
 
     await env.server.inject({ method: 'POST', url: `${w()}/members/${mod.user.id}/role`, ...form(ws.owner, { role: 'admin' }) });
     expect((await env.server.inject({ method: 'GET', url: `${w()}/settings`, ...get(mod) })).statusCode).toBe(200);

@@ -1,8 +1,8 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { getDevMode, setDevMode } from '../src/domain/dev-mode.js';
 import { healthView } from '../src/domain/health.js';
-import { createInvite, setModeratorPermissions } from '../src/domain/workspaces.js';
-import { form, get, makeAdmin, makeApp, makeWorkspace, resetDb, testDb, type Admin, type ConfiguredWorkspace, type TestEnv } from './helpers.js';
+import { createInvite } from '../src/domain/workspaces.js';
+import { form, get, grant, makeAdmin, makeApp, makeWorkspace, resetDb, testDb, type Admin, type ConfiguredWorkspace, type TestEnv } from './helpers.js';
 
 let env: TestEnv;
 let ws: ConfiguredWorkspace;
@@ -79,7 +79,7 @@ describe('dev mode', () => {
   it('moderators who see Server health see it’s on, but can’t switch it', async () => {
     const mod = await makeAdmin(env, 'mia');
     await env.server.inject({ method: 'POST', url: `/invite/${await createInvite(env.db, ws.workspace.id, ws.owner.user.id, 'moderator')}`, ...form(mod) });
-    await setModeratorPermissions(env.db, ws.workspace.id, mod.user.id, { canActTickets: false, canViewContributors: false, canViewHealth: true });
+    await grant(env, ws.workspace.id, mod.user.id, { health: 'view' });
     expect((await toggle(true, mod)).statusCode).toBe(403);
     await setDevMode(env.db, true, ws.owner.user.id);
     const page = await env.server.inject({ method: 'GET', url: `${w()}/health`, ...get(mod) });

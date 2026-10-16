@@ -29,7 +29,8 @@ import { simplePage } from '../layout.js';
 import { setFlash } from '../session.js';
 import type { Web } from '../server.js';
 import { csrfField, empty, icon, linkBtn, notice, pill, plural, postBtn, segLinks, setting, statusPill, submitBtn, switchInput, timeAgo, viewOnlyTag, when } from '../ui.js';
-import { ticketsHeader } from './tickets.js';
+import { viewOnlyFooter } from './triage.js';
+import { toolHeader } from './tool.js';
 
 /** The ticket page's upload form (multipart). Its CSRF token is checked by the route itself. */
 export const UPLOAD_ROUTE = /^\/w\/[^/]+\/tickets\/[0-9a-f-]{36}\/files$/i;
@@ -101,7 +102,7 @@ export function registerFileRoutes(app: FastifyInstance, web: Web): void {
     reply.code(403).type('text/html').send(simplePage('Session expired', html`<h1>Your session expired</h1><p class="muted">For your security this action wasn’t performed. Go back, reload the page and try again.</p>${linkBtn('/', 'Back to the app', { block: true })}`));
 
   app.post('/w/:wid/tickets/:id/files', { bodyLimit: MAX_FILE_BYTES * 11 }, async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply, { permission: 'tickets.act' });
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'inbox.edit' });
     if (!ctx) return reply;
     const sub = await getSubmission(deps.db, ctx.workspace.id, (req.params as { id: string }).id);
     if (!sub) return reply.callNotFound();
@@ -162,7 +163,7 @@ export function registerFileRoutes(app: FastifyInstance, web: Web): void {
   });
 
   app.post('/w/:wid/tickets/:id/files/:fid/delete', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply, { permission: 'tickets.act' });
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'inbox.edit' });
     if (!ctx) return reply;
     const p = req.params as { id: string; fid: string };
     const sub = await getSubmission(deps.db, ctx.workspace.id, p.id);
@@ -185,11 +186,13 @@ export function registerFileRoutes(app: FastifyInstance, web: Web): void {
   // ---- Files tab ---------------------------------------------------------------------------------
 
   app.get('/w/:wid/tickets/files', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply, { permission: 'files.manage' });
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'files.view' });
     if (!ctx) return reply;
     const wid = ctx.workspace.id;
     const b = ctx.base;
     const admin = can(ctx.membership, 'manage');
+    // View: the list only. Edit: scan and delete too.
+    const edit = can(ctx.membership, 'files.edit');
     const q = req.query as { view?: string; q?: string; page?: string };
     const [settings, usage] = await Promise.all([getFileSettings(deps.db, wid), storageUsage(deps.db, wid)]);
     const all = await ticketsWithFiles(deps.db, wid, settings);
@@ -239,7 +242,7 @@ export function registerFileRoutes(app: FastifyInstance, web: Web): void {
         : html`<span class="thumb">${icon('paperclip', 14)}</span>`)}${files.length > 3 ? html`<span class="thumb more">+${String(files.length - 3)}</span>` : ''}</span>`;
     };
 
-    const scanBtn = postBtn(`${b}/tickets/files/scan`, 'Scan for cleanup', ctx.csrf, { icon: 'scan-search', loading: 'Scanning…', title: 'Checks every ticket’s GitHub issue and shows what the rules would delete. Nothing is deleted yet.' });
+    const scanBtn = !edit ? null : postBtn(`${b}/tickets/files/scan`, 'Scan for cleanup', ctx.csrf, { icon: 'scan-search', loading: 'Scanning…', title: 'Checks every ticket’s GitHub issue and shows what the rules would delete. Nothing is deleted yet.' });
     const num = (name: string, value: number, min: number, max: number, label: string, step?: string) =>
       html`<input type="number" id="${name}" name="${name}" value="${String(value)}" min="${String(min)}" max="${String(max)}" ${step ? html`step="${step}"` : ''} required aria-label="${label}">`;
     const lastRun = settings.last_run_at
@@ -249,10 +252,10 @@ export function registerFileRoutes(app: FastifyInstance, web: Web): void {
     const table = rows.length
       ? html`<div class="table-wrap wide"><table>
           <thead><tr>
-            <th class="check-col"><input type="checkbox" class="rule-check" data-select-all="bulk-files" aria-label="Select every ticket on this page"></th>
+            ${edit ? html`<th class="check-col"><input type="checkbox" class="rule-check" data-select-all="bulk-files" aria-label="Select every ticket on this page"></th>` : ''}
             <th class="col-main">Ticket</th><th>GitHub issue</th><th>Files</th><th class="num">Size</th><th>Cleanup reason</th><th class="num">Latest file</th></tr></thead>
           <tbody>${rows.map((r) => html`<tr>
-            <td class="check-col"><input type="checkbox" class="rule-check" name="ticket" value="${r.sub.id}" form="bulk-files" aria-label="Select ${titleOf(r)}"></td>
+            ${edit ? html`<td class="check-col"><input type="checkbox" class="rule-check" name="ticket" value="${r.sub.id}" form="bulk-files" aria-label="Select ${titleOf(r)}"></td>` : ''}
             <td><a class="cell-title" href="${b}/tickets/${r.sub.id}#files">${titleOf(r)}</a><div class="sub">${[r.sub.app_name, r.sub.ticket_type_name, r.sub.reporter_display_name].filter(Boolean).join(' · ')}</div></td>
             <td><div class="row gap-4">${issueState(r)}</div>${r.sub.issue_url ? html`<div class="sub"><a href="${r.sub.issue_url}" target="_blank" rel="noopener noreferrer">${r.sub.repo_name}#${String(r.sub.issue_number)}</a></div>` : ''}</td>
             <td><div class="row gap-4">${thumbs(r)}<span class="small muted">${String(r.sub.file_count)}</span></div></td>
@@ -267,11 +270,32 @@ export function registerFileRoutes(app: FastifyInstance, web: Web): void {
               : 'Scan for cleanup checks which GitHub issues are closed, then lists the files your rules would delete. Nothing is deleted until you confirm.', settings.last_scan_at ? null : scanBtn, settings.last_scan_at ? 'ok' : 'muted')
           : all.length
             ? empty('paperclip', 'No tickets here', 'Nothing matches this filter.')
-            : empty('paperclip', 'No files yet', 'Screenshots that members attach in Discord, or that you add on a ticket page, show up here.');
+            : empty('paperclip', 'No files yet', can(ctx.membership, 'inbox.edit') ? 'Screenshots that members attach in Discord, or that you add on a ticket page, show up here.' : 'Screenshots that members attach in Discord show up here.');
+
+    // What this person can do about a full disk: admins clean up or raise the limit, Edit on Files cleans up.
+    const full = usage.bytes >= limitBytes;
+    const fix = admin
+      ? (full ? 'until you free up space or raise the limit.' : 'Clean up old files or raise the limit below.')
+      : edit
+        ? (full ? 'until you free up space. An admin can raise the limit.' : 'Clean up old files below. An admin can raise the limit.')
+        : (full ? 'until space is freed up or an admin raises the limit.' : 'An admin can raise the limit.');
+    const cleanupRules = html`
+        <div class="card-h"><div><h2>Cleanup rules</h2><div class="desc">Used by Scan for cleanup, and every day by automatic cleanup when it’s on.</div></div>${admin ? '' : viewOnlyTag('Only owners and admins can change the cleanup rules and the storage limit.')}</div>
+        <fieldset class="plain${admin ? '' : ' view-only'}" ${admin ? '' : raw('disabled')}>
+        ${setting('Automatic cleanup', html`Once a day, delete the files of tickets that match the rules below. ${lastRun}`, switchInput({ name: 'auto_cleanup', checked: settings.auto_cleanup, label: 'Automatic cleanup' }), { switchRow: true })}
+        ${setting('Closed tickets', 'Files of tickets whose GitHub issue was closed or deleted, or that were closed without filing.',
+          html`<label class="check"><input type="checkbox" name="closed_enabled" value="1" ${settings.closed_enabled ? raw('checked') : ''}> Delete</label>${num('closed_days', settings.closed_days, 0, 3650, 'Days after closing')}<span class="connector">days after closing</span>`)}
+        ${setting('Spam', 'Files of tickets closed as spam by triage or by a moderator. With automatic cleanup on, they’re deleted as soon as triage closes the ticket.',
+          switchInput({ name: 'spam_enabled', checked: settings.spam_enabled, label: 'Delete spam files' }), { switchRow: true })}
+        ${setting('Old files', 'Files older than this, whether the ticket is open or closed.',
+          html`<label class="check"><input type="checkbox" name="age_enabled" value="1" ${settings.age_enabled ? raw('checked') : ''}> Delete after</label>${num('age_days', settings.age_days, 1, 3650, 'Days')}<span class="connector">days</span>`)}
+        ${setting('Storage limit', 'New files aren’t saved once this much is used. Tickets are still filed, with a note that the file couldn’t be attached.',
+          html`${num('storage_limit_gb', Math.round((settings.storage_limit_mb / GB) * 10) / 10, 0.1, 1024, 'Storage limit in GB', '0.1')}<span class="connector">GB</span>`)}
+        </fieldset>`;
 
     const body = html`
-      ${await ticketsHeader(web, ctx, 'files', { actions: scanBtn })}
-      ${nearLimit ? notice(usage.bytes >= limitBytes ? 'danger' : 'warn', usage.bytes >= limitBytes ? 'The storage limit is reached' : 'Storage is almost full', `${formatBytes(usage.bytes)} of ${formatBytes(limitBytes)} used. ${usage.bytes >= limitBytes ? 'New tickets are filed without their files until you free up space or raise the limit.' : 'Clean up old files or raise the limit below.'}`) : ''}
+      ${await toolHeader(web, ctx, 'tickets', 'files', { actions: scanBtn })}
+      ${nearLimit ? notice(full ? 'danger' : 'warn', full ? 'The storage limit is reached' : 'Storage is almost full', `${formatBytes(usage.bytes)} of ${formatBytes(limitBytes)} used. ${full ? `New tickets are filed without their files ${fix}` : fix}`) : ''}
       <div class="card">
         <div class="stats">
           <div class="stat"><div class="l">Stored files</div><div class="v">${String(usage.files)}</div><div class="sub">on ${plural(usage.tickets, 'ticket')}</div></div>
@@ -292,7 +316,7 @@ export function registerFileRoutes(app: FastifyInstance, web: Web): void {
             <button type="submit" class="btn sm nojs">Search</button>
           </form>
         </div>
-        ${rows.length ? html`<div class="bulk-bar">
+        ${rows.length && edit ? html`<div class="bulk-bar">
           <span class="small muted" data-selected-text="bulk-files">Select tickets to delete their files.</span>
           <div class="row">
             ${submitBtn('Delete selected', { size: 'sm', variant: 'ghost danger', icon: 'trash-2', form: 'bulk-files', attrs: raw('data-needs-selection="bulk-files"') })}
@@ -307,30 +331,22 @@ export function registerFileRoutes(app: FastifyInstance, web: Web): void {
         ${pages > 1 ? html`<div class="pager"><span>Page ${String(page)} of ${String(pages)} · ${plural(filtered.length, 'ticket')}</span><div class="row">
           ${page > 1 ? linkBtn(link({ page: page - 1 }), 'Previous', { size: 'sm', icon: 'chevron-left' }) : ''}${page < pages ? linkBtn(link({ page: page + 1 }), 'Next', { size: 'sm', trail: 'chevron-right' }) : ''}</div></div>` : ''}
       </div>
-      <form method="post" action="${b}/tickets/files/delete" id="bulk-files" hidden data-confirm-title="Delete the selected tickets’ files?" data-confirm-body="Their files are deleted from this server and removed from their GitHub issues. This can’t be undone." data-confirm-label="Delete files" data-confirm-danger>${csrfField(ctx.csrf)}</form>
+      ${edit ? html`<form method="post" action="${b}/tickets/files/delete" id="bulk-files" hidden data-confirm-title="Delete the selected tickets’ files?" data-confirm-body="Their files are deleted from this server and removed from their GitHub issues. This can’t be undone." data-confirm-label="Delete files" data-confirm-danger>${csrfField(ctx.csrf)}</form>` : ''}
 
-      <form method="post" action="${b}/tickets/files/settings" class="card readable" id="rules" data-dirty>
-        ${csrfField(ctx.csrf)}
-        <div class="card-h"><div><h2>Cleanup rules</h2><div class="desc">Used by Scan for cleanup, and every day by automatic cleanup when it’s on.</div></div>${admin ? '' : viewOnlyTag('Only owners and admins can change the cleanup rules and the storage limit.')}</div>
-        <fieldset class="plain" ${admin ? '' : raw('disabled')}>
-        ${setting('Automatic cleanup', html`Once a day, delete the files of tickets that match the rules below. ${lastRun}`, switchInput({ name: 'auto_cleanup', checked: settings.auto_cleanup, label: 'Automatic cleanup' }), { switchRow: true })}
-        ${setting('Closed tickets', 'Files of tickets whose GitHub issue was closed or deleted, or that were closed without filing.',
-          html`<label class="check"><input type="checkbox" name="closed_enabled" value="1" ${settings.closed_enabled ? raw('checked') : ''}> Delete</label>${num('closed_days', settings.closed_days, 0, 3650, 'Days after closing')}<span class="connector">days after closing</span>`)}
-        ${setting('Spam', 'Files of tickets closed as spam by triage or by a moderator. With automatic cleanup on, they’re deleted as soon as triage closes the ticket.',
-          switchInput({ name: 'spam_enabled', checked: settings.spam_enabled, label: 'Delete spam files' }), { switchRow: true })}
-        ${setting('Old files', 'Files older than this, whether the ticket is open or closed.',
-          html`<label class="check"><input type="checkbox" name="age_enabled" value="1" ${settings.age_enabled ? raw('checked') : ''}> Delete after</label>${num('age_days', settings.age_days, 1, 3650, 'Days')}<span class="connector">days</span>`)}
-        ${setting('Storage limit', 'New files aren’t saved once this much is used. Tickets are still filed, with a note that the file couldn’t be attached.',
-          html`${num('storage_limit_gb', Math.round((settings.storage_limit_mb / GB) * 10) / 10, 0.1, 1024, 'Storage limit in GB', '0.1')}<span class="connector">GB</span>`)}
-        </fieldset>
-        ${admin
-          ? html`<div class="card-f"><div class="end">
+      ${admin
+        ? html`<form method="post" action="${b}/tickets/files/settings" class="card readable" id="rules" data-dirty>
+            ${csrfField(ctx.csrf)}
+            ${cleanupRules}
+            <div class="card-f"><div class="end">
               <button type="button" class="btn" data-discard data-dirty-enable>Cancel</button>
               ${submitBtn('Save rules', { variant: 'primary', loading: 'Saving…', attrs: raw('data-dirty-enable') })}
-            </div></div>`
-          : html`<div class="card-note">Only owners and admins can change these.</div>`}
-      </form>`;
-    return web.render(reply, ctx, 'Files', 'tickets', body, { width: 'full' });
+            </div></div>
+          </form>`
+        : html`<div class="card readable" id="rules">
+            ${cleanupRules}
+            <div class="card-f">${viewOnlyFooter('the cleanup rules and storage limit')}</div>
+          </div>`}`;
+    return web.render(reply, ctx, 'Files · Discord tickets', 'tickets', body, { width: 'full' });
   });
 
   app.post('/w/:wid/tickets/files/settings', async (req, reply) => {
@@ -356,7 +372,7 @@ export function registerFileRoutes(app: FastifyInstance, web: Web): void {
   });
 
   app.post('/w/:wid/tickets/files/scan', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply, { permission: 'files.manage' });
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'files.edit' });
     if (!ctx) return reply;
     const wid = ctx.workspace.id;
     const r = await refreshIssueStates(deps, wid);
@@ -374,7 +390,7 @@ export function registerFileRoutes(app: FastifyInstance, web: Web): void {
   });
 
   app.post('/w/:wid/tickets/files/delete', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply, { permission: 'files.manage' });
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'files.edit' });
     if (!ctx) return reply;
     const body = (req.body ?? {}) as { all?: string; ticket?: string | string[] };
     const tickets = Array.isArray(body.ticket) ? body.ticket : body.ticket ? [body.ticket] : [];

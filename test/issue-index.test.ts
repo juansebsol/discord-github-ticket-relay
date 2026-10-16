@@ -2,9 +2,10 @@ import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { healthView, startHeartbeat } from '../src/domain/health.js';
 import { chooseOriginal, ftsQuery, IssueIndexer, searchIndex, type IndexedIssue } from '../src/domain/issue-index.js';
 import { acceptSubmission } from '../src/domain/submissions.js';
-import { createInvite, setModeratorPermissions } from '../src/domain/workspaces.js';
+import type { MemberAccess } from '../src/domain/permissions.js';
+import { createInvite } from '../src/domain/workspaces.js';
 import { parseTriageConfig, saveTriageConfig, setApiKey, setTriageEnabled } from '../src/triage/settings.js';
-import { form, get, makeAdmin, makeApp, makeWorkspace, resetDb, testDb, type Admin, type ConfiguredWorkspace, type TestEnv } from './helpers.js';
+import { form, get, grant, makeAdmin, makeApp, makeWorkspace, resetDb, testDb, type Admin, type ConfiguredWorkspace, type TestEnv } from './helpers.js';
 
 let env: TestEnv;
 let ws: ConfiguredWorkspace;
@@ -39,10 +40,10 @@ async function indexed(): Promise<IndexedIssue[]> {
   return (await env.db.query<IndexedIssue>('SELECT * FROM issue_index WHERE repo_id = $1 ORDER BY number', [repoId()])).rows;
 }
 
-async function joinAs(role: 'moderator', name: string, perms?: Partial<{ canActTickets: boolean; canViewContributors: boolean; canSearchIssues: boolean; canManageFiles: boolean }>): Promise<Admin> {
+async function joinAs(role: 'moderator', name: string, access?: MemberAccess['access']): Promise<Admin> {
   const person = await makeAdmin(env, name);
   await env.server.inject({ method: 'POST', url: `/invite/${await createInvite(env.db, ws.workspace.id, ws.owner.user.id, role)}`, ...form(person) });
-  if (perms) await setModeratorPermissions(env.db, ws.workspace.id, person.user.id, { canActTickets: false, canViewContributors: false, ...perms });
+  if (access) await grant(env, ws.workspace.id, person.user.id, access);
   return person;
 }
 
@@ -195,50 +196,81 @@ describe('duplicate triage with the issue database', () => {
 
 // ---- Console -----------------------------------------------------------------------------------------------
 
-describe('Issues tab and moderator access', () => {
-  it('shows sync status and searches every issue; moderators need the switch', async () => {
+describe('GitHub issues and moderator access', () => {
+  it('searches every issue, shows sync status on Sync; moderators need access to each page', async () => {
     addIssue(1, 'Exporting to PDF crashes on Windows', { created: daysAgo(900) });
     addIssue(2, 'Dark mode toggle missing', { state: 'closed', reason: 'not_planned' });
     await new IssueIndexer(env.deps).tick();
 
-    const page = await env.server.inject({ method: 'GET', url: `${w()}/tickets/issues?state=all&q=pdf%20crash`, ...get(ws.owner) });
+    const page = await env.server.inject({ method: 'GET', url: `${w()}/issues?state=all&q=pdf%20crash`, ...get(ws.owner) });
     expect(page.statusCode).toBe(200);
-    expect(page.body).toContain('Issue database');
-    expect(page.body).toContain('Up to date');
+    expect(page.body).toContain(`href="${w()}/issues" class="nav-item" aria-current="page"`);
+    expect(page.body).toContain('1 repository · synced just now');
     expect(page.body).toContain('<mark>');
     expect(page.body).toContain('Exporting to PDF crashes on Windows');
     expect(page.body).not.toContain('Dark mode toggle missing');
-    const closed = await env.server.inject({ method: 'GET', url: `${w()}/tickets/issues?state=closed`, ...get(ws.owner) });
+    const closed = await env.server.inject({ method: 'GET', url: `${w()}/issues?state=closed`, ...get(ws.owner) });
     expect(closed.body).toContain('Closed · not planned');
 
+    // Sync: each repository's copy, and Sync now.
+    const sync = await env.server.inject({ method: 'GET', url: `${w()}/issues/sync`, ...get(ws.owner) });
+    expect(sync.body).toContain('Issue database');
+    expect(sync.body).toContain('Up to date');
+    expect(sync.body).toContain(`action="${w()}/issues/sync"`);
+
     const viewer = await joinAs('moderator', 'mod-plain');
-    expect((await env.server.inject({ method: 'GET', url: `${w()}/tickets/issues`, ...get(viewer) })).statusCode).toBe(403);
-    const searcher = await joinAs('moderator', 'mod-search', { canSearchIssues: true });
-    const ok = await env.server.inject({ method: 'GET', url: `${w()}/tickets/issues`, ...get(searcher) });
+    expect((await env.server.inject({ method: 'GET', url: `${w()}/issues`, ...get(viewer) })).statusCode).toBe(403);
+    expect((await env.server.inject({ method: 'GET', url: `${w()}/tickets`, ...get(viewer) })).body).toContain('title="You don’t have access to GitHub issues. Ask an admin if you need it."');
+    const searcher = await joinAs('moderator', 'mod-search', { issues: 'view', 'issues-github': 'view', 'issues-sync': 'view' });
+    const ok = await env.server.inject({ method: 'GET', url: `${w()}/issues`, ...get(searcher) });
     expect(ok.statusCode).toBe(200);
-    expect(ok.body).toContain('>Issues</a>');
-    expect(ok.body).not.toContain('>Files</a>');
-    expect((await env.server.inject({ method: 'POST', url: `${w()}/tickets/issues/sync`, ...form(searcher) })).statusCode).toBe(302);
+    expect(ok.body).toContain(`href="${w()}/issues" class="nav-item" aria-current="page"`);
+    expect(ok.body).not.toContain(`action="${w()}/issues/sync"`);
+    // View on Sync: the table without Sync now, which needs Edit.
+    const syncView = await env.server.inject({ method: 'GET', url: `${w()}/issues/sync`, ...get(searcher) });
+    expect(syncView.body).toContain('Issue database');
+    expect(syncView.body).toContain('View only');
+    expect(syncView.body).not.toContain(`action="${w()}/issues/sync"`);
+    expect((await env.server.inject({ method: 'POST', url: `${w()}/issues/sync`, ...form(searcher) })).statusCode).toBe(403);
+    await grant(env, ws.workspace.id, searcher.user.id, { issues: 'view', 'issues-sync': 'edit' });
+    const synced = await env.server.inject({ method: 'POST', url: `${w()}/issues/sync`, ...form(searcher, { back: `${w()}/issues?state=closed` }) });
+    expect(synced.statusCode).toBe(302);
+    expect(synced.headers.location).toBe(`${w()}/issues?state=closed`);
+    // Only back to a GitHub issues page.
+    const elsewhere = await env.server.inject({ method: 'POST', url: `${w()}/issues/sync`, ...form(searcher, { back: 'https://example.com/' }) });
+    expect(elsewhere.headers.location).toBe(`${w()}/issues/sync`);
+    for (const back of [`${w()}/issuesxyz`, `${w()}/issues/../members`, `${w()}/issues/%2e%2e/members`]) {
+      const res = await env.server.inject({ method: 'POST', url: `${w()}/issues/sync`, ...form(searcher, { back }) });
+      expect(res.headers.location, back).toBe(`${w()}/issues/sync`);
+    }
+    // Characters a Location header can't hold come back encoded, not as an error.
+    const odd = await env.server.inject({ method: 'POST', url: `${w()}/issues/sync`, ...form(searcher, { back: `${w()}/issues?q=ā` }) });
+    expect(odd.statusCode).toBe(302);
+    expect(odd.headers.location).toBe(`${w()}/issues?q=%C4%81`);
   });
 
   it('lets admins give moderators the Files tab, with cleanup rules kept for admins', async () => {
     const mod = await joinAs('moderator', 'mod-files');
     expect((await env.server.inject({ method: 'GET', url: `${w()}/tickets/files`, ...get(mod) })).statusCode).toBe(403);
-    const saved = await env.server.inject({ method: 'POST', url: `${w()}/members/${mod.user.id}/permissions`, ...form(ws.owner, { can_manage_files: '1', can_search_issues: '1' }) });
+    const saved = await env.server.inject({ method: 'POST', url: `${w()}/members/${mod.user.id}/access`, ...form(ws.owner, { files: 'edit', issues: 'view' }) });
     expect(saved.statusCode).toBe(302);
-    const row = (await env.db.query('SELECT can_manage_files, can_search_issues, can_act_tickets FROM workspace_members WHERE user_id = $1', [mod.user.id])).rows[0];
-    expect(row).toMatchObject({ can_manage_files: true, can_search_issues: true, can_act_tickets: false });
+    const row = (await env.db.query('SELECT access FROM workspace_members WHERE user_id = $1', [mod.user.id])).rows[0];
+    expect(row.access).toEqual({ verifications: 'view', files: 'edit', issues: 'view' });
 
     const files = await env.server.inject({ method: 'GET', url: `${w()}/tickets/files`, ...get(mod) });
     expect(files.statusCode).toBe(200);
-    expect(files.body).toContain('Only owners and admins can change these.');
+    // The cleanup rules: shown view-only, with no form to post.
+    expect(files.body).toContain('<div class="card readable" id="rules">');
+    expect(files.body).toContain('<fieldset class="plain view-only" disabled>');
+    expect(files.body).toContain('View only. Ask an admin if you need to change the cleanup rules and storage limit.');
+    expect(files.body).not.toContain(`action="${w()}/tickets/files/settings"`);
     expect(files.body).not.toContain('Save rules');
     expect((await env.server.inject({ method: 'POST', url: `${w()}/tickets/files/settings`, ...form(mod, { closed_days: '1', age_days: '1', storage_limit_gb: '1' }) })).statusCode).toBe(403);
     expect((await env.server.inject({ method: 'POST', url: `${w()}/tickets/files/scan`, ...form(mod) })).statusCode).toBe(302);
 
     const members = await env.server.inject({ method: 'GET', url: `${w()}/members`, ...get(ws.owner) });
-    expect(members.body).toContain('Search all issues');
-    expect(members.body).toContain('Clean up files');
+    expect(members.body).toContain('Tickets · 2 of 5');
+    expect(members.body).toContain('All issues: view');
   });
 });
 
@@ -279,18 +311,18 @@ describe('server health', () => {
     expect((await env.server.inject({ method: 'GET', url: `${w()}/health`, ...get(mod) })).statusCode).toBe(403);
     expect((await env.server.inject({ method: 'GET', url: `${w()}/tickets`, ...get(mod) })).body).not.toContain(`${w()}/health"`);
 
-    // An admin turns on "See server health" for the moderator.
-    const saved = await env.server.inject({ method: 'POST', url: `${w()}/members/${mod.user.id}/permissions`, ...form(ws.owner, { can_view_health: '1' }) });
+    // An admin gives the moderator View on Server health.
+    const saved = await env.server.inject({ method: 'POST', url: `${w()}/members/${mod.user.id}/access`, ...form(ws.owner, { health: 'view' }) });
     expect(saved.statusCode).toBe(302);
     const modPage = await env.server.inject({ method: 'GET', url: `${w()}/health`, ...get(mod) });
     expect(modPage.statusCode).toBe(200);
     expect(modPage.body).toContain(`href="${w()}/health"`);
     // Links to pages the moderator can't open aren't shown.
-    expect(modPage.body).not.toContain(`href="${w()}/tickets/triage"`);
+    expect(modPage.body).not.toContain(`href="${w()}/triage`);
     expect(modPage.body).not.toContain(`href="${w()}/settings#claude"`);
     expect(modPage.body).not.toContain(`href="${w()}/tickets/files`);
     expect((await env.server.inject({ method: 'GET', url: `${w()}/deployment`, ...get(mod) })).statusCode).toBe(403);
     const members = await env.server.inject({ method: 'GET', url: `${w()}/members`, ...get(ws.owner) });
-    expect(members.body).toContain('See server health');
+    expect(members.body).toContain('Health: view');
   });
 });

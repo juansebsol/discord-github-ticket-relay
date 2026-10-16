@@ -66,7 +66,7 @@ export function registerGitHubRoutes(app: FastifyInstance, web: Web): void {
 
     const disabledRepos = (repos ?? []).filter((r) => !r.hasIssues && usedBy.has(r.id));
     const body = html`
-      ${pageHeader({ eyebrow: 'General setup · Step 1 of 3', title: 'GitHub', after: status, description: 'The GitHub App files tickets as issues and reads contributions for Contributor Roles.', actions })}
+      ${pageHeader({ eyebrow: 'Setup · Step 1 of 3', title: 'GitHub', after: status, description: 'The GitHub App files tickets as issues and reads contributions for Contributor roles.', actions })}
       ${!deps.github ? notice('warn', 'The GitHub App isn’t registered for this deployment yet', 'Whoever runs the server needs to finish the deployment setup first.', { action: linkBtn(`${b}/deployment`, 'Open Deployment', { size: 'sm' }) }) : ''}
       ${credentials && !credentials.ok ? notice('danger', 'The server’s GitHub App credentials don’t work', html`${credentials.detail} Fix <code>.env</code> or <code>secrets/sec.pem</code> on the server, then run <code>pm2 restart all --update-env</code>.`) : ''}
       ${conn?.status_detail ? notice(conn.status === 'active' ? 'info' : 'danger', null, conn.status_detail) : ''}
@@ -101,7 +101,7 @@ export function registerGitHubRoutes(app: FastifyInstance, web: Web): void {
               <li><span>GitHub asks you to authorize the app. This only confirms you have access to the installation; your personal GitHub token isn’t kept.</span></li>
               <li><span>You come back here and see the connected account and its repositories.</span></li>
             </ol></div>
-            ${setting('Permissions', 'Issues to create issues and read labels. Pull requests and Contents are read-only, for Contributor Roles. Installing on an organization may need an owner’s approval.', html`<div class="tags">${tag('Issues: write')}${tag('Pull requests: read')}${tag('Contents: read')}</div>`)}
+            ${setting('Permissions', 'Issues to create issues and read labels. Pull requests and Contents are read-only, for Contributor roles. Installing on an organization may need an owner’s approval.', html`<div class="tags">${tag('Issues: write')}${tag('Pull requests: read')}${tag('Contents: read')}</div>`)}
             <div class="card-f"><span></span><div class="end">
               ${postBtn(`${b}/setup/github/link`, 'Link existing installation', ctx.csrf, { disabled: !deps.github })}
               ${postBtn(`${b}/setup/github/install`, 'Install the GitHub App', ctx.csrf, { variant: 'primary', icon: 'github', disabled: !deps.github })}

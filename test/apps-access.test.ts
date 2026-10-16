@@ -1,7 +1,7 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { listApps } from '../src/domain/store.js';
-import { createInvite, setModeratorPageAccess, setModeratorTriageAccess } from '../src/domain/workspaces.js';
-import { form, get, makeAdmin, makeApp, makeWorkspace, resetDb, testDb, type Admin, type ConfiguredWorkspace, type TestEnv } from './helpers.js';
+import { createInvite, setModeratorAccess } from '../src/domain/workspaces.js';
+import { form, get, grant, makeAdmin, makeApp, makeWorkspace, resetDb, testDb, type Admin, type ConfiguredWorkspace, type TestEnv } from './helpers.js';
 
 let env: TestEnv;
 let ws: ConfiguredWorkspace;
@@ -10,7 +10,7 @@ const wid = () => ws.workspace.id;
 const w = () => `/w/${ws.workspace.id}`;
 const page = (url: string, who: Admin = mod) => env.server.inject({ method: 'GET', url: `${w()}${url}`, ...get(who) });
 const post = (url: string, fields: Record<string, string> = {}, who: Admin = mod) => env.server.inject({ method: 'POST', url: `${w()}${url}`, ...form(who, fields) });
-const pageAccess = async () => (await env.db.query('SELECT page_access, triage_access FROM workspace_members WHERE user_id = $1', [mod.user.id])).rows[0];
+const access = async () => (await env.db.query('SELECT access FROM workspace_members WHERE user_id = $1', [mod.user.id])).rows[0].access;
 
 beforeEach(async () => {
   await resetDb();
@@ -34,28 +34,28 @@ describe('Apps & repositories access for moderators', () => {
     expect((await post('/apps', { name: 'Sneaky', repo_id: String(ws.repoIds[0]), enabled: '1' })).statusCode).toBe(403);
   });
 
-  it('is set on the Members page next to the Triage pages, without touching them', async () => {
-    await setModeratorTriageAccess(env.db, wid(), mod.user.id, { actions: 'view' });
+  it('is set on the Members page with the other pages, without touching them', async () => {
+    await grant(env, wid(), mod.user.id, { 'triage.actions': 'view' });
     const members = await page('/members', ws.owner);
-    expect(members.body).toContain('id="page-access"');
-    expect(members.body).toContain(`name="apps" form="pg-${mod.user.id}"`);
-    expect(members.body).toContain('Tickets › Triage');
+    expect(members.body).toContain('id="moderator-access"');
+    expect(members.body).toContain(`name="apps" form="acc-${mod.user.id}"`);
+    expect(members.body).toContain('AI triage');
 
     const res = await env.server.inject({
-      method: 'POST', url: `${w()}/members/${mod.user.id}/page-access`,
+      method: 'POST', url: `${w()}/members/${mod.user.id}/access`,
       headers: { ...form(ws.owner).headers, accept: 'application/json' },
       payload: new URLSearchParams({ _csrf: ws.owner.csrf, apps: 'view' }).toString(),
     });
     expect(res.json()).toEqual({ ok: true, message: 'mia: Apps & repositories → View' });
-    expect(await pageAccess()).toEqual({ page_access: { apps: 'view' }, triage_access: { actions: 'view' } });
+    expect(await access()).toEqual({ 'triage.actions': 'view', apps: 'view' });
     expect((await page('/members', ws.owner)).body).toContain('Apps: view');
     // Only admins set it.
-    expect((await post(`/members/${mod.user.id}/page-access`, { apps: 'edit' })).statusCode).toBe(403);
-    await expect(setModeratorPageAccess(env.db, wid(), ws.owner.user.id, { apps: 'view' })).rejects.toThrow();
+    expect((await post(`/members/${mod.user.id}/access`, { apps: 'edit' })).statusCode).toBe(403);
+    await expect(setModeratorAccess(env.db, wid(), ws.owner.user.id, { apps: 'view' })).rejects.toThrow();
   });
 
   it('View shows the apps without any way to change them', async () => {
-    await setModeratorPageAccess(env.db, wid(), mod.user.id, { apps: 'view' });
+    await grant(env, wid(), mod.user.id, { apps: 'view' });
     const app = ws.apps[0]!;
     const list = await page('/apps');
     expect(list.statusCode).toBe(200);
@@ -75,7 +75,7 @@ describe('Apps & repositories access for moderators', () => {
   });
 
   it('Edit lets them add, change, hide and remove apps; GitHub, Discord and the panel stay with admins', async () => {
-    await setModeratorPageAccess(env.db, wid(), mod.user.id, { apps: 'edit' });
+    await grant(env, wid(), mod.user.id, { apps: 'edit' });
     const list = await page('/apps');
     expect(list.body).toContain('Add app');
     expect(list.body).not.toContain('View only');

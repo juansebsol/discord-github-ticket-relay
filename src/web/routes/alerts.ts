@@ -5,12 +5,12 @@
  * until the next time it happens. app.js loads it on every page and checks again every minute.
  */
 import type { FastifyInstance } from 'fastify';
-import { can, firstTriageArea } from '../../domain/permissions.js';
+import { can } from '../../domain/permissions.js';
 import { html, type SafeHtml } from '../../lib/html.js';
 import { autoChecked, AUTO_CHECK_MS, getTriageSettings, monthlyUsage, type TriageSettings } from '../../triage/settings.js';
 import type { Web, WorkspaceRequestContext } from '../server.js';
 import { csrfField, icon, iconBtn, linkBtn, plural, submitBtn, timeAgo, type IconName } from '../ui.js';
-import { triageHref } from './tickets.js';
+import { areaHref, canOpen, firstPage } from './tool.js';
 
 /** The triage worker reports every 30 seconds; this long without a report (deploys included) means it's down. */
 const WORKER_DOWN_MS = 3 * 60_000;
@@ -31,9 +31,9 @@ export interface AppAlert {
   inline?: string;
 }
 
-/** Why triage stopped, in a sentence. */
-function pausedText(p: NonNullable<TriageSettings['paused']>, model: string): string {
-  if (autoChecked(p)) return 'The Anthropic account is out of credits.';
+/** Why triage stopped, in a sentence. `carriesOn` adds that it starts again by itself once credits are added. */
+export function pausedText(p: NonNullable<TriageSettings['paused']>, model: string, o: { carriesOn?: boolean } = {}): string {
+  if (autoChecked(p)) return `The Anthropic account is out of credits.${o.carriesOn ? ' Triage carries on by itself once credits are added.' : ''}`;
   switch (p.reason) {
     case 'no_key':
       return 'There’s no Claude API key.';
@@ -49,7 +49,7 @@ function pausedText(p: NonNullable<TriageSettings['paused']>, model: string): st
 export async function appAlerts(web: Web, ctx: WorkspaceRequestContext): Promise<AppAlert[]> {
   const m = ctx.membership;
   // Only people who can see triage (or set it up) hear about it.
-  const triagePage = firstTriageArea(m);
+  const triagePage = firstPage(m, 'triage');
   if (!triagePage && !can(m, 'manage')) return [];
   const wid = ctx.workspace.id;
   const b = ctx.base;
@@ -62,7 +62,7 @@ export async function appAlerts(web: Web, ctx: WorkspaceRequestContext): Promise
 
   const edit = can(m, 'triage.actions.edit');
   const admin = can(m, 'manage');
-  const openTriage = triagePage ? linkBtn(triageHref(ctx, triagePage), 'Open Triage', { size: 'sm', variant: 'ghost', trail: 'arrow-right' }) : null;
+  const openTriage = triagePage ? linkBtn(areaHref(ctx, triagePage), 'Open AI triage', { size: 'sm', variant: 'ghost', trail: 'arrow-right' }) : null;
   const waiting = [
     now.queued.tickets ? plural(now.queued.tickets, 'Discord ticket') : '',
     now.queued.issues ? plural(now.queued.issues, 'GitHub issue') : '',
@@ -75,10 +75,10 @@ export async function appAlerts(web: Web, ctx: WorkspaceRequestContext): Promise
   if (p) {
     const auto = autoChecked(p);
     const actions: SafeHtml[] = [];
-    if (edit) actions.push(html`<form method="post" action="${b}/tickets/triage/resume" class="inline-form" data-async data-dock-action>${csrfField(ctx.csrf)}${submitBtn('Try again', { size: 'sm', variant: 'primary', icon: 'rotate-ccw', loading: 'Checking…' })}</form>`);
+    if (edit) actions.push(html`<form method="post" action="${b}/triage/resume" class="inline-form" data-async data-dock-action>${csrfField(ctx.csrf)}${submitBtn('Try again', { size: 'sm', variant: 'primary', icon: 'rotate-ccw', loading: 'Checking…' })}</form>`);
     if (auto && admin) actions.push(linkBtn(ANTHROPIC_BILLING, 'Add credits', { size: 'sm', trail: 'external-link', external: true }));
     else if ((p.reason === 'key_invalid' || p.reason === 'no_key') && admin) actions.push(linkBtn(`${b}/settings#claude`, p.reason === 'no_key' ? 'Add a key' : 'Replace the key', { size: 'sm', trail: 'arrow-right' }));
-    else if (p.reason === 'model_unavailable' && edit) actions.push(linkBtn(`${b}/tickets/triage#limits`, 'Choose a model', { size: 'sm', trail: 'arrow-right' }));
+    else if (p.reason === 'model_unavailable' && edit) actions.push(linkBtn(`${areaHref(ctx, 'triage.actions')}#limits`, 'Choose a model', { size: 'sm', trail: 'arrow-right' }));
     if (openTriage) actions.push(openTriage);
     const meta: AppAlert['meta'] = [{ icon: 'clock', text: `Paused ${timeAgo(p.at)}` }];
     if (waiting.length) meta.push({ icon: 'inbox', text: `Waiting: ${waiting.join(' · ')}` });
@@ -102,9 +102,9 @@ export async function appAlerts(web: Web, ctx: WorkspaceRequestContext): Promise
       tone: 'warn',
       icon: 'gauge',
       title: 'AI triage stopped for this month',
-      text: `It reached this month’s limit of ${c.monthlyLimit.toLocaleString('en-US')} tickets, so new tickets aren’t triaged. It starts again on ${next.toLocaleDateString('en-US', { month: 'long', day: 'numeric', timeZone: 'UTC' })}, or raise the limit.`,
+      text: `It reached this month’s limit of ${c.monthlyLimit.toLocaleString('en-US')} tickets, so new tickets aren’t triaged. It starts again on ${next.toLocaleDateString('en-US', { month: 'long', day: 'numeric', timeZone: 'UTC' })}${edit ? ', or raise the limit' : ''}.`,
       meta: [],
-      actions: [edit ? linkBtn(`${b}/tickets/triage#limits`, 'Raise the limit', { size: 'sm', variant: 'primary', trail: 'arrow-right' }) : null, edit ? null : openTriage].filter((x): x is SafeHtml => Boolean(x)),
+      actions: [edit ? linkBtn(`${areaHref(ctx, 'triage.actions')}#limits`, 'Raise the limit', { size: 'sm', variant: 'primary', trail: 'arrow-right' }) : null, edit ? null : openTriage].filter((x): x is SafeHtml => Boolean(x)),
       resolved: 'AI triage is running again.',
     });
   }
@@ -118,7 +118,7 @@ export async function appAlerts(web: Web, ctx: WorkspaceRequestContext): Promise
       title: 'The triage worker isn’t running',
       text: `It last checked in ${timeAgo(seen)}. Tickets are still filed; nothing is triaged until it’s back.${admin ? ' Check pm2 status on the server.' : ''}`,
       meta: waiting.length ? [{ icon: 'inbox', text: `Waiting: ${waiting.join(' · ')}` }] : [],
-      actions: can(m, 'health.view') ? [linkBtn(`${b}/health`, 'Server health', { size: 'sm', trail: 'arrow-right' })] : [],
+      actions: canOpen(m, 'health') ? [linkBtn(`${b}/health`, 'Server health', { size: 'sm', trail: 'arrow-right' })] : [],
       resolved: 'The triage worker is running again.',
     });
   }

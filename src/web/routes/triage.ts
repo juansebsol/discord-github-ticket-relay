@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { inspectGuild } from '../../domain/discord-checks.js';
-import { can, firstTriageArea, TRIAGE_AREA_NAMES, TRIAGE_AREAS, VIEW_ONLY_AREAS, type TriageArea } from '../../domain/permissions.js';
+import { can } from '../../domain/permissions.js';
 import { getDiscordConnection, listApps } from '../../domain/store.js';
 import { listTicketTypes } from '../../domain/ticket-types.js';
 import { UserFacingError } from '../../domain/types.js';
@@ -41,9 +41,10 @@ import {
 import { keyPill, keyStatus, keySummary } from './claude.js';
 import { setFlash } from '../session.js';
 import type { Web, WorkspaceRequestContext } from '../server.js';
-import { csrfField, icon, linkBtn, locked, notice, pill, plural, postBtn, segLinks, segRadios, selectWrap, setting, submitBtn, switchInput, tag, typeIcon, viewOnlyTag } from '../ui.js';
+import { csrfField, icon, linkBtn, locked, notice, plural, postBtn, segRadios, selectWrap, setting, submitBtn, switchInput, tag, typeIcon } from '../ui.js';
 import { textField } from './panel.js';
-import { canTriage, ticketsHeader, triageHref } from './tickets.js';
+import { areaHref, canOpen, pageLink, toolHeader } from './tool.js';
+import { workspacePath } from './triage-bulk.js';
 
 export const FLAG_COPY: Record<Flag, { title: string; desc: string; placeholders: string }> = {
   support: { title: 'Not a development issue', desc: 'How-to and installation help, account or billing questions: things your community should answer, not code changes. Adds a label and posts your reply.', placeholders: '{app}, {help_channel}' },
@@ -66,30 +67,6 @@ export const MODE_OPTIONS = [
 
 export const MODE_NAMES: Record<Mode, string> = { off: 'Off', suggest: 'Suggest', auto: 'Automatic' };
 
-export type TriagePage = TriageArea;
-
-/**
- * The Triage tab's sections. Pages this person can't open are shown locked; a page they can
- * see but not change says so ("View only").
- */
-export function triageNav(ctx: WorkspaceRequestContext, current: TriagePage, actions?: SafeHtml | null): SafeHtml {
-  const viewOnly = !VIEW_ONLY_AREAS.has(current) && !canTriage(ctx, current, 'edit');
-  return html`<div class="subnav">${segLinks('Triage', TRIAGE_AREAS.map((a) => ({
-    href: triageHref(ctx, a),
-    label: TRIAGE_AREA_NAMES[a],
-    current: a === current,
-    locked: canTriage(ctx, a) ? undefined : `You don’t have access to ${TRIAGE_AREA_NAMES[a]}. Ask an admin if you need it.`,
-  })))}${viewOnly || actions ? html`<div class="row">${viewOnly ? viewOnlyTag(VIEW_ONLY_TEXT[current]) : ''}${actions ?? ''}</div>` : ''}</div>`;
-}
-
-const VIEW_ONLY_TEXT: Record<TriageArea, string> = {
-  actions: 'You can see the triage settings. Ask an admin if you need to change them.',
-  labels: 'You can see the label groups. Ask an admin if you need to change them.',
-  prompt: 'You can see the prompt. Ask an admin if you need to change it.',
-  runs: 'You can see re-runs and their results. Ask an admin if you need to start, stop or apply them.',
-  activity: '',
-};
-
 /** Shown where Save would be, on a page this person can only see. */
 export function viewOnlyFooter(what: string): SafeHtml {
   return html`<span class="small muted">${icon('eye', 14)} View only. Ask an admin if you need to change ${what}.</span>`;
@@ -111,7 +88,7 @@ const modelCache = new Map<string, { at: number; models: ModelOption[] }>();
 
 export function registerTriageRoutes(app: FastifyInstance, web: Web): void {
   const { deps } = web;
-  const back = (ctx: WorkspaceRequestContext) => `${ctx.base}/tickets/triage`;
+  const back = (ctx: WorkspaceRequestContext) => areaHref(ctx, 'triage.actions');
 
   /** Models for the dropdown, cached for 10 minutes per key. */
   async function models(key: string | null): Promise<{ models: ModelOption[]; error: string | null }> {
@@ -128,20 +105,13 @@ export function registerTriageRoutes(app: FastifyInstance, web: Web): void {
     }
   }
 
-  app.get('/w/:wid/tickets/triage', async (req, reply) => {
-    // Someone who can't see Actions lands on the first Triage page they can see.
-    const member = await web.requireWorkspace(req, reply, { permission: 'view' });
-    if (!member) return reply;
-    const first = firstTriageArea(member.membership);
-    if (!canTriage(member, 'actions') && first) return reply.redirect(triageHref(member, first));
+  app.get('/w/:wid/triage/actions', async (req, reply) => {
     const ctx = await web.requireWorkspace(req, reply, { permission: 'triage.actions.view' });
     if (!ctx) return reply;
     const wid = ctx.workspace.id;
     const b = ctx.base;
-    const edit = canTriage(ctx, 'actions', 'edit');
+    const edit = can(ctx.membership, 'triage.actions.edit');
     const admin = can(ctx.membership, 'manage');
-    /** A link to another Triage page, or just its name for someone who can't open it. */
-    const pageLink = (area: TriageArea, text: string) => (canTriage(ctx, area) ? html`<a href="${triageHref(ctx, area)}">${text}</a>` : text);
     const settingsLink = (text: string, plain: string) => (admin ? html`<a href="${b}/settings#claude">${text}</a>` : plain);
     const [settings, apps, types, usage, key, conn] = await Promise.all([
       getTriageSettings(deps.db, wid),
@@ -159,7 +129,6 @@ export function registerTriageRoutes(app: FastifyInstance, web: Web): void {
     const nextMonth = new Date(Date.UTC(usage.since.getUTCFullYear(), usage.since.getUTCMonth() + 1, 1));
 
     const anyOn = settings.enabled || settings.githubEnabled;
-    const status = !anyOn ? pill('Off', 'neutral') : settings.paused ? pill('Paused', 'warn') : pill('On', 'ok');
     const ghOff = !settings.githubEnabled;
     /** An action's two modes: for Discord tickets, and for issues opened on GitHub. */
     const modeControls = (name: string, key: string, title: string) => html`<div class="src-modes${ghOff ? ' gh-off' : ''}">
@@ -209,32 +178,31 @@ export function registerTriageRoutes(app: FastifyInstance, web: Web): void {
       </details></div>`;
 
     const body = html`
-      ${await ticketsHeader(web, ctx, 'triage')}
-      ${triageNav(ctx, 'actions')}
+      ${await toolHeader(web, ctx, 'triage', 'triage.actions')}
       ${!key ? notice('warn', 'Triage needs a Claude API key', admin ? 'Add the workspace’s key in Settings. It’s shared by every feature that uses Claude.' : 'An admin can add the workspace’s key in Settings.', { action: admin ? linkBtn(`${b}/settings#claude`, 'Open Settings', { size: 'sm', trail: 'arrow-right' }) : undefined }) : ''}
       ${anyOn && settings.paused
-        ? notice('warn', 'Triage is paused', `${pauseMessage(settings.paused.reason, settings.paused.detail, c.model)} Tickets are still being filed normally.`, { id: 'triage-paused', action: edit ? postBtn(`${b}/tickets/triage/resume`, 'Try again', ctx.csrf, { size: 'sm', icon: 'rotate-ccw', loading: 'Checking…' }) : undefined })
+        ? notice('warn', 'Triage is paused', `${pauseMessage(settings.paused.reason, settings.paused.detail, c.model)} Tickets are still being filed normally.`, { id: 'triage-paused', action: edit ? postBtn(`${b}/triage/resume`, 'Try again', ctx.csrf, { size: 'sm', icon: 'rotate-ccw', loading: 'Checking…' }) : undefined })
         : ''}
       ${anyOn && usage.triaged >= c.monthlyLimit
-        ? notice('warn', 'Monthly limit reached', `Triage resumes on ${nextMonth.toISOString().slice(0, 10)}, or raise the limit below. Tickets are still being filed normally.`)
+        ? notice('warn', 'Monthly limit reached', `Triage resumes on ${nextMonth.toISOString().slice(0, 10)}${edit ? ', or raise the limit below' : ''}. Tickets are still being filed normally.`)
         : ''}
       <div class="card">
-        <div class="card-h"><div><div class="title"><h2>AI triage</h2>${status}</div><div class="desc">Claude reads each ticket after it’s filed and flags priority, duplicates, spam and more. It runs in its own worker: if it’s off, paused or out of credits, tickets are still filed exactly as before.</div></div></div>
+        <div class="card-h"><div><h2>Switches</h2><div class="desc">Turn triage on for each source. It runs in its own worker: if it’s off, paused or out of credits, tickets are still filed exactly as before.</div></div></div>
         ${setting('Claude API key', admin ? keySummary(keyState, b) : 'Shared by every feature that uses Claude. Admins manage it in Settings.', keyPill(keyState))}
-        ${setting(html`${icon('message-circle', 16, 'muted')} Discord tickets`, key ? html`Tickets members open in Discord. Only tickets filed after you turn it on are triaged; for older ones, use ${pageLink('runs', 'Re-run')}.` : html`Needs a Claude API key. ${settingsLink('Add one in Settings', 'An admin can add one in Settings.')}`, html`<form method="post" action="${b}/tickets/triage/enabled" data-async class="inline-form">${csrfField(ctx.csrf)}<input type="hidden" name="set" value="1">
+        ${setting(html`${icon('message-circle', 16, 'muted')} Discord tickets`, key ? html`Tickets members open in Discord. Only tickets filed after you turn it on are triaged; for older ones, use ${pageLink(ctx, 'triage.runs', 'Re-run')}.` : html`Needs a Claude API key. ${settingsLink('Add one in Settings', 'An admin can add one in Settings.')}`, html`<form method="post" action="${b}/triage/enabled" data-async class="inline-form">${csrfField(ctx.csrf)}<input type="hidden" name="set" value="1">
           ${switchInput({ name: 'enabled', checked: settings.enabled, label: 'Triage Discord tickets', disabled: !edit || (!key && !settings.enabled) })}${edit ? html`<button type="submit" class="btn sm nojs">Save</button>` : ''}</form>`, { switchRow: true })}
-        ${setting(html`${icon('github', 16, 'muted')} Issues opened on GitHub`, key ? html`Issues people open directly on GitHub (not pull requests, bots, or tickets from Discord). Only issues opened after you turn it on are triaged; for older ones, use ${pageLink('runs', 'Re-run')}.${can(ctx.membership, 'issues.view') ? html` Review them in <a href="${b}/tickets/issues/triage">Issues › Triage</a>.` : ''}` : html`Needs a Claude API key. ${settingsLink('Add one in Settings', 'An admin can add one in Settings.')}`, html`<form method="post" action="${b}/tickets/triage/github-enabled" data-async data-gh-switch class="inline-form">${csrfField(ctx.csrf)}<input type="hidden" name="set" value="1">
+        ${setting(html`${icon('github', 16, 'muted')} Issues opened on GitHub`, key ? html`Issues people open directly on GitHub (not pull requests, bots, or tickets from Discord). Only issues opened after you turn it on are triaged; for older ones, use ${pageLink(ctx, 'triage.runs', 'Re-run')}.${canOpen(ctx.membership, 'triage.review') ? html` Review their suggestions in ${pageLink(ctx, 'triage.review', 'Review')}.` : canOpen(ctx.membership, 'issues-github') ? html` See them in ${pageLink(ctx, 'issues-github', 'GitHub issues › Opened on GitHub')}.` : ''}` : html`Needs a Claude API key. ${settingsLink('Add one in Settings', 'An admin can add one in Settings.')}`, html`<form method="post" action="${b}/triage/github-enabled" data-async data-gh-switch class="inline-form">${csrfField(ctx.csrf)}<input type="hidden" name="set" value="1">
           ${switchInput({ name: 'enabled', checked: settings.githubEnabled, label: 'Triage issues opened on GitHub', disabled: !edit || (!key && !settings.githubEnabled) })}${edit ? html`<button type="submit" class="btn sm nojs">Save</button>` : ''}</form>`, { switchRow: true })}
         ${setting('This month', 'Re-runs count too.', html`<span class="value">${plural(usage.triaged, 'ticket')} of ${String(c.monthlyLimit)}${cost !== null ? ` · ${formatCost(cost)}` : ''}${usage.inputTokens ? ` · ${(usage.inputTokens + usage.outputTokens).toLocaleString('en-US')} tokens` : ''}</span>`)}
       </div>
-      <form method="post" action="${b}/tickets/triage" ${edit ? raw('data-dirty') : ''}>
+      <form method="post" action="${b}/triage/actions" ${edit ? raw('data-dirty') : ''}>
         ${csrfField(ctx.csrf)}
         <fieldset class="plain stack${edit ? '' : ' view-only'}" ${edit ? '' : raw('disabled')}>
         <div class="card">
           <div class="card-h"><div><h2>What triage does</h2><div class="desc">Each action has its own setting for Discord tickets and for issues opened on GitHub, and starts Off. <strong>Suggest</strong> shows Claude’s call for someone to apply. <strong>Automatic</strong> applies it on GitHub when Claude is at least ${String(c.threshold)}% sure; less sure calls become suggestions. The label, comment and closing are shared.</div>
             <div class="src-summary"><span>${icon('message-circle', 14)}Discord tickets: ${sourceSummary(ticketsOn, (k) => actionMode(c, k), settings.enabled)}</span><span>${icon('github', 14)}Opened on GitHub: ${sourceSummary(githubOn, (k) => githubMode(c, k), settings.githubEnabled)}</span></div></div>
             ${edit ? html`<div class="row js-only"><button type="button" class="btn sm" data-copy-modes>Copy Discord settings to GitHub</button><button type="button" class="btn sm" data-set-gh-modes="suggest">Set all GitHub to Suggest</button></div>` : ''}</div>
-          <div class="card-b tight" data-gh-off-note ${ghOff ? '' : raw('hidden')}>${notice('info', null, 'Issues opened on GitHub is switched off, so its settings below aren’t used yet. You can set them up first and turn it on above when you’re ready.')}</div>
+          <div class="card-b tight" data-gh-off-note ${ghOff ? '' : raw('hidden')}>${notice('info', null, edit ? 'Issues opened on GitHub is switched off, so its settings below aren’t used yet. You can set them up first and turn it on above when you’re ready.' : 'Issues opened on GitHub is switched off, so its settings below aren’t used yet.')}</div>
           <div class="section">
             <div class="section-h"><div><h3>Priority</h3><div class="desc">Adds one of four priority labels. The ticket type isn’t changed; the member picks it.</div></div>${modeControls('priority', 'priority', 'Priority')}</div>
             <details class="act-more">
@@ -247,7 +215,7 @@ export function registerTriageRoutes(app: FastifyInstance, web: Web): void {
           </div>
           ${FLAGS.map(flagSection)}
           <div class="section">
-            <div class="section-h"><div><h3>Label groups</h3><div class="desc">Claude can also sort tickets with labels you define, such as Type, Area and Platform. It only picks from your options.</div></div>${canTriage(ctx, 'labels', 'edit') ? linkBtn(triageHref(ctx, 'labels'), c.labelGroups.length ? 'Edit groups' : 'Add groups', { size: 'sm', trail: 'arrow-right' }) : canTriage(ctx, 'labels') && c.labelGroups.length ? linkBtn(triageHref(ctx, 'labels'), 'See groups', { size: 'sm', trail: 'arrow-right' }) : ''}</div>
+            <div class="section-h"><div><h3>Label groups</h3><div class="desc">Claude can also sort tickets with labels you define, such as Type, Area and Platform. It only picks from your options.</div></div>${can(ctx.membership, 'triage.labels.edit') ? linkBtn(areaHref(ctx, 'triage.labels'), c.labelGroups.length ? 'Edit groups' : 'Add groups', { size: 'sm', trail: 'arrow-right' }) : canOpen(ctx.membership, 'triage.labels') && c.labelGroups.length ? linkBtn(areaHref(ctx, 'triage.labels'), 'See groups', { size: 'sm', trail: 'arrow-right' }) : ''}</div>
             ${c.labelGroups.map((g) => html`<div class="group-row"><div><div class="cell-title">${icon('tags', 14, 'muted')} ${g.name}</div><div class="sub">${plural(g.options.length, 'option')}</div></div>${modeControls(`group_${g.id}`, groupKind(g.id), g.name)}</div>`)}
           </div>
         </div>
@@ -268,12 +236,12 @@ export function registerTriageRoutes(app: FastifyInstance, web: Web): void {
         </div>` : ''}
         <div class="card" id="limits">
           <div class="card-h"><h2>Model, scope and limits</h2></div>
-          ${setting('Model', modelError ? `Couldn’t load models: ${modelError}` : key ? 'Models available to your API key. Haiku is the fastest and cheapest.' : 'Add an API key to load the models it can use.', selectWrap(html`<select id="model" name="model" ${available.length ? '' : raw('disabled')}>${modelOptions.map((m) => html`<option value="${m.id}" ${m.id === c.model ? raw('selected') : ''}>${m.name}${m.deprecated && available.length ? ' (deprecated)' : ''}</option>`)}</select>`), { for: 'model' })}
+          ${setting('Model', modelError ? `Couldn’t load models: ${modelError}` : key ? 'Models available to your API key. Haiku is the fastest and cheapest.' : admin ? 'Add an API key in Settings to load the models it can use.' : 'Models load once an admin adds a Claude API key.', selectWrap(html`<select id="model" name="model" ${available.length ? '' : raw('disabled')}>${modelOptions.map((m) => html`<option value="${m.id}" ${m.id === c.model ? raw('selected') : ''}>${m.name}${m.deprecated && available.length ? ' (deprecated)' : ''}</option>`)}</select>`), { for: 'model' })}
           ${available.length ? '' : html`<input type="hidden" name="model" value="${c.model}">`}
           ${setting('Confidence threshold', 'Automatic actions only happen at or above this confidence.', html`<input type="number" name="threshold" value="${String(c.threshold)}" min="50" max="100" required aria-label="Confidence threshold"><span class="connector">%</span>`)}
           ${setting('Monthly limit', 'Triage stops for the rest of the month after this many tickets. Filing isn’t affected.', html`<input type="number" class="wide" name="monthly_limit" value="${String(c.monthlyLimit)}" min="1" max="100000" required aria-label="Monthly limit"><span class="connector">tickets</span>`)}
           ${setting('Apps', 'Which apps’ tickets are triaged. While all are selected, new apps are included too.', html`<div class="check-list">${apps.map((a) => html`<label class="check"><input type="checkbox" name="app_ids" value="${a.id}" ${!c.appIds || c.appIds.includes(a.id) ? raw('checked') : ''}> ${a.name}</label>`)}</div>`, { stacked: true })}
-          ${setting('Prompt', 'What Claude is told about your products, each check and examples.', canTriage(ctx, 'prompt') ? linkBtn(triageHref(ctx, 'prompt'), canTriage(ctx, 'prompt', 'edit') ? 'Edit the prompt' : 'See the prompt', { size: 'sm', trail: 'arrow-right' }) : locked('No access'))}
+          ${setting('Prompt', 'What Claude is told about your products, each check and examples.', canOpen(ctx.membership, 'triage.prompt') ? linkBtn(areaHref(ctx, 'triage.prompt'), can(ctx.membership, 'triage.prompt.edit') ? 'Edit the prompt' : 'See the prompt', { size: 'sm', trail: 'arrow-right' }) : locked('No access'))}
           <div class="card-f">${anyActionOn(c) ? html`<span></span>` : html`<span class="small muted">Every action is off, so triage won’t do anything yet.</span>`}${edit ? html`<div class="end">
             <button type="button" class="btn" data-discard data-dirty-enable>Cancel</button>
             ${submitBtn('Save changes', { variant: 'primary', loading: 'Saving…', attrs: raw('data-dirty-enable') })}
@@ -281,10 +249,10 @@ export function registerTriageRoutes(app: FastifyInstance, web: Web): void {
         </div>
         </fieldset>
       </form>`;
-    return web.render(reply, ctx, 'Triage', 'tickets', body);
+    return web.render(reply, ctx, 'Actions · AI triage', 'triage', body);
   });
 
-  app.post('/w/:wid/tickets/triage', async (req, reply) => {
+  app.post('/w/:wid/triage/actions', async (req, reply) => {
     const ctx = await web.requireWorkspace(req, reply, { permission: 'triage.actions.edit' });
     if (!ctx) return reply;
     const b = (req.body ?? {}) as Record<string, string | string[] | undefined>;
@@ -371,7 +339,7 @@ export function registerTriageRoutes(app: FastifyInstance, web: Web): void {
   });
 
   /** The on/off switch (JSON from the switch, or a plain form without JavaScript). */
-  app.post('/w/:wid/tickets/triage/enabled', async (req, reply) => {
+  app.post('/w/:wid/triage/enabled', async (req, reply) => {
     const ctx = await web.requireWorkspace(req, reply, { permission: 'triage.actions.edit' });
     if (!ctx) return reply;
     const enabled = (req.body as { enabled?: string }).enabled !== undefined;
@@ -387,7 +355,7 @@ export function registerTriageRoutes(app: FastifyInstance, web: Web): void {
   });
 
   /** The switch for issues opened on GitHub (JSON from the switch, or a plain form without JavaScript). */
-  app.post('/w/:wid/tickets/triage/github-enabled', async (req, reply) => {
+  app.post('/w/:wid/triage/github-enabled', async (req, reply) => {
     const ctx = await web.requireWorkspace(req, reply, { permission: 'triage.actions.edit' });
     if (!ctx) return reply;
     const enabled = (req.body as { enabled?: string }).enabled !== undefined;
@@ -405,7 +373,7 @@ export function registerTriageRoutes(app: FastifyInstance, web: Web): void {
   });
 
   /** Try again: asks Claude first, and carries on only if it answers (JSON for the alert, or a form). */
-  app.post('/w/:wid/tickets/triage/resume', async (req, reply) => {
+  app.post('/w/:wid/triage/resume', async (req, reply) => {
     const ctx = await web.requireWorkspace(req, reply, { permission: 'triage.actions.edit' });
     if (!ctx) return reply;
     const [check] = await web.triage.checkPaused({ workspaceId: ctx.workspace.id, by: ctx.user.id });
@@ -416,14 +384,15 @@ export function registerTriageRoutes(app: FastifyInstance, web: Web): void {
     return reply.redirect(back(ctx));
   });
 
-  // ---- Suggestions on a ticket (people who can act on tickets) ------------------------------------
+  // ---- Suggestions on a ticket (people with Edit on Review) ---------------------------------------
 
   for (const verb of ['apply', 'dismiss'] as const) {
     app.post(`/w/:wid/tickets/:id/triage/${verb}`, async (req, reply) => {
-      const ctx = await web.requireWorkspace(req, reply, { permission: 'tickets.act' });
+      const ctx = await web.requireWorkspace(req, reply, { permission: 'triage.review.edit' });
       if (!ctx) return reply;
       const id = (req.params as { id: string }).id;
-      const kind = String((req.body as { kind?: string }).kind ?? '');
+      const body = (req.body ?? {}) as { kind?: string; back?: string };
+      const kind = String(body.kind ?? '');
       try {
         const action = verb === 'apply'
           ? await web.triage.applySuggestion(ctx.workspace.id, id, kind, ctx.user.id)
@@ -433,7 +402,8 @@ export function registerTriageRoutes(app: FastifyInstance, web: Web): void {
         if (!(err instanceof UserFacingError)) throw err;
         setFlash(reply, 'error', err.message);
       }
-      return reply.redirect(`${ctx.base}/tickets/${id}`);
+      // Back where it was pressed (AI triage › Review sends its list), else the ticket.
+      return reply.redirect(workspacePath(ctx, body.back) ?? `${ctx.base}/tickets/${id}`);
     });
   }
 }

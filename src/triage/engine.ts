@@ -1188,7 +1188,7 @@ export class TriageEngine {
     return { row, action, rest: (row.suggestions ?? []).filter((a) => a !== action) };
   }
 
-  /** Applies one suggestion on GitHub (people who can act on tickets). */
+  /** Applies one suggestion on GitHub (people with Edit on Review). */
   async applySuggestion(workspaceId: string, submissionId: string, kind: string, userId: string): Promise<TriageAction> {
     const { row, action, rest } = await this.reviewTarget(workspaceId, submissionId, kind);
     const sub = await getSubmission(this.deps.db, workspaceId, submissionId);
@@ -1237,7 +1237,7 @@ export class TriageEngine {
     return { row, action, rest: (row.suggestions ?? []).filter((a) => a !== action) };
   }
 
-  /** Applies one suggestion on an issue opened on GitHub (people who can act on tickets). */
+  /** Applies one suggestion on an issue opened on GitHub (people with Edit on Review). */
   async applyIssueSuggestion(workspaceId: string, repoId: number, number: number, kind: string, userId: string): Promise<TriageAction> {
     const { row, action, rest } = await this.issueReviewTarget(workspaceId, repoId, number, kind);
     const target = await this.issueTarget(workspaceId, repoId, number);

@@ -16,9 +16,10 @@ import {
 } from '../src/domain/files.js';
 import { defaultForm, formFor, validateForm, type FormSection } from '../src/domain/forms.js';
 import { createTicketType, getTicketType, listTicketTypes, type TicketType } from '../src/domain/ticket-types.js';
-import { createInvite, setModeratorPermissions } from '../src/domain/workspaces.js';
+import type { MemberAccess } from '../src/domain/permissions.js';
+import { createInvite } from '../src/domain/workspaces.js';
 import { extractDescription } from '../src/triage/prompt.js';
-import { eventually, form, get, makeAdmin, makeApp, makeWorkspace, member, nextInteractionId, resetDb, sendInteraction, testDb, type Admin, type ConfiguredWorkspace, type TestEnv } from './helpers.js';
+import { eventually, form, get, grant, makeAdmin, makeApp, makeWorkspace, member, nextInteractionId, resetDb, sendInteraction, testDb, type Admin, type ConfiguredWorkspace, type TestEnv } from './helpers.js';
 
 let env: TestEnv;
 let ws: ConfiguredWorkspace;
@@ -162,10 +163,10 @@ function multipart(admin: Admin | null, parts: ({ name: string; value: string } 
   return { headers: { ...(admin ? { cookie: admin.cookie } : {}), 'content-type': `multipart/form-data; boundary=${boundary}` }, payload: Buffer.concat(chunks) };
 }
 
-async function joinAs(role: 'admin' | 'moderator', name: string, perms?: { canActTickets: boolean; canViewContributors: boolean }): Promise<Admin> {
+async function joinAs(role: 'admin' | 'moderator', name: string, access?: MemberAccess['access']): Promise<Admin> {
   const person = await makeAdmin(env, name);
   await env.server.inject({ method: 'POST', url: `/invite/${await createInvite(env.db, ws.workspace.id, ws.owner.user.id, role)}`, ...form(person) });
-  if (perms) await setModeratorPermissions(env.db, ws.workspace.id, person.user.id, perms);
+  if (access) await grant(env, ws.workspace.id, person.user.id, access);
   return person;
 }
 
@@ -232,7 +233,7 @@ describe('forms per ticket type', () => {
     await env.server.inject({ method: 'POST', url: `${w()}/tickets/types/${bug.id}/form/reset`, ...form(ws.owner) });
     expect(formFor(await getTicketType(env.db, ws.workspace.id, bug.id)).map((s) => s.key)).toEqual(['intro', 'title', 'description', 'os', 'shots']);
 
-    const mod = await joinAs('moderator', 'mod-forms', { canActTickets: true, canViewContributors: true });
+    const mod = await joinAs('moderator', 'mod-forms', { inbox: 'edit', 'triage.review': 'edit', verifications: 'view' });
     expect((await env.server.inject({ method: 'GET', url: `${w()}/tickets/types/${bug.id}/form`, ...get(mod) })).statusCode).toBe(403);
     expect((await env.server.inject({ method: 'POST', url: `${w()}/tickets/types/${bug.id}/form`, ...form(mod, sections) })).statusCode).toBe(403);
   });
@@ -440,7 +441,7 @@ describe('files on the ticket page', () => {
     const viewer = await joinAs('moderator', 'mod-view');
     expect((await env.server.inject({ method: 'POST', url, ...multipart(viewer, [{ name: '_csrf', value: viewer.csrf }, shot]) })).statusCode).toBe(403);
 
-    const actor = await joinAs('moderator', 'mod-act', { canActTickets: true, canViewContributors: false });
+    const actor = await joinAs('moderator', 'mod-act', { inbox: 'edit' });
     const added = await env.server.inject({ method: 'POST', url, ...multipart(actor, [{ name: '_csrf', value: actor.csrf }, shot, { name: 'files', filename: 'notes.txt', type: 'text/plain', data: Buffer.from('hello') }, big, { name: 'files', filename: 'clip.mp4', type: 'video/mp4', data: mp4() }]) });
     expect(added.statusCode).toBe(302);
     const cookie = /tr_flash=([^;]+)/.exec(String(added.headers['set-cookie'] ?? ''))![1]!;
@@ -485,7 +486,7 @@ describe('cleanup', () => {
     await closeIssue(closed.sub.issue_number, 45);
     await closeIssue(recent.sub.issue_number, 1, 'not_planned');
 
-    const viewer = await joinAs('moderator', 'mod-files', { canActTickets: true, canViewContributors: true });
+    const viewer = await joinAs('moderator', 'mod-files', { inbox: 'edit', 'triage.review': 'edit', verifications: 'view' });
     expect((await env.server.inject({ method: 'GET', url: `${w()}/tickets/files`, ...get(viewer) })).statusCode).toBe(403);
     expect((await env.server.inject({ method: 'POST', url: `${w()}/tickets/files/delete`, ...form(viewer, { all: 'suggested' }) })).statusCode).toBe(403);
 

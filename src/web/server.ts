@@ -13,7 +13,7 @@ import type { TriageEngine } from '../triage/engine.js';
 import { getDiscordConnection, getGitHubConnection, getPanel, listApps } from '../domain/store.js';
 import { UserFacingError, type Deps, type Role } from '../domain/types.js';
 import { getMembership, listMemberships, type Membership } from '../domain/workspaces.js';
-import { can, PAGE_AREA_NAMES, PAGE_AREAS, TRIAGE_AREA_NAMES, type PageArea, type Permission, type TriageArea } from '../domain/permissions.js';
+import { areaLabel, can, isArea, type Permission } from '../domain/permissions.js';
 import { layout, simplePage, type PageContext, type PageWidth, type SetupProgress } from './layout.js';
 import { loadSession, SESSION_COOKIE, takeFlash, type AuthContext } from './session.js';
 import { registerAuthRoutes } from './routes/auth.js';
@@ -39,6 +39,8 @@ import { registerIssueTriageRoutes } from './routes/issue-triage.js';
 import { registerClaudeRoutes } from './routes/claude.js';
 import { registerHealthRoutes } from './routes/health.js';
 import { registerAlertRoutes } from './routes/alerts.js';
+import { registerTriageReviewRoutes } from './routes/triage-review.js';
+import { registerMovedRoutes } from './routes/tool.js';
 import { MAX_FILE_BYTES } from '../domain/files.js';
 
 declare module 'fastify' {
@@ -63,10 +65,10 @@ export interface Web {
   requireUser(req: FastifyRequest, reply: FastifyReply): AuthContext | null;
   /**
    * Requires membership of the workspace in the URL (404 for non-members, to avoid leaking
-   * existence) and a permission. Secure by default: without `permission` the route needs
-   * "manage" (owners and admins), so moderators are only let in where a route opts in.
+   * existence) and a permission (any one of a list). Secure by default: without `permission`
+   * the route needs "manage" (owners and admins), so moderators are only let in where a route opts in.
    */
-  requireWorkspace(req: FastifyRequest, reply: FastifyReply, opts?: { permission?: Permission }): Promise<WorkspaceRequestContext | null>;
+  requireWorkspace(req: FastifyRequest, reply: FastifyReply, opts?: { permission?: Permission | Permission[] }): Promise<WorkspaceRequestContext | null>;
   pageContext(req: FastifyRequest, reply: FastifyReply): PageContext;
   /** `width: 'full'` is for pages that are mostly a table or list: they use the whole window. Other pages keep a readable width. */
   render(reply: FastifyReply, ctx: PageContext, title: string, active: string, body: ReturnType<typeof html>, o?: { width?: PageWidth }): FastifyReply;
@@ -77,13 +79,21 @@ export interface Web {
 }
 
 export async function computeProgress(deps: Deps, workspaceId: string): Promise<SetupProgress> {
-  const [gh, dc, apps, panel, attention, dev] = await Promise.all([
+  const [gh, dc, apps, panel, attention, dev, review] = await Promise.all([
     getGitHubConnection(deps.db, workspaceId),
     getDiscordConnection(deps.db, workspaceId),
     listApps(deps.db, workspaceId),
     getPanel(deps.db, workspaceId),
     deps.db.query<{ n: number }>(`SELECT count(*) AS n FROM submissions WHERE workspace_id = $1 AND status IN ('failed', 'uncertain')`, [workspaceId]),
     deps.db.query<{ on: number }>('SELECT dev_mode_on_at IS NOT NULL AS "on" FROM server_settings WHERE id = 1'),
+    // Tickets and issues opened on GitHub with triage suggestions waiting (AI triage › Review), counted
+    // from the waiting indexes. Issues only in repositories the workspace still has an app for.
+    deps.db.query<{ n: number }>(
+      `SELECT (SELECT count(*) FROM triage_results WHERE workspace_id = $1 AND status = 'done' AND suggestion_count > 0)
+         + (SELECT count(*) FROM issue_triage t WHERE t.workspace_id = $1 AND t.status = 'done' AND t.suggestion_count > 0
+              AND EXISTS (SELECT 1 FROM apps a WHERE a.workspace_id = t.workspace_id AND a.repo_id = t.repo_id)) AS n`,
+      [workspaceId],
+    ),
   ]);
   return {
     github: !gh ? 'todo' : gh.status === 'active' ? 'done' : 'problem',
@@ -91,6 +101,7 @@ export async function computeProgress(deps: Deps, workspaceId: string): Promise<
     apps: apps.some((a) => a.enabled) ? 'done' : 'todo',
     panel: !panel ? 'todo' : panel.status === 'missing' ? 'problem' : 'done',
     attention: attention.rows[0]!.n,
+    review: Number(review.rows[0]?.n ?? 0),
     devMode: Boolean(dev.rows[0]?.on),
   };
 }
@@ -193,21 +204,22 @@ export async function buildServer(deps: Deps, processor: Processor, opts: { logg
         reply.callNotFound();
         return null;
       }
-      if (!can(membership, o.permission ?? 'manage')) {
+      const permissions = [o.permission ?? 'manage'].flat();
+      if (!permissions.some((p) => can(membership, p))) {
         reply.code(403);
         if (web.wantsJson(req)) {
           reply.send({ ok: false, error: 'You don’t have permission to change this.' });
           return null;
         }
         const ctx = { ...web.pageContext(req, reply), workspace: membership.workspace, role: membership.role, membership, base: `/w/${membership.workspace.id}`, memberships: await listMemberships(deps.db, auth.user.id), progress: await computeProgress(deps, wid) };
-        const scope = can(membership, 'contrib.view') ? 'the tickets inbox and contributor verifications' : 'the tickets inbox';
         // A page admins can open to moderators: say which one, and what access it needs.
-        const grant = /^(?:(triage)\.)?(\w+)\.(view|edit)$/.exec(o.permission ?? '');
-        const area = !grant ? null : grant[1] ? `Triage › ${TRIAGE_AREA_NAMES[grant[2] as TriageArea] ?? grant[2]}` : (PAGE_AREAS as readonly string[]).includes(grant[2]!) ? PAGE_AREA_NAMES[grant[2] as PageArea] : null;
-        const viewPerm = grant ? (o.permission!.replace(/\.edit$/, '.view') as Permission) : null;
+        const grant = permissions.map((p) => /^(.+)\.(view|edit)$/.exec(p)).find((x) => x && isArea(x[1]!));
+        const area = grant && isArea(grant[1]!) ? grant[1] : null;
         const text = area
-          ? grant![3] === 'edit' && can(membership, viewPerm!) ? `You can see ${area}, but not change it. Ask an admin if you need Edit.` : `You don’t have access to ${area}. Ask an admin if you need it.`
-          : `Your role can see ${scope}. Ask an admin or the owner if you need more access.`;
+          ? grant![2] === 'edit' && can(membership, `${area}.view`) ? `You can see ${areaLabel(area)}, but not change it. Ask an admin if you need Edit.` : `You don’t have access to ${areaLabel(area)}. Ask an admin if you need it.`
+          : permissions.every((p) => p === 'members')
+            ? 'Only the owner can do this. Ask the owner if you need it.'
+            : 'This page is for admins. Ask an admin or the owner if you need access.';
         web.render(reply, ctx, 'No access', '', html`${pageHeader({ title: 'No access' })}
           <div class="card">${empty('lock', 'You don’t have access to this page', text, linkBtn(`/w/${membership.workspace.id}`, 'Go to overview'))}</div>`);
         return null;
@@ -249,6 +261,8 @@ export async function buildServer(deps: Deps, processor: Processor, opts: { logg
   registerAppRoutes(app, web);
   registerPanelRoutes(app, web);
   registerTicketRoutes(app, web);
+  registerMovedRoutes(app);
+  registerTriageReviewRoutes(app, web);
   registerTriageRoutes(app, web);
   registerTriageConfigRoutes(app, web);
   registerTriageRunRoutes(app, web);

@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
+import { can } from '../../domain/permissions.js';
 import { getInstallationRepos } from '../../domain/repos.js';
 import { getGitHubConnection, listApps } from '../../domain/store.js';
 import { CUSTOM_KINDS, FILES_HINT, FORM_MAX_SECTIONS, formFor, KIND_NAMES, LIMITS, MAX_FILES_LIMIT, validateForm, type FormSection, type SectionKind } from '../../domain/forms.js';
@@ -22,9 +23,10 @@ import { html, raw, type SafeHtml } from '../../lib/html.js';
 import { formPreview, previewCaption } from '../discord-preview.js';
 import { setFlash } from '../session.js';
 import type { Web, WorkspaceRequestContext } from '../server.js';
-import { btn, csrfField, empty, icon, iconBtn, labelTag, linkBtn, locked, menu, notice, pageHeader, postBtn, submitBtn, switchInput, tag, typeIcon, type IconName } from '../ui.js';
+import { btn, csrfField, empty, icon, iconBtn, labelTag, linkBtn, locked, menu, notice, pageHeader, postBtn, submitBtn, switchInput, tag, typeIcon, viewOnlyTag, type IconName } from '../ui.js';
 import { actionMode, actionName, actionsOffFor, allActionKeys, getTriageSettings } from '../../triage/settings.js';
-import { ticketsHeader } from './tickets.js';
+import { pageLink, toolHeader, viewOnlyText } from './tool.js';
+import { viewOnlyFooter } from './triage.js';
 
 const typeSchema = z.object({
   name: z.string().trim().min(1, 'Enter a name.').max(80, 'Keep the name under 80 characters.'),
@@ -80,8 +82,8 @@ const LOCKED_NOTE: Partial<Record<SectionKind, string>> = {
   description: 'Every ticket needs a description. It becomes the main text of the issue.',
 };
 
-/** One section in the builder. `key` may be the template placeholder __KEY__. */
-function sectionEditor(s: FormSection): SafeHtml {
+/** One section in the builder. `key` may be the template placeholder __KEY__. Without `edit` it can't be moved or removed. */
+function sectionEditor(s: FormSection, edit = true): SafeHtml {
   const k = s.key;
   const id = (f: string) => `fb-${k}-${f}`;
   const builtIn = s.kind === 'intro' || s.kind === 'title' || s.kind === 'description';
@@ -105,8 +107,8 @@ function sectionEditor(s: FormSection): SafeHtml {
       <span class="tile">${icon(KIND_ICONS[s.kind], 16)}</span>
       <div class="grow"><div class="fsec-t" data-fb-title>${sectionName(s)}</div><div class="sub" data-fb-sub>${KIND_NAMES[s.kind]}${s.kind === 'intro' ? '' : required ? ' · Required' : ' · Optional'}</div></div>
       <div class="fsec-actions">
-        ${s.kind === 'intro' ? '' : html`${iconBtn('arrow-up', 'Move up', { size: 'sm', cls: 'js-only', attrs: raw('data-fb-move="up"') })}${iconBtn('arrow-down', 'Move down', { size: 'sm', cls: 'js-only', attrs: raw('data-fb-move="down"') })}`}
-        ${s.kind === 'title' || s.kind === 'description' ? locked('Always included') : iconBtn('trash-2', 'Remove section', { size: 'sm', cls: 'js-only', attrs: raw('data-fb-remove') })}
+        ${s.kind === 'intro' || !edit ? '' : html`${iconBtn('arrow-up', 'Move up', { size: 'sm', cls: 'js-only', attrs: raw('data-fb-move="up"') })}${iconBtn('arrow-down', 'Move down', { size: 'sm', cls: 'js-only', attrs: raw('data-fb-move="down"') })}`}
+        ${s.kind === 'title' || s.kind === 'description' ? locked('Always included') : edit ? iconBtn('trash-2', 'Remove section', { size: 'sm', cls: 'js-only', attrs: raw('data-fb-remove') }) : ''}
       </div>
     </div>
     <div class="fsec-b fields">${body}</div>
@@ -151,9 +153,11 @@ export function registerTicketTypeRoutes(app: FastifyInstance, web: Web): void {
   const typesUrl = (ctx: WorkspaceRequestContext) => `${ctx.base}/tickets/types`;
 
   app.get('/w/:wid/tickets/types', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply);
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'types.view' });
     if (!ctx) return reply;
     const b = ctx.base;
+    // Without Edit: the same list, without adding, switching, moving or deleting.
+    const edit = can(ctx.membership, 'types.edit');
     const types = await listTicketTypes(deps.db, ctx.workspace.id);
     const triage = await getTriageSettings(deps.db, ctx.workspace.id);
     /** What triage does for a type, linking to the rules table. */
@@ -164,7 +168,7 @@ export function registerTicketTypeRoutes(app: FastifyInstance, web: Web): void {
       const off = actionsOffFor(c, t);
       const skipped = on.filter((k) => off.has(k));
       const text = !on.length ? 'No actions on' : !skipped.length ? 'All actions' : skipped.length === on.length ? 'Not triaged' : `All except ${skipped.map((k) => actionName(c, k)).join(', ')}`;
-      return html`<a class="small" href="${b}/tickets/triage#rules">${text}</a>`;
+      return html`<span class="small">${pageLink(ctx, 'triage.actions', text, '#rules')}</span>`;
     };
     let gaps: Awaited<ReturnType<typeof findMissingTypeLabels>> = [];
     let gapError = '';
@@ -176,13 +180,22 @@ export function registerTicketTypeRoutes(app: FastifyInstance, web: Web): void {
         gapError = 'Couldn’t check the labels on GitHub right now. Reload to try again.';
       }
     }
-    const newType = linkBtn(`${b}/tickets/types/new`, 'New type', { variant: 'primary', icon: 'plus' });
+    const newType = edit ? linkBtn(`${b}/tickets/types/new`, 'New type', { variant: 'primary', icon: 'plus' }) : null;
+    /** Shown or hidden on the panel: a switch, or just the state for someone who can't change it. */
+    const enabledCell = (t: TicketType) => edit
+      ? html`<form method="post" action="${b}/tickets/types/${t.id}/toggle" data-async class="inline-form">${csrfField(ctx.csrf)}<input type="hidden" name="set" value="1">
+          ${switchInput({ name: 'enabled', checked: t.enabled, label: `${t.name} enabled` })}<button type="submit" class="btn sm nojs">Save</button></form>`
+      : t.enabled
+        ? html`<span class="inline" aria-label="Shown on the panel" title="Shown on the panel">${icon('circle-check', 16, 'ok')}</span>`
+        : tag('Off', { title: 'Hidden from the panel' });
     const body = html`
-      ${await ticketsHeader(web, ctx, 'types', { actions: newType })}
+      ${await toolHeader(web, ctx, 'tickets', 'types', { actions: newType })}
       ${gapError ? notice('warn', 'Labels not checked', gapError) : ''}
       ${gaps.length
         ? notice('warn', 'Some type labels don’t exist yet', html`Tickets are filed without a missing label until it exists.<ul>${gaps.map((g) => html`<li><code>${g.label}</code> is missing in ${g.repos.map((r) => `${r.owner}/${r.name}`).join(', ')}</li>`)}</ul>`, {
-            action: postBtn(`${b}/tickets/types/create-labels`, 'Create missing labels', ctx.csrf, { size: 'sm', loading: 'Creating…', confirm: { title: 'Create the missing labels?', body: 'The labels are created in those GitHub repositories with a default color. You can rename or recolor them on GitHub later.', label: 'Create labels' } }),
+            action: edit
+              ? postBtn(`${b}/tickets/types/create-labels`, 'Create missing labels', ctx.csrf, { size: 'sm', loading: 'Creating…', confirm: { title: 'Create the missing labels?', body: 'The labels are created in those GitHub repositories with a default color. You can rename or recolor them on GitHub later.', label: 'Create labels' } })
+              : null,
           })
         : ''}
       <div class="card">
@@ -196,31 +209,32 @@ export function registerTicketTypeRoutes(app: FastifyInstance, web: Web): void {
                   <td><code class="nowrap">[${t.title_prefix || t.name}]</code></td>
                   <td>${formSummary(b, t)}</td>
                   ${triage.enabled ? html`<td>${triageRule(t)}</td>` : ''}
-                  <td class="center"><form method="post" action="${b}/tickets/types/${t.id}/toggle" data-async class="inline-form">${csrfField(ctx.csrf)}<input type="hidden" name="set" value="1">
-                    ${switchInput({ name: 'enabled', checked: t.enabled, label: `${t.name} enabled` })}<button type="submit" class="btn sm nojs">Save</button></form></td>
+                  <td class="center">${enabledCell(t)}</td>
                   <td class="actions"><div class="row">
-                    ${iconBtn('clipboard-list', `Edit the ${t.name} form`, { size: 'sm', href: `${b}/tickets/types/${t.id}/form` })}
-                    ${iconBtn('pencil', `Edit ${t.name}`, { size: 'sm', href: `${b}/tickets/types/${t.id}/edit` })}
-                    ${menu([
+                    ${iconBtn('clipboard-list', edit ? `Edit the ${t.name} form` : `See the ${t.name} form`, { size: 'sm', href: `${b}/tickets/types/${t.id}/form` })}
+                    ${iconBtn(edit ? 'pencil' : 'eye', edit ? `Edit ${t.name}` : `See ${t.name}`, { size: 'sm', href: `${b}/tickets/types/${t.id}/edit` })}
+                    ${edit ? menu([
                       i > 0 ? { post: `${b}/tickets/types/${t.id}/move`, label: 'Move up', icon: 'arrow-up', fields: { direction: 'up' } } : null,
                       i < types.length - 1 ? { post: `${b}/tickets/types/${t.id}/move`, label: 'Move down', icon: 'arrow-down', fields: { direction: 'down' } } : null,
                       'sep',
                       { post: `${b}/tickets/types/${t.id}/delete`, label: 'Delete type…', icon: 'trash-2', danger: true, confirm: { title: `Delete “${t.name}”?`, body: 'Members can’t pick it anymore after you update the panel. Tickets already filed keep their label.', label: 'Delete type', danger: true } },
-                    ], { csrf: ctx.csrf, label: `More actions for ${t.name}` })}
+                    ], { csrf: ctx.csrf, label: `More actions for ${t.name}` }) : ''}
                   </div></td></tr>`)}
                 </tbody></table></div></div>
-              <div class="card-note">The order here is the order in Discord. After changing types, update the panel on the Panel tab.</div>`
-          : empty('tag', 'No ticket types', 'Without types, members go straight to the form. Add types like Bug report or Feature request so maintainers can tell tickets apart.', newType)}
+              <div class="card-note">The order here is the order in Discord.${edit ? (can(ctx.membership, 'panel.edit') ? ' After changing types, update the panel on the Panel tab.' : ' After changing types, someone with Edit on the Panel needs to update it.') : ''}</div>`
+          : empty('tag', 'No ticket types', edit ? 'Without types, members go straight to the form. Add types like Bug report or Feature request so maintainers can tell tickets apart.' : 'Without types, members go straight to the form.', newType)}
       </div>`;
-    return web.render(reply, ctx, 'Ticket types', 'tickets', body, { width: 'full' });
+    return web.render(reply, ctx, 'Ticket types · Discord tickets', 'tickets', body, { width: 'full' });
   });
 
   async function renderForm(ctx: WorkspaceRequestContext, reply: FastifyReply, existing: TicketType | null, values: Partial<TicketTypeInput>, errors: string[] = []) {
     const b = ctx.base;
-    const title = existing ? `Edit ${existing.name}` : 'New ticket type';
+    // Someone who can only see types gets the same fields, turned off ("new" needs Edit).
+    const edit = can(ctx.membership, 'types.edit');
+    const title = existing ? (edit ? `Edit ${existing.name}` : existing.name) : 'New ticket type';
     // Suggest labels that already exist in the apps' repositories.
     let suggestions: string[] = [];
-    const gh = await getGitHubConnection(deps.db, ctx.workspace.id);
+    const gh = edit ? await getGitHubConnection(deps.db, ctx.workspace.id) : null;
     if (gh && deps.github) {
       try {
         const repos = distinctRepos(await listApps(deps.db, ctx.workspace.id));
@@ -232,43 +246,52 @@ export function registerTicketTypeRoutes(app: FastifyInstance, web: Web): void {
       }
     }
     const v = (k: keyof TicketTypeInput) => (values[k] as string | null | undefined) ?? '';
-    const body = html`
-      ${pageHeader({
-        crumbs: [{ href: `${b}/tickets`, label: 'Tickets' }, { href: `${b}/tickets/types`, label: 'Ticket types' }, { label: existing ? existing.name : 'New type' }],
-        title,
-        description: 'Members see the name and description. The GitHub label and title prefix are added to the issue.',
-      })}
-      ${errors.length ? notice('danger', 'Please fix the following', html`<ul>${errors.map((e) => html`<li>${e}</li>`)}</ul>`) : ''}
-      <form method="post" action="${existing ? `${b}/tickets/types/${existing.id}` : `${b}/tickets/types`}" class="card">
-        ${csrfField(ctx.csrf)}
-        <div class="card-b"><div class="fields">
+    // Examples only help while typing; on a read-only page an empty field should look empty.
+    const example = (text: string) => (edit ? html`placeholder="${text}"` : '');
+    const fields = html`<div class="card-b"><div class="fields">
           <div class="fields-2">
-            <div class="field"><label for="name">Name</label><input id="name" type="text" name="name" value="${v('name')}" required maxlength="80" placeholder="Bug report"><div class="hint">Shown in the type menu in Discord.</div></div>
-            <div class="field"><label for="description">Short description <span class="opt">(optional)</span></label><input id="description" type="text" name="description" value="${v('description')}" maxlength="100" placeholder="Something isn’t working"></div>
-            <div class="field"><label for="label">GitHub label <span class="opt">(optional)</span></label><input id="label" type="text" name="label" value="${v('label')}" maxlength="50" list="label-suggestions" placeholder="bug" autocomplete="off">
-              <datalist id="label-suggestions">${suggestions.map((l) => html`<option value="${l}"></option>`)}</datalist>
-              <div class="hint">Added together with the app’s labels. Pick an existing label or type a new one; missing labels can be created from the Ticket types tab.</div></div>
+            <div class="field"><label for="name">Name</label><input id="name" type="text" name="name" value="${v('name')}" required maxlength="80" ${example('Bug report')}><div class="hint">Shown in the type menu in Discord.</div></div>
+            <div class="field"><label for="description">Short description <span class="opt">(optional)</span></label><input id="description" type="text" name="description" value="${v('description')}" maxlength="100" ${example('Something isn’t working')}></div>
+            <div class="field"><label for="label">GitHub label <span class="opt">(optional)</span></label><input id="label" type="text" name="label" value="${v('label')}" maxlength="50" ${edit ? raw('list="label-suggestions"') : ''} ${example('bug')} autocomplete="off">
+              ${edit ? html`<datalist id="label-suggestions">${suggestions.map((l) => html`<option value="${l}"></option>`)}</datalist>` : ''}
+              <div class="hint">${edit ? 'Added together with the app’s labels. Pick an existing label or type a new one; missing labels can be created from the Ticket types tab.' : 'Added to the issue together with the app’s labels.'}</div></div>
             <div class="field"><label for="title_prefix">Title prefix <span class="opt">(optional)</span></label><input id="title_prefix" type="text" name="title_prefix" value="${v('title_prefix')}" maxlength="30" placeholder="Defaults to the name"><div class="hint"><code>Bug</code> gives <code>[Bug] [Mobile App] Export fails</code>.</div></div>
           </div>
           <div class="field"><div class="label">Form</div>
             ${existing
-              ? html`<div class="form-link"><span class="grow small">${formFor(existing).map((x) => sectionName(x)).join(' · ')}</span>${linkBtn(`${b}/tickets/types/${existing.id}/form`, 'Edit form', { size: 'sm', icon: 'clipboard-list' })}</div>`
+              ? html`<div class="form-link"><span class="grow small">${formFor(existing).map((x) => sectionName(x)).join(' · ')}</span>${linkBtn(`${b}/tickets/types/${existing.id}/form`, edit ? 'Edit form' : 'See form', { size: 'sm', icon: 'clipboard-list' })}</div>`
               : html`<div class="hint">You can change the questions members answer after creating the type.</div>`}</div>
           <label class="check"><input type="checkbox" name="enabled" value="1" ${values.enabled !== false ? raw('checked') : ''}> Show this type on the panel</label>
-        </div></div>
-        <div class="card-f"><span></span><div class="end">${linkBtn(`${b}/tickets/types`, 'Cancel')}${submitBtn(existing ? 'Save changes' : 'Create type', { variant: 'primary', loading: 'Saving…' })}</div></div>
-      </form>`;
+        </div></div>`;
+    const body = html`
+      ${pageHeader({
+        crumbs: [{ href: `${b}/tickets`, label: 'Discord tickets' }, { href: `${b}/tickets/types`, label: 'Ticket types' }, { label: existing ? existing.name : 'New type' }],
+        title,
+        after: edit ? undefined : viewOnlyTag(viewOnlyText('types')),
+        description: 'Members see the name and description. The GitHub label and title prefix are added to the issue.',
+      })}
+      ${errors.length ? notice('danger', 'Please fix the following', html`<ul>${errors.map((e) => html`<li>${e}</li>`)}</ul>`) : ''}
+      ${edit
+        ? html`<form method="post" action="${existing ? `${b}/tickets/types/${existing.id}` : `${b}/tickets/types`}" class="card">
+            ${csrfField(ctx.csrf)}
+            ${fields}
+            <div class="card-f"><span></span><div class="end">${linkBtn(`${b}/tickets/types`, 'Cancel')}${submitBtn(existing ? 'Save changes' : 'Create type', { variant: 'primary', loading: 'Saving…' })}</div></div>
+          </form>`
+        : html`<div class="card">
+            <fieldset class="plain view-only" disabled>${fields}</fieldset>
+            <div class="card-f">${viewOnlyFooter('this type')}</div>
+          </div>`}`;
     return web.render(reply, ctx, title, 'tickets', body);
   }
 
   app.get('/w/:wid/tickets/types/new', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply);
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'types.edit' });
     if (!ctx) return reply;
     return renderForm(ctx, reply, null, { enabled: true });
   });
 
   app.get('/w/:wid/tickets/types/:tid/edit', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply);
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'types.view' });
     if (!ctx) return reply;
     const existing = await getTicketType(deps.db, ctx.workspace.id, (req.params as { tid: string }).tid);
     if (!existing) return reply.callNotFound();
@@ -276,7 +299,7 @@ export function registerTicketTypeRoutes(app: FastifyInstance, web: Web): void {
   });
 
   async function save(req: FastifyRequest, reply: FastifyReply, id: string | null) {
-    const ctx = await web.requireWorkspace(req, reply);
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'types.edit' });
     if (!ctx) return reply;
     const existing = id ? await getTicketType(deps.db, ctx.workspace.id, id) : null;
     if (id && !existing) return reply.callNotFound();
@@ -302,7 +325,7 @@ export function registerTicketTypeRoutes(app: FastifyInstance, web: Web): void {
 
   /** Shows or hides a type. With `set=1` the switch state is sent explicitly; otherwise it flips. */
   app.post('/w/:wid/tickets/types/:tid/toggle', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply);
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'types.edit' });
     if (!ctx) return reply;
     const t = await getTicketType(deps.db, ctx.workspace.id, (req.params as { tid: string }).tid);
     if (!t) return reply.callNotFound();
@@ -316,7 +339,7 @@ export function registerTicketTypeRoutes(app: FastifyInstance, web: Web): void {
   });
 
   app.post('/w/:wid/tickets/types/:tid/move', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply);
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'types.edit' });
     if (!ctx) return reply;
     const direction = (req.body as { direction?: string }).direction === 'up' ? 'up' : 'down';
     await moveTicketType(deps.db, ctx.workspace.id, (req.params as { tid: string }).tid, direction);
@@ -324,7 +347,7 @@ export function registerTicketTypeRoutes(app: FastifyInstance, web: Web): void {
   });
 
   app.post('/w/:wid/tickets/types/:tid/delete', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply);
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'types.edit' });
     if (!ctx) return reply;
     const t = await getTicketType(deps.db, ctx.workspace.id, (req.params as { tid: string }).tid);
     if (!t) return reply.callNotFound();
@@ -337,6 +360,8 @@ export function registerTicketTypeRoutes(app: FastifyInstance, web: Web): void {
 
   async function renderBuilder(ctx: WorkspaceRequestContext, reply: FastifyReply, t: TicketType, sections: FormSection[], errors: string[] = []) {
     const b = ctx.base;
+    // Someone who can only see types gets the sections and the preview, nothing to change.
+    const edit = can(ctx.membership, 'types.edit');
     const apps = (await listApps(deps.db, ctx.workspace.id)).filter((a) => a.enabled);
     const sample = apps[0] ? { name: apps[0].name, repoPrivate: apps[0].repo_private } : { name: 'Your app', repoPrivate: false };
     const custom = Boolean(t.form);
@@ -346,22 +371,12 @@ export function registerTicketTypeRoutes(app: FastifyInstance, web: Web): void {
       { kind: 'files', label: 'File upload', icon: 'paperclip' },
       { kind: 'intro', label: 'Intro text', icon: 'text' },
     ];
-    const body = html`
-      ${pageHeader({
-        crumbs: [{ href: `${b}/tickets`, label: 'Tickets' }, { href: `${b}/tickets/types`, label: 'Ticket types' }, { label: t.name }],
-        title: `${t.name} form`,
-        after: custom ? tag('Customized') : tag('Default'),
-        description: `What members fill in after choosing “${t.name}”. A Discord form holds up to ${FORM_MAX_SECTIONS} sections.`,
-        actions: custom
-          ? menu([{ post: `${b}/tickets/types/${t.id}/form/reset`, label: 'Restore the default form', icon: 'undo-2', confirm: { title: 'Restore the default form?', body: 'Your questions are replaced by the default form for this kind of ticket. Members see it the next time they open the form.', label: 'Restore default' } }], { csrf: ctx.csrf, size: 'md' })
-          : undefined,
-      })}
-      ${errors.length ? notice('danger', 'The form wasn’t saved', html`<ul>${errors.map((e) => html`<li>${e}</li>`)}</ul>`) : ''}
-      <div class="panel-grid">
-        <form method="post" action="${b}/tickets/types/${t.id}/form" class="card" id="form-builder" data-dirty>
+    const head = html`<div class="card-h"><div><h2>Sections</h2><div class="desc">Members see them in this order. Every ticket has a title and a description${edit ? '; the rest is up to you' : ''}.</div></div>
+            <div class="slots"><span class="pips" aria-hidden="true">${Array.from({ length: FORM_MAX_SECTIONS }, (_, i) => html`<span class="pip${i < sections.length ? ' on' : ''}"></span>`)}</span><span class="small nowrap" data-slot-text>${String(sections.length)} of ${String(FORM_MAX_SECTIONS)} used</span></div></div>`;
+    const builder = edit
+      ? html`<form method="post" action="${b}/tickets/types/${t.id}/form" class="card" id="form-builder" data-dirty>
           ${csrfField(ctx.csrf)}
-          <div class="card-h"><div><h2>Sections</h2><div class="desc">Members see them in this order. Every ticket has a title and a description; the rest is up to you.</div></div>
-            <div class="slots"><span class="pips" aria-hidden="true">${Array.from({ length: FORM_MAX_SECTIONS }, (_, i) => html`<span class="pip${i < sections.length ? ' on' : ''}"></span>`)}</span><span class="small nowrap" data-slot-text>${String(sections.length)} of ${String(FORM_MAX_SECTIONS)} used</span></div></div>
+          ${head}
           <ol class="fsecs" id="fsecs">${sections.map((x) => sectionEditor(x))}</ol>
           <div class="fadd js-only">
             <span class="small muted">Add a section</span>
@@ -371,7 +386,25 @@ export function registerTicketTypeRoutes(app: FastifyInstance, web: Web): void {
           <div class="card-f"><span class="small muted">Saved forms apply the next time a member opens one. The panel doesn’t need updating.</span>
             <div class="end">${linkBtn(`${b}/tickets/types`, 'Cancel')}${submitBtn('Save form', { variant: 'primary', loading: 'Saving…' })}</div></div>
           ${addButtons.map((a) => html`<template data-fb-template="${a.kind}">${sectionEditor(blank(a.kind))}</template>`)}
-        </form>
+        </form>`
+      : html`<div class="card">
+          ${head}
+          <fieldset class="plain view-only" disabled><ol class="fsecs">${sections.map((x) => sectionEditor(x, false))}</ol></fieldset>
+          <div class="card-f">${viewOnlyFooter('this form')}</div>
+        </div>`;
+    const body = html`
+      ${pageHeader({
+        crumbs: [{ href: `${b}/tickets`, label: 'Discord tickets' }, { href: `${b}/tickets/types`, label: 'Ticket types' }, { label: t.name }],
+        title: `${t.name} form`,
+        after: [custom ? tag('Customized') : tag('Default'), edit ? '' : viewOnlyTag(viewOnlyText('types'))],
+        description: `What members fill in after choosing “${t.name}”. A Discord form holds up to ${FORM_MAX_SECTIONS} sections.`,
+        actions: custom && edit
+          ? menu([{ post: `${b}/tickets/types/${t.id}/form/reset`, label: 'Restore the default form', icon: 'undo-2', confirm: { title: 'Restore the default form?', body: 'Your questions are replaced by the default form for this kind of ticket. Members see it the next time they open the form.', label: 'Restore default' } }], { csrf: ctx.csrf, size: 'md' })
+          : undefined,
+      })}
+      ${errors.length ? notice('danger', 'The form wasn’t saved', html`<ul>${errors.map((e) => html`<li>${e}</li>`)}</ul>`) : ''}
+      <div class="panel-grid">
+        ${builder}
         <div class="panel-preview">
           ${previewCaption(null, null, 'Form · ')}
           ${formPreview(sample, { name: t.name }, sections, { id: 'form-preview' })}
@@ -382,7 +415,7 @@ export function registerTicketTypeRoutes(app: FastifyInstance, web: Web): void {
   }
 
   app.get('/w/:wid/tickets/types/:tid/form', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply);
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'types.view' });
     if (!ctx) return reply;
     const t = await getTicketType(deps.db, ctx.workspace.id, (req.params as { tid: string }).tid);
     if (!t) return reply.callNotFound();
@@ -390,7 +423,7 @@ export function registerTicketTypeRoutes(app: FastifyInstance, web: Web): void {
   });
 
   app.post('/w/:wid/tickets/types/:tid/form', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply);
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'types.edit' });
     if (!ctx) return reply;
     const t = await getTicketType(deps.db, ctx.workspace.id, (req.params as { tid: string }).tid);
     if (!t) return reply.callNotFound();
@@ -404,7 +437,7 @@ export function registerTicketTypeRoutes(app: FastifyInstance, web: Web): void {
   });
 
   app.post('/w/:wid/tickets/types/:tid/form/reset', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply);
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'types.edit' });
     if (!ctx) return reply;
     const t = await getTicketType(deps.db, ctx.workspace.id, (req.params as { tid: string }).tid);
     if (!t) return reply.callNotFound();
@@ -413,9 +446,9 @@ export function registerTicketTypeRoutes(app: FastifyInstance, web: Web): void {
     return reply.redirect(`${ctx.base}/tickets/types/${t.id}/form`);
   });
 
-  /** Creates missing type labels in the apps' repositories — only when an admin clicks it. */
+  /** Creates missing type labels in the apps' repositories, only when someone clicks it. */
   app.post('/w/:wid/tickets/types/create-labels', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply);
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'types.edit' });
     if (!ctx) return reply;
     const gh = await getGitHubConnection(deps.db, ctx.workspace.id);
     if (!gh || !deps.github) {

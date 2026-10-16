@@ -83,7 +83,7 @@ export function registerDiscordRoutes(app: FastifyInstance, web: Web): void {
       if (access && !access.ok) checks.push({ status: 'error', title: access.message });
       if (access?.ok) {
         checks.push({ status: 'ok', title: 'Bot is in the server' });
-        if (roles?.ok) checks.push(roles.canManageRoles ? { status: 'ok', title: 'Manage Roles', detail: 'needed by Contributor Roles' } : { status: 'warning', title: 'Missing Manage Roles', detail: 'needed by Contributor Roles. Server Settings › Roles › the bot’s role.' });
+        if (roles?.ok) checks.push(roles.canManageRoles ? { status: 'ok', title: 'Manage Roles', detail: 'needed by Contributor roles' } : { status: 'warning', title: 'Missing Manage Roles', detail: 'needed by Contributor roles. Server Settings › Roles › the bot’s role.' });
         for (const [label, id, href] of [['tickets', conn.tickets_channel_id, `${b}/tickets/panel#channel`], ['verify', contributor.channel_id, `${b}/contributors/panel#channel`]] as const) {
           if (!id) continue;
           const ch = access.channels.find((c) => c.id === id);
@@ -105,15 +105,15 @@ export function registerDiscordRoutes(app: FastifyInstance, web: Web): void {
         ${checks.length ? html`<div class="card"><div class="card-h"><div><h2>Permissions</h2><div class="desc">The bot needs ${perms} in each panel channel.</div></div>${linkBtn(`${b}/setup/discord`, 'Check again', { variant: 'ghost', size: 'sm', icon: 'refresh-cw' })}</div>
           <div class="card-b tight">${checklist(checks)}</div></div>` : ''}
         <div class="card">
-          <div class="card-h"><div><h2>Channels in use</h2><div class="desc">Each utility picks its own channel on its Panel tab.</div></div></div>
-          ${channelLine(conn.tickets_channel_name, 'Tickets panel', `${b}/tickets/panel#channel`)}
-          ${channelLine(contributor.channel_name, 'Contributor Roles panel', `${b}/contributors/panel#channel`)}
+          <div class="card-h"><div><h2>Channels in use</h2><div class="desc">Each tool picks its own channel on its Panel tab.</div></div></div>
+          ${channelLine(conn.tickets_channel_name, 'Discord tickets panel', `${b}/tickets/panel#channel`)}
+          ${channelLine(contributor.channel_name, 'Contributor roles panel', `${b}/contributors/panel#channel`)}
         </div>`;
     }
 
     const body = html`
       ${pageHeader({
-        eyebrow: 'General setup · Step 2 of 3',
+        eyebrow: 'Setup · Step 2 of 3',
         title: 'Discord',
         after: status,
         description: 'The bot posts the panels in your server. Each workspace connects one server.',
@@ -144,7 +144,7 @@ export function registerDiscordRoutes(app: FastifyInstance, web: Web): void {
       const access = await inspectGuild(deps.discord, guildId);
       if (!access.ok) throw new UserFacingError(access.message);
       await saveDiscordGuild(deps.db, ctx.workspace.id, access.guild, ctx.user.id);
-      setFlash(reply, 'success', `Connected to “${access.guild.name}”. Choose the tickets channel on the Tickets › Panel tab.`);
+      setFlash(reply, 'success', `Connected to “${access.guild.name}”. Choose the tickets channel in Discord tickets › Panel.`);
     } catch (err) {
       if (!(err instanceof UserFacingError)) throw err;
       setFlash(reply, 'error', err.message);

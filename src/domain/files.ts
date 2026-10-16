@@ -383,7 +383,7 @@ export async function storePendingFiles(deps: Deps, sub: SubmissionRow): Promise
   await addEvent(deps.db, sub.id, 'files_stored', { stored, failed: rows.length - stored });
 }
 
-/** Adds a file from the console (people who can act on tickets). */
+/** Adds a file from the console (people with Edit on the Inbox). */
 export async function addTeamFile(deps: Deps, sub: SubmissionRow, userId: string, filename: string, data: Buffer): Promise<{ ok: true } | { ok: false; error: string }> {
   const id = randomToken(16);
   const name = cleanFilename(filename);

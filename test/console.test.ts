@@ -19,8 +19,9 @@ afterAll(async () => {
 
 describe('console pages', () => {
   it('renders every page with Lucide icons and no emoji or glyph icons', async () => {
-    const pages = ['', '/tickets', '/tickets/panel', '/tickets/types', '/tickets/types/new', '/tickets/settings', '/tickets/triage', '/contributors', '/contributors/roles',
-      '/contributors/roles/new?kind=auto', '/contributors/panel', '/members', '/members?invite=1', '/settings', '/deployment', '/setup/github', '/setup/discord', '/apps', '/apps/new'];
+    const pages = ['', '/tickets', '/tickets/panel', '/tickets/types', '/tickets/types/new', '/tickets/files', '/tickets/settings', '/issues', '/issues/github', '/issues/sync',
+      '/triage', '/triage/actions', '/triage/labels', '/triage/prompt', '/triage/prompt/full', '/triage/runs', '/triage/activity', '/contributors', '/contributors/roles',
+      '/contributors/roles/new?kind=auto', '/contributors/panel', '/members', '/members?invite=1', '/settings', '/deployment', '/setup/github', '/setup/discord', '/apps', '/apps/new', '/health'];
     for (const p of pages) {
       const res = await env.server.inject({ method: 'GET', url: w() + p, ...get(ws.owner) });
       expect(res.statusCode, p).toBe(200);
@@ -63,10 +64,10 @@ describe('console pages', () => {
 
     const mod = await makeAdmin(env, 'mia');
     await env.server.inject({ method: 'POST', url: `/invite/${await createInvite(env.db, ws.workspace.id, ws.owner.user.id, 'moderator')}`, ...form(mod) });
-    const on = await env.server.inject({ method: 'POST', url: `${w()}/members/${mod.user.id}/permissions`, ...form(ws.owner, { can_act_tickets: '1', can_view_contributors: '1' }), headers: { ...form(ws.owner).headers, ...json } });
-    expect(on.json()).toEqual({ ok: true, message: 'mia: Act on tickets on' });
-    // A moderator gets a JSON 403, not an HTML page, from the same switch.
-    const denied = await env.server.inject({ method: 'POST', url: `${w()}/members/${mod.user.id}/permissions`, ...form(mod, {}), headers: { ...form(mod).headers, ...json } });
+    const on = await env.server.inject({ method: 'POST', url: `${w()}/members/${mod.user.id}/access`, ...form(ws.owner, { inbox: 'edit', verifications: 'view' }), headers: { ...form(ws.owner).headers, ...json } });
+    expect(on.json()).toEqual({ ok: true, message: 'mia: Inbox → Edit' });
+    // A moderator gets a JSON 403, not an HTML page, from the same select.
+    const denied = await env.server.inject({ method: 'POST', url: `${w()}/members/${mod.user.id}/access`, ...form(mod, {}), headers: { ...form(mod).headers, ...json } });
     expect(denied.statusCode).toBe(403);
     expect(denied.json()).toMatchObject({ ok: false });
   });
@@ -81,8 +82,8 @@ describe('console pages', () => {
   });
 
   it('uses the whole window for tables and lists, and a readable width for settings and forms', async () => {
-    const full = ['/tickets', '/tickets/issues', '/tickets/types', '/tickets/files', '/tickets/triage/activity', '/apps', '/members', '/contributors'];
-    const readable = ['', '/tickets/triage', '/tickets/triage/prompt', '/tickets/triage/runs', '/tickets/panel', '/tickets/settings', '/apps/new', '/settings', '/setup/github'];
+    const full = ['/tickets', '/issues', '/issues/github', '/issues/sync', '/tickets/types', '/tickets/files', '/triage', '/triage/activity', '/apps', '/members', '/contributors'];
+    const readable = ['', '/triage/actions', '/triage/prompt', '/triage/runs', '/tickets/panel', '/tickets/settings', '/apps/new', '/settings', '/setup/github'];
     for (const p of full) expect((await env.server.inject({ method: 'GET', url: w() + p, ...get(ws.owner) })).body, p).toContain('<div class="page full">');
     for (const p of readable) expect((await env.server.inject({ method: 'GET', url: w() + p, ...get(ws.owner) })).body, p).toContain('<div class="page">');
     // The main column of a table takes the extra room.

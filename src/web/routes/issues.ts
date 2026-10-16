@@ -1,3 +1,7 @@
+/**
+ * GitHub issues › All issues and › Sync: search every issue in the connected repositories (a
+ * copy kept in sync in the background), and how up to date each repository's copy is.
+ */
 import type { FastifyInstance } from 'fastify';
 import {
   consoleQuery,
@@ -15,10 +19,12 @@ import {
 import { listApps } from '../../domain/store.js';
 import { escapeHtml, html, raw, type SafeHtml } from '../../lib/html.js';
 import { setFlash } from '../session.js';
-import type { Web } from '../server.js';
-import { empty, icon, linkBtn, pill, plural, postBtn, segLinks, selectWrap, tag, when } from '../ui.js';
-import { ticketsHeader, triageCell, type TriageSummary } from './tickets.js';
-import { issuesNav, issueTable, issueTriageCount } from './issue-triage.js';
+import type { Web, WorkspaceRequestContext } from '../server.js';
+import { empty, icon, linkBtn, pill, plural, segLinks, selectWrap, tag, when } from '../ui.js';
+import { triageCell, type TriageSummary } from './tickets.js';
+import { issueTable } from './issue-triage.js';
+import { areaHref, landOn, toolHeader } from './tool.js';
+import { workspacePath } from './triage-bulk.js';
 import { triageSummaries } from '../../triage/engine.js';
 
 const PAGE_SIZE = 50;
@@ -54,8 +60,10 @@ export function registerIssueRoutes(app: FastifyInstance, web: Web): void {
     return byRepo;
   }
 
-  app.get('/w/:wid/tickets/issues', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply, { permission: 'issues.view' });
+  // ---- All issues ------------------------------------------------------------------------------
+
+  app.get('/w/:wid/issues', async (req, reply) => {
+    const ctx = await landOn(web, req, reply, 'issues');
     if (!ctx) return reply;
     const b = ctx.base;
     const wid = ctx.workspace.id;
@@ -106,7 +114,6 @@ export function registerIssueRoutes(app: FastifyInstance, web: Web): void {
       [wid, JSON.stringify(rows.map((r) => r.number))],
     );
     const issueTriage = new Map(triaged.map((t) => [`${t.repo_id}:${t.number}`, t]));
-    const toReview = await issueTriageCount(web, wid);
 
     const link = (o: { state?: StateFilter; page?: number; q?: string; repo?: number | null }) => {
       const params = new URLSearchParams();
@@ -118,30 +125,11 @@ export function registerIssueRoutes(app: FastifyInstance, web: Web): void {
       if (r) params.set('repo', String(r));
       if (o.page && o.page > 1) params.set('page', String(o.page));
       const qs = params.toString();
-      return `${b}/tickets/issues${qs ? `?${qs}` : ''}`;
+      return `${b}/issues${qs ? `?${qs}` : ''}`;
     };
 
     const totalIndexed = status.reduce((n, r) => n + r.indexed, 0);
     const loading = status.some((r) => r.status === 'loading') || status.length < repos.size;
-
-    const statusCard = html`<div class="card">
-      <div class="card-h"><div><h2>Issue database</h2><div class="desc">A copy of every issue in your repositories, open and closed, kept in sync every couple of minutes. Triage searches it for duplicates.</div></div>
-        ${postBtn(`${b}/tickets/issues/sync`, 'Sync now', ctx.csrf, { size: 'sm', icon: 'refresh-cw', loading: 'Syncing…' })}</div>
-      ${repos.size
-        ? html`<div class="card-b flush"><div class="table-wrap"><table>
-            <thead><tr><th class="col-main">Repository</th><th>Status</th><th class="num">Issues</th><th class="num">Open</th><th class="num">Last sync</th></tr></thead>
-            <tbody>${[...repos.entries()].map(([id, r]) => {
-              const st = status.find((x) => x.repo_id === id);
-              return html`<tr>
-                <td><div class="who-cell">${icon('folder-git-2', 16, 'muted')}<div><a class="cell-title mono" href="https://github.com/${r.owner}/${r.name}/issues" target="_blank" rel="noopener noreferrer">${r.owner}/${r.name}</a><div class="sub">${r.apps.join(', ')}</div></div></div></td>
-                <td>${st ? repoState(st) : pill('Starting', 'neutral')}${st?.last_error ? html`<div class="sub">${st.last_error}</div>` : st?.status === 'loading' ? html`<div class="sub">${plural(st.indexed, 'issue')} copied so far</div>` : ''}</td>
-                <td class="num">${String(st?.indexed ?? 0)}</td>
-                <td class="num">${String(st?.open ?? 0)}</td>
-                <td class="num">${st?.last_synced_at ? when(st.last_synced_at) : html`<span class="em">—</span>`}</td></tr>`;
-            })}</tbody></table></div></div>
-          ${loading ? html`<div class="card-note">The first load runs in the background, oldest issues first. Search and triage use what’s loaded so far, and triage also checks GitHub directly until it’s done.</div>` : ''}`
-        : html`<div class="card-b"><p class="small muted">Add an app first: its repository is copied here.</p></div>`}
-    </div>`;
 
     const table = issueTable(rows.map((r) => {
       const key = `${r.repo_id}:${r.number}`;
@@ -164,7 +152,7 @@ export function registerIssueRoutes(app: FastifyInstance, web: Web): void {
         authorAvatar: ticket ? null : r.author_avatar,
         viaDiscord: Boolean(ticket),
         updatedAt: r.updated_at,
-        href: ticket ? `${b}/tickets/${ticket}` : own ? `${b}/tickets/issues/${String(r.repo_id)}/${String(r.number)}` : r.html_url,
+        href: ticket ? `${b}/tickets/${ticket}` : own ? `${b}/issues/${String(r.repo_id)}/${String(r.number)}` : r.html_url,
         external: !ticket && !own,
         triage: ticket ? html`${triageCell(ticketTriage.get(ticket), true) || tag('Discord ticket', { icon: 'message-circle' })}` : own ? triageCell(own) : html`<span class="em">—</span>`,
         extra: html`${r.duplicate_of ? html`<div class="sub">Duplicate of <a href="https://github.com/${repo?.owner ?? ''}/${repo?.name ?? ''}/issues/${String(r.duplicate_of)}" target="_blank" rel="noopener noreferrer">#${String(r.duplicate_of)}</a></div>` : ''}${snippet ? html`<p class="issue-snip">${snippetHtml(snippet)}</p>` : ''}`,
@@ -172,9 +160,7 @@ export function registerIssueRoutes(app: FastifyInstance, web: Web): void {
     }));
 
     const body = html`
-      ${await ticketsHeader(web, ctx, 'issues')}
-      ${toReview !== null ? issuesNav(ctx, 'all', toReview) : ''}
-      ${statusCard}
+      ${await toolHeader(web, ctx, 'issues', 'issues')}
       <div class="card">
         <div class="toolbar">
           ${segLinks('Filter by state', [
@@ -182,7 +168,7 @@ export function registerIssueRoutes(app: FastifyInstance, web: Web): void {
             { href: link({ state: 'closed', page: 1 }), label: 'Closed', current: state === 'closed' },
             { href: link({ state: 'all', page: 1 }), label: 'All', current: state === 'all' },
           ])}
-          <form method="get" action="${b}/tickets/issues" class="tools" role="search">
+          <form method="get" action="${b}/issues" class="tools" role="search">
             ${state !== 'open' ? html`<input type="hidden" name="state" value="${state}">` : ''}
             <span class="search sm">${icon('search', 14)}<input type="search" name="q" value="${search}" placeholder="Search ${plural(totalIndexed, 'issue')}" aria-label="Search issues"></span>
             ${repos.size > 1 ? selectWrap(html`<select name="repo" aria-label="Repository" data-autosubmit><option value="">All repositories</option>${[...repos.entries()].map(([id, r]) => html`<option value="${String(id)}" ${id === repoFilter ? raw('selected') : ''}>${r.owner}/${r.name}</option>`)}</select>`, { sm: true }) : ''}
@@ -194,17 +180,54 @@ export function registerIssueRoutes(app: FastifyInstance, web: Web): void {
           ? table
           : search
             ? empty('search-x', 'No matching issues', 'Try fewer or different words, or another state.', linkBtn(link({ q: '', page: 1 }), 'Clear search'))
-            : empty('inbox', totalIndexed ? 'No issues here' : 'No issues yet', totalIndexed ? 'Nothing matches this filter.' : loading ? 'The first load is running. Issues appear here as they’re copied.' : 'Issues from your repositories appear here once they’re copied.')}</div>
+            : empty('inbox', totalIndexed ? 'No issues here' : 'No issues yet', totalIndexed ? 'Nothing matches this filter.' : !repos.size ? 'Add an app first: its repository’s issues are copied here.' : loading ? 'The first load is running. Issues appear here as they’re copied.' : 'Issues from your repositories appear here once they’re copied.')}</div>
+        ${loading && repos.size && totalIndexed ? html`<div class="card-note">The first load is still running, so some older issues aren’t here yet.</div>` : ''}
         ${!search && (page > 1 || hasMore) ? html`<div class="pager"><span>Page ${String(page)}</span><div class="row">
           ${page > 1 ? linkBtn(link({ page: page - 1 }), 'Previous', { size: 'sm', icon: 'chevron-left' }) : ''}${hasMore ? linkBtn(link({ page: page + 1 }), 'Next', { size: 'sm', trail: 'chevron-right' }) : ''}</div></div>` : ''}
         ${search ? html`<div class="card-note">${rows.length ? `Best matches first${rows.length === PAGE_SIZE ? `, top ${PAGE_SIZE}` : ''}. Titles count more than descriptions; “crash” also finds “crashes”.` : ''}</div>` : ''}
       </div>`;
-    return web.render(reply, ctx, 'Issues', 'tickets', body, { width: 'full' });
+    return web.render(reply, ctx, 'GitHub issues', 'issues', body, { width: 'full' });
   });
 
-  /** Picks up the latest changes now; a first load that's still running continues in the background. */
-  app.post('/w/:wid/tickets/issues/sync', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply, { permission: 'issues.view' });
+  // ---- Sync ----------------------------------------------------------------------------------
+
+  app.get('/w/:wid/issues/sync', async (req, reply) => {
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'issues-sync.view' });
+    if (!ctx) return reply;
+    const repos = await workspaceRepos(ctx.workspace.id);
+    await ensureRepos(deps.db);
+    const status = await indexStatus(deps.db, [...repos.keys()]);
+    const loading = status.some((r) => r.status === 'loading') || status.length < repos.size;
+    const statusCard = html`<div class="card">
+      <div class="card-h"><div><h2>Issue database</h2><div class="desc">A copy of every issue in your repositories, open and closed, kept in sync every couple of minutes. Search and triage use it.</div></div></div>
+      ${repos.size
+        ? html`<div class="card-b flush"><div class="table-wrap"><table>
+            <thead><tr><th class="col-main">Repository</th><th>Status</th><th class="num">Issues</th><th class="num">Open</th><th class="num">Last sync</th></tr></thead>
+            <tbody>${[...repos.entries()].map(([id, r]) => {
+              const st = status.find((x) => x.repo_id === id);
+              return html`<tr>
+                <td><div class="who-cell">${icon('folder-git-2', 16, 'muted')}<div><a class="cell-title mono" href="https://github.com/${r.owner}/${r.name}/issues" target="_blank" rel="noopener noreferrer">${r.owner}/${r.name}</a><div class="sub">${r.apps.join(', ')}</div></div></div></td>
+                <td>${st ? repoState(st) : pill('Starting', 'neutral')}${st?.last_error ? html`<div class="sub">${st.last_error}</div>` : st?.status === 'loading' ? html`<div class="sub">${plural(st.indexed, 'issue')} copied so far</div>` : ''}</td>
+                <td class="num">${String(st?.indexed ?? 0)}</td>
+                <td class="num">${String(st?.open ?? 0)}</td>
+                <td class="num">${st?.last_synced_at ? when(st.last_synced_at) : html`<span class="em">—</span>`}</td></tr>`;
+            })}</tbody></table></div></div>
+          ${loading ? html`<div class="card-note">The first load runs in the background, oldest issues first. Search and triage use what’s loaded so far, and triage also checks GitHub directly until it’s done.</div>` : ''}`
+        : empty('folder-git-2', 'No repositories yet', 'Add an app first: its repository’s issues are copied here.')}
+    </div>`;
+
+    const body = html`
+      ${await toolHeader(web, ctx, 'issues', 'issues-sync')}
+      ${statusCard}`;
+    return web.render(reply, ctx, 'Sync · GitHub issues', 'issues', body, { width: 'full' });
+  });
+
+  /** Back to the GitHub issues page Sync now was pressed on. */
+  const backTo = (ctx: WorkspaceRequestContext, back: unknown) => workspacePath(ctx, back, ['/issues']) ?? areaHref(ctx, 'issues-sync');
+
+  /** Sync now: picks up the latest changes; a first load that's still running continues in the background. */
+  app.post('/w/:wid/issues/sync', async (req, reply) => {
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'issues-sync.edit' });
     if (!ctx) return reply;
     await ensureRepos(deps.db);
     const repos = [...(await workspaceRepos(ctx.workspace.id)).keys()];
@@ -219,9 +242,9 @@ export function registerIssueRoutes(app: FastifyInstance, web: Web): void {
     await requestSync(deps.db, before.filter((r) => r.status === 'loading').map((r) => r.repo_id));
     const loadingLeft = before.some((r) => r.status === 'loading');
     setFlash(reply, problem ? 'error' : 'success', problem
-      ? 'Some repositories couldn’t be synced. See the status below.'
+      ? 'Some repositories couldn’t be synced. See their status on the Sync tab.'
       : loadingLeft ? 'Synced. The first load continues in the background.' : 'Up to date with GitHub.');
-    return reply.redirect(`${ctx.base}/tickets/issues`);
+    return reply.redirect(backTo(ctx, (req.body as { back?: unknown }).back));
   });
 }
 

@@ -121,7 +121,7 @@ export function registerAuthRoutes(app: FastifyInstance, web: Web): void {
       const token = await deps.discord.exchangeCode(q.code, discordRedirect);
       if (!token.guild) throw new UserFacingError('Discord did not report which server the bot was added to. Please try again.');
       await saveDiscordGuild(deps.db, wid, token.guild, req.auth.user.id);
-      setFlash(reply, 'success', `The bot was added to “${token.guild.name}”. Choose the tickets channel on the Tickets › Panel tab.`);
+      setFlash(reply, 'success', `The bot was added to “${token.guild.name}”. Choose the tickets channel in Discord tickets › Panel.`);
     } catch (err) {
       setFlash(reply, 'error', err instanceof UserFacingError ? err.message : 'Could not complete the bot installation. Please try again.');
       deps.log.warn({ err: (err as Error).message }, 'bot installation callback failed');

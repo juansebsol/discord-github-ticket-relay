@@ -2,7 +2,7 @@ import { withTransaction, type Db, type Queryable } from '../db/database.js';
 import { randomUUID } from 'node:crypto';
 import { randomToken, sha256 } from '../lib/crypto.js';
 import type { Config } from '../config.js';
-import { PAGE_AREAS, pageLevel, TRIAGE_AREAS, triageLevel, type MemberAccess } from './permissions.js';
+import { AREA_KEYS, hasEdit, type MemberAccess } from './permissions.js';
 import { UserFacingError, type Role, type UserRow, type WorkspaceRow } from './types.js';
 
 export async function upsertUser(
@@ -25,21 +25,18 @@ export interface Membership extends MemberAccess {
   workspace: WorkspaceRow;
 }
 
-const MEMBER_COLUMNS = 'm.role, m.can_act_tickets, m.can_view_contributors, m.can_search_issues, m.can_manage_files, m.can_view_health, m.triage_access, m.page_access';
+const MEMBER_COLUMNS = 'm.role, m.access';
+
+/** What a new moderator can do: see tickets (always) and contributor verifications. */
+const NEW_MODERATOR_ACCESS: MemberAccess['access'] = { verifications: 'view' };
+
+function accessMap(v: unknown): MemberAccess['access'] {
+  return (v && typeof v === 'object' && !Array.isArray(v) ? v : {}) as MemberAccess['access'];
+}
 
 function toMembership(row: Record<string, unknown>): Membership {
-  const { role, can_act_tickets, can_view_contributors, can_search_issues, can_manage_files, can_view_health, triage_access, page_access, ...workspace } = row;
-  return {
-    workspace: workspace as unknown as WorkspaceRow,
-    role: role as Role,
-    can_act_tickets: Boolean(can_act_tickets),
-    can_view_contributors: Boolean(can_view_contributors),
-    can_search_issues: Boolean(can_search_issues),
-    can_manage_files: Boolean(can_manage_files),
-    can_view_health: Boolean(can_view_health),
-    triage_access: (triage_access && typeof triage_access === 'object' ? triage_access : {}) as MemberAccess['triage_access'],
-    page_access: (page_access && typeof page_access === 'object' ? page_access : {}) as MemberAccess['page_access'],
-  };
+  const { role, access, ...workspace } = row;
+  return { workspace: workspace as unknown as WorkspaceRow, role: role as Role, access: accessMap(access) };
 }
 
 export async function listMemberships(q: Queryable, userId: string): Promise<Membership[]> {
@@ -131,7 +128,7 @@ export async function listMembers(q: Queryable, workspaceId: string) {
      ORDER BY CASE m.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END, m.created_at`,
     [workspaceId],
   );
-  return rows;
+  return rows.map((r) => ({ ...r, access: accessMap(r.access) }));
 }
 
 export async function removeMember(db: Db, workspaceId: string, userId: string): Promise<void> {
@@ -193,8 +190,8 @@ export async function acceptInvite(db: Db, token: string, userId: string): Promi
     );
     if (!rows[0]) throw new UserFacingError('This invitation link is invalid, expired or has already been used.', 404);
     await c.query(
-      `INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
-      [rows[0].workspace_id, userId, rows[0].role],
+      `INSERT INTO workspace_members (workspace_id, user_id, role, access) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
+      [rows[0].workspace_id, userId, rows[0].role, rows[0].role === 'moderator' ? NEW_MODERATOR_ACCESS : {}],
     );
     return rows[0].workspace_id as string;
   });
@@ -205,45 +202,29 @@ export async function setMemberRole(q: Queryable, workspaceId: string, userId: s
   const { rows } = await q.query<{ role: Role }>('SELECT role FROM workspace_members WHERE workspace_id = $1 AND user_id = $2', [workspaceId, userId]);
   if (!rows[0]) throw new UserFacingError('That person is not a member of this workspace.', 404);
   if (rows[0].role === 'owner') throw new UserFacingError('The owner’s role can’t be changed.');
-  await q.query('UPDATE workspace_members SET role = $3 WHERE workspace_id = $1 AND user_id = $2', [workspaceId, userId, role]);
-}
-
-/** Owners and admins: what a moderator may do beyond viewing tickets. */
-/** What a moderator can do on each Triage page. Unknown pages and levels are dropped. */
-export async function setModeratorTriageAccess(q: Queryable, workspaceId: string, userId: string, access: Partial<Record<string, string>>): Promise<MemberAccess['triage_access']> {
-  const clean = Object.fromEntries(TRIAGE_AREAS.map((a) => [a, triageLevel(access, a)]).filter(([, l]) => l !== 'none'));
-  const res = await q.query(`UPDATE workspace_members SET triage_access = $3 WHERE workspace_id = $1 AND user_id = $2 AND role = 'moderator'`, [workspaceId, userId, clean]);
-  if (!res.rowCount) throw new UserFacingError('Only moderators have adjustable permissions.', 404);
-  return clean;
-}
-
-/** Changes a moderator's level on the setup pages given; the others keep theirs. */
-export async function setModeratorPageAccess(q: Queryable, workspaceId: string, userId: string, access: Partial<Record<string, string>>): Promise<MemberAccess['page_access']> {
-  const { rows } = await q.query<{ page_access: MemberAccess['page_access'] }>(`SELECT page_access FROM workspace_members WHERE workspace_id = $1 AND user_id = $2 AND role = 'moderator'`, [workspaceId, userId]);
-  if (!rows[0]) throw new UserFacingError('Only moderators have adjustable permissions.', 404);
-  const next = { ...rows[0].page_access };
-  for (const a of PAGE_AREAS) {
-    if (access[a] === undefined) continue;
-    const level = pageLevel(access, a);
-    if (level === 'none') delete next[a];
-    else next[a] = level;
-  }
-  await q.query(`UPDATE workspace_members SET page_access = $3 WHERE workspace_id = $1 AND user_id = $2 AND role = 'moderator'`, [workspaceId, userId, next]);
-  return next;
-}
-
-export async function setModeratorPermissions(
-  q: Queryable,
-  workspaceId: string,
-  userId: string,
-  p: { canActTickets: boolean; canViewContributors: boolean; canSearchIssues?: boolean; canManageFiles?: boolean; canViewHealth?: boolean },
-): Promise<void> {
-  const res = await q.query(
-    `UPDATE workspace_members SET can_act_tickets = $3, can_view_contributors = $4,
-       can_search_issues = coalesce($5, can_search_issues), can_manage_files = coalesce($6, can_manage_files),
-       can_view_health = coalesce($7, can_view_health)
-     WHERE workspace_id = $1 AND user_id = $2 AND role = 'moderator'`,
-    [workspaceId, userId, p.canActTickets, p.canViewContributors, p.canSearchIssues ?? null, p.canManageFiles ?? null, p.canViewHealth ?? null],
+  // An admin who becomes a moderator keeps the access they had as one, or starts like a new moderator.
+  await q.query(
+    `UPDATE workspace_members SET role = $3, access = CASE WHEN $3 = 'moderator' AND role <> 'moderator' AND access = '{}' THEN $4 ELSE access END
+     WHERE workspace_id = $1 AND user_id = $2`,
+    [workspaceId, userId, role, NEW_MODERATOR_ACCESS],
   );
-  if (!res.rowCount) throw new UserFacingError('Only moderators have adjustable permissions.', 404);
+}
+
+/**
+ * Owners and admins: changes a moderator's level on the pages given ("none" removes it); the
+ * other pages keep theirs. Unknown pages are ignored, and Edit on a page without anything to
+ * change is stored as View. Returns the new access map.
+ */
+export async function setModeratorAccess(q: Queryable, workspaceId: string, userId: string, changes: Partial<Record<string, unknown>>): Promise<MemberAccess['access']> {
+  const { rows } = await q.query<{ access: unknown }>(`SELECT access FROM workspace_members WHERE workspace_id = $1 AND user_id = $2 AND role = 'moderator'`, [workspaceId, userId]);
+  if (!rows[0]) throw new UserFacingError('Only moderators have adjustable permissions.', 404);
+  const next = { ...accessMap(rows[0].access) };
+  for (const a of AREA_KEYS) {
+    const v = changes[a];
+    if (v === undefined) continue;
+    if (v === 'edit' || v === 'view') next[a] = v === 'edit' && hasEdit(a) ? 'edit' : 'view';
+    else delete next[a];
+  }
+  await q.query(`UPDATE workspace_members SET access = $3 WHERE workspace_id = $1 AND user_id = $2 AND role = 'moderator'`, [workspaceId, userId, next]);
+  return next;
 }

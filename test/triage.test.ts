@@ -72,7 +72,7 @@ describe('filing never depends on triage', () => {
     await env.triage.drain();
     expect(env.anthropic.requests).toHaveLength(1);
 
-    await env.server.inject({ method: 'POST', url: `${w()}/tickets/triage/resume`, ...form(ws.owner) });
+    await env.server.inject({ method: 'POST', url: `${w()}/triage/resume`, ...form(ws.owner) });
     await env.triage.drain();
     expect((await result(second.id)).status).toBe('done');
     expect((await result(third.id)).status).toBe('done');
@@ -310,7 +310,7 @@ describe('rules by ticket type', () => {
     await setApiKey(env.db, env.deps.box, wid(), KEY, ws.owner.user.id);
     const allBut = (...off: string[]) => ACTION_KINDS.filter((k) => !off.includes(k));
     await env.server.inject({
-      method: 'POST', url: `${w()}/tickets/triage`,
+      method: 'POST', url: `${w()}/triage/actions`,
       ...form(ws.owner, {
         model: 'claude-haiku-5-5', threshold: '90', monthly_limit: '500', app_ids: ws.apps[0]!.id, rules: '1',
         [`rule_${bug!.id}`]: allBut('spam'), [`rule_${feature!.id}`]: [],
@@ -335,7 +335,7 @@ describe('rules by ticket type', () => {
     const typesPage = await env.server.inject({ method: 'GET', url: `${w()}/tickets/types`, ...get(ws.owner) });
     expect(typesPage.body).toContain('All except Spam');
     expect(typesPage.body).toContain('Not triaged');
-    const triagePage = await env.server.inject({ method: 'GET', url: `${w()}/tickets/triage`, ...get(ws.owner) });
+    const triagePage = await env.server.inject({ method: 'GET', url: `${w()}/triage/actions`, ...get(ws.owner) });
     expect(triagePage.body).toContain('Rules by ticket type');
     expect(triagePage.body).toContain(`aria-label="Bug report: Spam"`);
   });
@@ -358,7 +358,7 @@ describe('triage settings and the API key', () => {
     expect((await getTriageSettings(env.db, wid())).key).toBeNull();
 
     // Triage points to Settings while there's no key.
-    let triagePage = await env.server.inject({ method: 'GET', url: `${w()}/tickets/triage`, ...get(ws.owner) });
+    let triagePage = await env.server.inject({ method: 'GET', url: `${w()}/triage/actions`, ...get(ws.owner) });
     expect(triagePage.body).toContain('Triage needs a Claude API key');
     expect(triagePage.body).toContain(`${w()}/settings#claude`);
     let deployment = await env.server.inject({ method: 'GET', url: `${w()}/deployment`, ...get(ws.owner) });
@@ -371,7 +371,7 @@ describe('triage settings and the API key', () => {
     expect(settings.body).toContain('sk-ant-…cdef');
     expect(settings.body).toContain('>Working</span>');
     expect(settings.body).toContain('AI triage · Off');
-    triagePage = await env.server.inject({ method: 'GET', url: `${w()}/tickets/triage`, ...get(ws.owner) });
+    triagePage = await env.server.inject({ method: 'GET', url: `${w()}/triage/actions`, ...get(ws.owner) });
     expect(triagePage.body).not.toContain('Triage needs a Claude API key');
     expect(triagePage.body).toContain('sk-ant-…cdef');
     expect(triagePage.body).toContain('Claude Haiku 5.5');
@@ -397,14 +397,14 @@ describe('triage settings and the API key', () => {
   });
 
   it('needs a key before it can be switched on, and saves the settings form', async () => {
-    const toggle = (body: Record<string, string>) => env.server.inject({ method: 'POST', url: `${w()}/tickets/triage/enabled`, ...form(ws.owner, body), headers: { ...form(ws.owner).headers, accept: 'application/json' } });
+    const toggle = (body: Record<string, string>) => env.server.inject({ method: 'POST', url: `${w()}/triage/enabled`, ...form(ws.owner, body), headers: { ...form(ws.owner).headers, accept: 'application/json' } });
     expect((await toggle({ set: '1', enabled: '1' })).json()).toMatchObject({ ok: false });
     await setApiKey(env.db, env.deps.box, wid(), KEY, ws.owner.user.id);
     expect((await toggle({ set: '1', enabled: '1' })).json()).toMatchObject({ ok: true });
     expect((await getTriageSettings(env.db, wid())).enabledAt).toBeInstanceOf(Date);
 
     await env.server.inject({
-      method: 'POST', url: `${w()}/tickets/triage`,
+      method: 'POST', url: `${w()}/triage/actions`,
       ...form(ws.owner, {
         model: 'claude-sonnet-5-5', threshold: '85', monthly_limit: '200', app_ids: ws.apps[0]!.id,
         priority_mode: 'auto', priority_label_critical: 'P0', priority_label_high: 'P1', priority_label_medium: 'P2', priority_label_low: 'P3', priority_guide: '',

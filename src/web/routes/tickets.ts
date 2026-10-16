@@ -1,8 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { checkPanel } from '../../domain/panel.js';
-import { can, firstTriageArea, type TriageArea } from '../../domain/permissions.js';
-import { getDiscordConnection, getGitHubConnection, listApps } from '../../domain/store.js';
+import { can } from '../../domain/permissions.js';
+import { getGitHubConnection, listApps } from '../../domain/store.js';
 import { GitHubApiError } from '../../github/client.js';
 import { parseIssueBody, type IssueText } from '../../github/issue-content.js';
 import { countByStatus, decryptPayload, getSubmission, listEvents, listSubmissions, type SubmissionFilter } from '../../domain/submissions.js';
@@ -18,7 +17,9 @@ import { UserFacingError, type SubmissionRow, type SubmissionStatus } from '../.
 import { updateTicketLimits, userNames } from '../../domain/workspaces.js';
 import { html, raw, type SafeHtml } from '../../lib/html.js';
 import { setFlash } from '../session.js';
-import type { Web, WorkspaceRequestContext } from '../server.js';
+import type { Web } from '../server.js';
+import { toolHeader, viewOnlyText } from './tool.js';
+import { viewOnlyFooter } from './triage.js';
 import {
   avatar,
   choices,
@@ -41,7 +42,6 @@ import {
   setting,
   statusPill,
   submitBtn,
-  tabs,
   tag,
   TICKET_STATUS,
   timeAgo,
@@ -52,56 +52,6 @@ import {
 } from '../ui.js';
 
 const PAGE_SIZE = 25;
-
-export type TicketsTab = 'inbox' | 'panel' | 'types' | 'triage' | 'issues' | 'files' | 'settings';
-
-const TRIAGE_PATHS: Record<TriageArea, string> = { actions: '', labels: '/labels', prompt: '/prompt', runs: '/runs', activity: '/activity' };
-/** A Triage page's address. */
-export const triageHref = (ctx: Pick<WorkspaceRequestContext, 'base'>, area: TriageArea): string => `${ctx.base}/tickets/triage${TRIAGE_PATHS[area]}`;
-/** Whether this person can see (or change) a Triage page. */
-export const canTriage = (ctx: Pick<WorkspaceRequestContext, 'membership'>, area: TriageArea, level: 'view' | 'edit' = 'view'): boolean => can(ctx.membership, `triage.${area}.${level}`);
-
-const VIEW_ONLY_TICKETS = 'You can read tickets. Checking GitHub, retrying, linking and closing need the Act on tickets permission. Ask an admin or the owner.';
-
-/** Header and tabs shared by every Tickets page. */
-export async function ticketsHeader(web: Web, ctx: WorkspaceRequestContext, tab: TicketsTab, o: { actions?: SafeHtml } = {}): Promise<SafeHtml> {
-  const wid = ctx.workspace.id;
-  const [state, conn, githubTriage] = await Promise.all([
-    checkPanel(web.deps, wid, { live: false }),
-    getDiscordConnection(web.deps.db, wid),
-    // The Issues tab opens on "Opened on GitHub · Triage" once that's in use.
-    web.deps.db.query(`SELECT 1 FROM triage_settings WHERE workspace_id = $1 AND github_enabled = 1 UNION ALL SELECT 1 FROM issue_triage WHERE workspace_id = $1 LIMIT 1`, [wid]),
-  ]);
-  const status = state.state === 'published'
-    ? pill('Live', 'ok')
-    : state.state === 'missing'
-      ? pill('Panel deleted', 'warn')
-      : state.state === 'unknown'
-        ? pill('Check panel', 'warn')
-        : pill('Not published', 'neutral');
-  const manage = can(ctx.membership, 'manage');
-  const triageArea = firstTriageArea(ctx.membership);
-  const b = ctx.base;
-  // Moderators see the tabs they've been given (Inbox always).
-  const tabList = [
-    { href: `${b}/tickets`, label: 'Inbox', current: tab === 'inbox', count: ctx.progress?.attention },
-    can(ctx.membership, 'issues.view') && { href: githubTriage.rows.length ? `${b}/tickets/issues/triage` : `${b}/tickets/issues`, label: 'Issues', current: tab === 'issues' },
-    manage && { href: `${b}/tickets/panel`, label: 'Panel', current: tab === 'panel' },
-    manage && { href: `${b}/tickets/types`, label: 'Ticket types', current: tab === 'types' },
-    triageArea && { href: triageHref(ctx, triageArea), label: 'Triage', current: tab === 'triage' },
-    can(ctx.membership, 'files.manage') && { href: `${b}/tickets/files`, label: 'Files', current: tab === 'files' },
-    manage && { href: `${b}/tickets/settings`, label: 'Settings', current: tab === 'settings' },
-  ].filter((t): t is { href: string; label: string; current: boolean; count?: number } => Boolean(t));
-  return html`${pageHeader({
-    title: 'Tickets',
-    after: [status, tab !== 'triage' && !can(ctx.membership, 'tickets.act') ? viewOnlyTag(VIEW_ONLY_TICKETS) : ''],
-    description: conn?.tickets_channel_name
-      ? `Members open tickets from #${conn.tickets_channel_name}. Each one becomes a GitHub issue.`
-      : 'Members open tickets from a panel in Discord. Each one becomes a GitHub issue.',
-    actions: o.actions,
-  })}
-  ${tabs('Tickets', tabList)}`;
-}
 
 // ---- Status explanations -------------------------------------------------------------------------
 
@@ -441,7 +391,7 @@ export function registerTicketRoutes(app: FastifyInstance, web: Web): void {
   // ---- Inbox ------------------------------------------------------------------------------------
 
   app.get('/w/:wid/tickets', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply, { permission: 'tickets.view' });
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'inbox.view' });
     if (!ctx) return reply;
     const wid = ctx.workspace.id;
     const b = ctx.base;
@@ -454,7 +404,7 @@ export function registerTicketRoutes(app: FastifyInstance, web: Web): void {
     const names = await userNames(deps.db, rows.map((r) => r.resolved_by));
     const triage = triageOn ? await triageSummaries(deps.db, wid, rows.map((r) => r.id)) : undefined;
     // Bulk Apply/Dismiss of the suggestions these filters are about.
-    const act = triageOn && can(ctx.membership, 'tickets.act');
+    const act = triageOn && can(ctx.membership, 'triage.review.edit');
     const matcher = actionMatcher({ triage: triageSpec?.value, conf: confSpec?.value }, triageSettings.config);
     const matches = (s: SubmissionRow) => {
       const t = triage?.get(s.id);
@@ -479,7 +429,7 @@ export function registerTicketRoutes(app: FastifyInstance, web: Web): void {
             : empty('inbox', 'No tickets here', 'Nothing matches this filter.');
 
     const body = html`
-      ${await ticketsHeader(web, ctx, 'inbox')}
+      ${await toolHeader(web, ctx, 'tickets', 'inbox')}
       <div class="card">
         <div class="toolbar">
           ${segLinks('Filter by status', FILTERS.map((f) => ({ href: link({ status: f.key, page: undefined }), label: f.label, count: n[f.key], current: f.key === filter.key })))}
@@ -505,13 +455,13 @@ export function registerTicketRoutes(app: FastifyInstance, web: Web): void {
         ${pages > 1 ? html`<div class="pager"><span>Page ${String(page)} of ${String(pages)} · ${plural(total, 'ticket')}</span><div class="row">
           ${page > 1 ? linkBtn(link({ page: page - 1 }), 'Previous', { size: 'sm', icon: 'chevron-left' }) : ''}${page < pages ? linkBtn(link({ page: page + 1 }), 'Next', { size: 'sm', trail: 'chevron-right' }) : ''}</div></div>` : ''}
       </div>`;
-    return web.render(reply, ctx, 'Tickets', 'tickets', body, { width: 'full' });
+    return web.render(reply, ctx, 'Discord tickets', 'tickets', body, { width: 'full' });
   });
 
   // ---- Ticket detail ----------------------------------------------------------------------------
 
   app.get('/w/:wid/tickets/:id', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply, { permission: 'tickets.view' });
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'inbox.view' });
     if (!ctx) return reply;
     const s = await getSubmission(deps.db, ctx.workspace.id, (req.params as { id: string }).id);
     if (!s) return reply.callNotFound();
@@ -522,7 +472,7 @@ export function registerTicketRoutes(app: FastifyInstance, web: Web): void {
     const names = await userNames(deps.db, [s.resolved_by, ...events.map((e) => (typeof e.detail.by === 'string' ? e.detail.by : null)), ...files.flatMap((f) => [f.added_by, f.deleted_by])]);
     const payload = decryptPayload(deps.box, s);
     const live: LiveIssue | null = s.status === 'created' && s.issue_number ? await loadLiveIssue(deps, s) : null;
-    const act = can(ctx.membership, 'tickets.act');
+    const act = can(ctx.membership, 'inbox.edit');
     const actionBase = `${b}/tickets/${s.id}`;
     const repo = `${s.repo_owner}/${s.repo_name}`;
     const repoUrl = `https://github.com/${repo}`;
@@ -577,14 +527,14 @@ export function registerTicketRoutes(app: FastifyInstance, web: Web): void {
     const typeName = s.ticket_type_name;
     const body = html`
       ${pageHeader({
-        crumbs: [{ href: `${b}/tickets`, label: 'Tickets' }, { label: html`<span class="mono">${s.ref}</span>` }],
+        crumbs: [{ href: `${b}/tickets`, label: 'Discord tickets' }, { label: html`<span class="mono">${s.ref}</span>` }],
         title,
-        after: [statusPill(s.status), s.source === 'admin_test' ? tag('Test') : '', !act ? viewOnlyTag(VIEW_ONLY_TICKETS) : ''],
+        after: [statusPill(s.status), s.source === 'admin_test' ? tag('Test') : '', !act ? viewOnlyTag(viewOnlyText('inbox')) : ''],
         description: `${appLine(s)} · Submitted ${timeAgo(s.created_at)} by ${s.reporter_display_name}`,
         actions,
       })}
       ${statusNotice}
-      ${unresolved && !act ? html`<div class="viewonly">${icon('eye', 16)}View only. Check, retry, link and close need the Act on tickets permission. Ask an admin or the owner.</div>` : ''}
+      ${unresolved && !act ? html`<div class="viewonly">${icon('eye', 16)}View only. Check, retry, link and close need Edit on the Inbox. Ask an admin or the owner.</div>` : ''}
 
       <div class="detail-grid">
         <div class="a-desc a-col"><div class="card"><div class="card-h"><h2>Description</h2>${live && s.issue_url ? html`<a class="small inline gap-4 nowrap" href="${s.issue_url}" target="_blank" rel="noopener noreferrer">Edit on GitHub${icon('arrow-up-right', 14)}</a>` : ''}</div>
@@ -628,7 +578,7 @@ export function registerTicketRoutes(app: FastifyInstance, web: Web): void {
             <dt>Member</dt><dd class="small">${s.member_notice ? s.member_notice : s.source === 'admin_test' ? html`<span class="muted">Not notified (test)</span>` : html`<span class="muted">Not notified yet</span>`}</dd>
           </dl>
         </aside>
-        ${triageRow ? triageCard(triageRow, s, { act, csrf: ctx.csrf, actionBase }) : ''}</div>
+        ${triageRow ? triageCard(triageRow, s, { act: can(ctx.membership, 'triage.review.edit'), csrf: ctx.csrf, actionBase }) : ''}</div>
       </div>
 
       ${unresolved && act ? html`
@@ -657,7 +607,7 @@ export function registerTicketRoutes(app: FastifyInstance, web: Web): void {
 
   function action(name: string, run: (wid: string, id: string, userId: string, body: Record<string, string>) => Promise<string>) {
     app.post(`/w/:wid/tickets/:id/${name}`, async (req, reply) => {
-      const ctx = await web.requireWorkspace(req, reply, { permission: 'tickets.act' });
+      const ctx = await web.requireWorkspace(req, reply, { permission: 'inbox.edit' });
       if (!ctx) return reply;
       const id = (req.params as { id: string }).id;
       try {
@@ -700,26 +650,37 @@ export function registerTicketRoutes(app: FastifyInstance, web: Web): void {
   // ---- Settings tab -----------------------------------------------------------------------------
 
   app.get('/w/:wid/tickets/settings', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply);
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'ticket-settings.view' });
     if (!ctx) return reply;
     const ws = ctx.workspace;
+    // Without Edit: the same limits, turned off.
+    const edit = can(ctx.membership, 'ticket-settings.edit');
     const num = (name: string, value: number, min: number, max: number, label: string) =>
       html`<input type="number" id="${name}" name="${name}" value="${String(value)}" min="${String(min)}" max="${String(max)}" required aria-label="${label}">`;
-    const body = html`
-      ${await ticketsHeader(web, ctx, 'settings')}
-      <form method="post" action="${ctx.base}/tickets/settings" class="card" data-dirty>
-        ${csrfField(ctx.csrf)}
-        <div class="card-h"><div><h2>Spam and duplicates</h2><div class="desc">Limits apply to each Discord member.</div></div></div>
+    const head = html`<div class="card-h"><div><h2>Spam and duplicates</h2><div class="desc">Limits apply to each Discord member.</div></div></div>`;
+    const limits = html`
         ${setting('Rate limit', 'How many tickets one member can open in a time window.',
           html`${num('rate_limit_count', ws.rate_limit_count, 1, 100, 'Tickets per member')}<span class="connector">tickets every</span>${num('rate_limit_window_minutes', ws.rate_limit_window_minutes, 1, 1440, 'Time window in minutes')}<span class="connector">min</span>`)}
         ${setting('Duplicate window', 'Identical tickets from the same member inside this window are ignored. 0 turns it off.',
-          html`${num('duplicate_window_minutes', ws.duplicate_window_minutes, 0, 1440, 'Duplicate window in minutes')}<span class="connector">min</span>`)}
-        <div class="card-f"><div class="end">
-          <button type="button" class="btn" data-discard data-dirty-enable>Cancel</button>
-          ${submitBtn('Save changes', { variant: 'primary', loading: 'Saving…', attrs: raw('data-dirty-enable') })}
-        </div></div>
-      </form>`;
-    return web.render(reply, ctx, 'Ticket settings', 'tickets', body);
+          html`${num('duplicate_window_minutes', ws.duplicate_window_minutes, 0, 1440, 'Duplicate window in minutes')}<span class="connector">min</span>`)}`;
+    const body = html`
+      ${await toolHeader(web, ctx, 'tickets', 'ticket-settings')}
+      ${edit
+        ? html`<form method="post" action="${ctx.base}/tickets/settings" class="card" data-dirty>
+            ${csrfField(ctx.csrf)}
+            ${head}
+            ${limits}
+            <div class="card-f"><div class="end">
+              <button type="button" class="btn" data-discard data-dirty-enable>Cancel</button>
+              ${submitBtn('Save changes', { variant: 'primary', loading: 'Saving…', attrs: raw('data-dirty-enable') })}
+            </div></div>
+          </form>`
+        : html`<div class="card">
+            ${head}
+            <fieldset class="plain view-only" disabled>${limits}</fieldset>
+            <div class="card-f">${viewOnlyFooter('these limits')}</div>
+          </div>`}`;
+    return web.render(reply, ctx, 'Settings · Discord tickets', 'tickets', body);
   });
 
   const limitsSchema = z.object({
@@ -729,7 +690,7 @@ export function registerTicketRoutes(app: FastifyInstance, web: Web): void {
   });
 
   app.post('/w/:wid/tickets/settings', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply);
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'ticket-settings.edit' });
     if (!ctx) return reply;
     const parsed = limitsSchema.safeParse(req.body);
     if (!parsed.success) {

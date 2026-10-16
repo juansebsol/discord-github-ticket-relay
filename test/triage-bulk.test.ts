@@ -1,9 +1,9 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { ensureRepos } from '../src/domain/issue-index.js';
 import { acceptSubmission } from '../src/domain/submissions.js';
-import { createInvite, setModeratorPermissions } from '../src/domain/workspaces.js';
+import { createInvite } from '../src/domain/workspaces.js';
 import { parseTriageConfig, saveTriageConfig, setApiKey, setGitHubTriageEnabled, setTriageEnabled } from '../src/triage/settings.js';
-import { form, get, makeAdmin, makeApp, makeWorkspace, resetDb, testDb, type Admin, type ConfiguredWorkspace, type TestEnv } from './helpers.js';
+import { form, get, grant, makeAdmin, makeApp, makeWorkspace, resetDb, testDb, type Admin, type ConfiguredWorkspace, type TestEnv } from './helpers.js';
 
 const KEY = 'sk-ant-test-key-0123456789abcdef';
 
@@ -55,7 +55,7 @@ async function setup() {
   return { sure, unsure, real };
 }
 
-const bulk = (fields: Record<string, string | string[]>, who: Admin = ws.owner) => env.server.inject({ method: 'POST', url: `${w()}/tickets/triage/bulk`, ...form(who, { from: 'inbox', back: `${w()}/tickets`, ...fields }) });
+const bulk = (fields: Record<string, string | string[]>, who: Admin = ws.owner) => env.server.inject({ method: 'POST', url: `${w()}/triage/bulk`, ...form(who, { from: 'inbox', back: `${w()}/tickets`, ...fields }) });
 
 describe('bulk Apply and Dismiss in the inbox', () => {
   it('applies only the filtered suggestions (spam at 80%+), on everything in the list, one at a time', async () => {
@@ -85,7 +85,7 @@ describe('bulk Apply and Dismiss in the inbox', () => {
     const log = (await env.db.query('SELECT result, message, submission_id FROM triage_log WHERE bulk_id = $1 ORDER BY id', [job.id])).rows;
     expect(log.map((l) => l.result)).toEqual(['info', 'ok', 'info']);
     expect(log[2].message).toBe('Bulk apply finished: 1 applied');
-    const activity = await env.server.inject({ method: 'GET', url: `${w()}/tickets/triage/activity?bulk=${job.id}`, ...get(ws.owner) });
+    const activity = await env.server.inject({ method: 'GET', url: `${w()}/triage/activity?bulk=${job.id}`, ...get(ws.owner) });
     expect(activity.body).toContain('Bulk by');
   });
 
@@ -103,14 +103,15 @@ describe('bulk Apply and Dismiss in the inbox', () => {
     const { sure, unsure } = await setup();
     await bulk({ op: 'apply', triage: 'f:spam', ticket: [`sub:${sure.id}`, `sub:${unsure.id}`] });
     const job = (await env.db.query('SELECT * FROM triage_bulk')).rows[0];
-    await env.server.inject({ method: 'POST', url: `${w()}/tickets/triage/bulk/${job.id}/stop`, ...form(ws.owner) });
+    await env.server.inject({ method: 'POST', url: `${w()}/triage/bulk/${job.id}/stop`, ...form(ws.owner) });
     await env.triage.drain();
     expect(issue(sure.issue_number).labels).toEqual([]);
     expect((await env.db.query(`SELECT status FROM triage_bulk_items`)).rows.every((r) => r.status === 'skipped')).toBe(true);
 
     const mod = await makeAdmin(env, 'mia');
     await env.server.inject({ method: 'POST', url: `/invite/${await createInvite(env.db, wid(), ws.owner.user.id, 'moderator')}`, ...form(mod) });
-    await setModeratorPermissions(env.db, wid(), mod.user.id, { canActTickets: false, canViewContributors: false });
+    // Edit on the Inbox isn't enough: applying suggestions needs Edit on Review.
+    await grant(env, wid(), mod.user.id, { inbox: 'edit', 'triage.review': 'view' });
     expect((await bulk({ op: 'apply', triage: 'f:spam', ticket: [`sub:${sure.id}`] }, mod)).statusCode).toBe(403);
     const modInbox = await env.server.inject({ method: 'GET', url: `${w()}/tickets?status=all`, ...get(mod) });
     expect(modInbox.body).not.toContain('form="bulk-triage"');
@@ -135,9 +136,9 @@ describe('bulk Apply in Issues › Triage', () => {
     env.anthropic.queue.push({ ...env.anthropic.verdict, spam: true, spam_confidence: 85 });
     await env.triage.drain();
 
-    const page = await env.server.inject({ method: 'GET', url: `${w()}/tickets/issues/triage?f=f:spam`, ...get(ws.owner) });
+    const page = await env.server.inject({ method: 'GET', url: `${w()}/issues/github?f=f:spam`, ...get(ws.owner) });
     expect(page.body).toContain(`value="gh:${ws.repoIds[0]}:700" form="bulk-triage"`);
-    await env.server.inject({ method: 'POST', url: `${w()}/tickets/triage/bulk`, ...form(ws.owner, { from: 'issues', back: `${w()}/tickets/issues/triage`, op: 'apply', all: '1', show: 'review', f: 'f:spam' }) });
+    await env.server.inject({ method: 'POST', url: `${w()}/triage/bulk`, ...form(ws.owner, { from: 'issues', back: `${w()}/issues/github`, op: 'apply', all: '1', show: 'review', f: 'f:spam' }) });
     await env.triage.drain();
     expect(issue(700).labels).toEqual(['spam']);
     const r = (await env.db.query('SELECT suggestions FROM issue_triage WHERE number = 700')).rows[0];

@@ -130,25 +130,25 @@ describe('activity log', () => {
     expect(entries.slice(1).map((e) => [e.source, e.result, e.by_user])).toEqual([['review', 'failed', ws.owner.user.id], ['review', 'ok', ws.owner.user.id]]);
     expect(entries[1].message).toContain('Bad gateway');
 
-    const page = await env.server.inject({ method: 'GET', url: `${w()}/tickets/triage/activity`, ...get(ws.owner) });
+    const page = await env.server.inject({ method: 'GET', url: `${w()}/triage/activity`, ...get(ws.owner) });
     expect(page.statusCode).toBe(200);
     expect(page.body).toContain('Right now');
     expect(page.body).toContain('Applied on GitHub:');
     expect(page.body).toContain('Bad gateway');
-    const failed = await env.server.inject({ method: 'GET', url: `${w()}/tickets/triage/activity?result=failed`, ...get(ws.owner) });
+    const failed = await env.server.inject({ method: 'GET', url: `${w()}/triage/activity?result=failed`, ...get(ws.owner) });
     expect(failed.body).toContain('Bad gateway');
     expect(failed.body).not.toContain('Applied on GitHub:');
-    const partial = await env.server.inject({ method: 'GET', url: `${w()}/tickets/triage/activity?partial=1`, ...get(ws.owner) });
+    const partial = await env.server.inject({ method: 'GET', url: `${w()}/triage/activity?partial=1`, ...get(ws.owner) });
     expect(partial.headers['x-live-partial']).toBe('1');
   });
 
   it('logs a re-run from start to applied, with its own filter', async () => {
     const t = await file('Login fails');
     await enable({ priority: { mode: 'suggest' } });
-    const start = await env.server.inject({ method: 'POST', url: `${w()}/tickets/triage/runs`, ...form(ws.owner, { never: '1', untouched: '1', count: 'all', mode: 'preview', name: 'Try' }) });
+    const start = await env.server.inject({ method: 'POST', url: `${w()}/triage/runs`, ...form(ws.owner, { never: '1', untouched: '1', count: 'all', mode: 'preview', name: 'Try' }) });
     const runId = String(start.headers.location).split('/').pop()!;
     await env.triage.drain();
-    await env.server.inject({ method: 'POST', url: `${w()}/tickets/triage/runs/${runId}/apply`, ...form(ws.owner, { scope: 'filter', show: 'all', include: 'inbox' }) });
+    await env.server.inject({ method: 'POST', url: `${w()}/triage/runs/${runId}/apply`, ...form(ws.owner, { scope: 'filter', show: 'all', include: 'inbox' }) });
     await env.triage.drain();
     const entries = (await log()).filter((e) => e.run_id === runId);
     expect(entries.map((e) => [e.source, e.result])).toEqual([['preview', 'info'], ['preview', 'ok'], ['rerun', 'info'], ['rerun', 'ok']]);
@@ -157,10 +157,10 @@ describe('activity log', () => {
     expect(entries[3]).toMatchObject({ submission_id: t.id });
     expect(entries[3].detail.inbox).toBe(true);
 
-    const page = await env.server.inject({ method: 'GET', url: `${w()}/tickets/triage/activity?run=${runId}`, ...get(ws.owner) });
+    const page = await env.server.inject({ method: 'GET', url: `${w()}/triage/activity?run=${runId}`, ...get(ws.owner) });
     expect(page.body).toContain('Showing <a');
     expect(page.body).toContain('Added to the inbox as suggestions:');
-    const run = await env.server.inject({ method: 'GET', url: `${w()}/tickets/triage/runs/${runId}`, ...get(ws.owner) });
-    expect(run.body).toContain(`/tickets/triage/activity?run=${runId}`);
+    const run = await env.server.inject({ method: 'GET', url: `${w()}/triage/runs/${runId}`, ...get(ws.owner) });
+    expect(run.body).toContain(`/triage/activity?run=${runId}`);
   });
 });

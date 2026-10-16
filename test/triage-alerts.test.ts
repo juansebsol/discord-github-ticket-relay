@@ -1,8 +1,8 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { acceptSubmission } from '../src/domain/submissions.js';
-import { createInvite, setModeratorTriageAccess } from '../src/domain/workspaces.js';
+import { createInvite } from '../src/domain/workspaces.js';
 import { getTriageSettings, parseTriageConfig, saveTriageConfig, setApiKey, setTriageEnabled } from '../src/triage/settings.js';
-import { form, get, makeAdmin, makeApp, makeWorkspace, resetDb, testDb, type Admin, type ConfiguredWorkspace, type TestEnv } from './helpers.js';
+import { form, get, grant, makeAdmin, makeApp, makeWorkspace, resetDb, testDb, type Admin, type ConfiguredWorkspace, type TestEnv } from './helpers.js';
 
 const KEY = 'sk-ant-test-key-0123456789abcdef';
 /** What Anthropic answers when the account is empty: a 400, not a 402. */
@@ -68,11 +68,11 @@ describe('when Claude stops', () => {
     expect(res.body).toContain('The Anthropic account is out of credits. Tickets are still filed as usual; nothing is triaged until it’s fixed.');
     expect(res.body).toContain('Waiting: 1 Discord ticket');
     expect(res.body).toContain('Checks again every 5 minutes and carries on by itself');
-    expect(res.body).toContain(`action="${w()}/tickets/triage/resume"`);
+    expect(res.body).toContain(`action="${w()}/triage/resume"`);
     expect(res.body).toContain('href="https://console.anthropic.com/settings/billing"');
     // The Triage page has its own notice, which the corner panel leaves out there.
     expect(res.body).toContain('data-inline="triage-paused"');
-    expect((await env.server.inject({ method: 'GET', url: `${w()}/tickets/triage`, ...get(ws.owner) })).body).toContain('id="triage-paused"');
+    expect((await env.server.inject({ method: 'GET', url: `${w()}/triage/actions`, ...get(ws.owner) })).body).toContain('id="triage-paused"');
   });
 
   it('checks again every 5 minutes and carries on by itself once credits are added', async () => {
@@ -104,7 +104,7 @@ describe('when Claude stops', () => {
 
   it('Try again asks Claude first and says what it found', async () => {
     await runOutOfCredits();
-    const tryAgain = () => env.server.inject({ method: 'POST', url: `${w()}/tickets/triage/resume`, headers: { ...form(ws.owner).headers, accept: 'application/json' }, payload: new URLSearchParams({ _csrf: ws.owner.csrf }).toString() });
+    const tryAgain = () => env.server.inject({ method: 'POST', url: `${w()}/triage/resume`, headers: { ...form(ws.owner).headers, accept: 'application/json' }, payload: new URLSearchParams({ _csrf: ws.owner.csrf }).toString() });
     env.anthropic.queue.push(NO_CREDITS);
     expect((await tryAgain()).json()).toEqual({ ok: false, error: 'Still paused: The Anthropic account is out of credits.' });
     expect(await paused()).not.toBeNull();
@@ -126,13 +126,13 @@ describe('when Claude stops', () => {
     const mod = await makeAdmin(env, 'mia');
     await env.server.inject({ method: 'POST', url: `/invite/${await createInvite(env.db, wid(), ws.owner.user.id, 'moderator')}`, ...form(mod) });
     expect((await alerts(mod)).body).toBe('');
-    await setModeratorTriageAccess(env.db, wid(), mod.user.id, { activity: 'view' });
+    await grant(env, wid(), mod.user.id, { 'triage.activity': 'view' });
     const body = (await alerts(mod)).body;
     expect(body).toContain('AI triage is paused');
     expect(body).toContain('An admin needs to add credits.');
-    expect(body).not.toContain('/tickets/triage/resume');
+    expect(body).not.toContain('/triage/resume');
     expect(body).not.toContain('console.anthropic.com');
-    expect(body).toContain(`href="${w()}/tickets/triage/activity"`);
+    expect(body).toContain(`href="${w()}/triage/activity"`);
   });
 
   it('also when this month’s limit is reached, or the triage worker stops', async () => {
@@ -145,7 +145,7 @@ describe('when Claude stops', () => {
     const limit = (await alerts()).body;
     expect(limit).toContain('AI triage stopped for this month');
     expect(limit).toContain('It reached this month’s limit of 1 tickets');
-    expect(limit).toContain(`href="${w()}/tickets/triage#limits"`);
+    expect(limit).toContain(`href="${w()}/triage/actions#limits"`);
 
     await env.db.query(`INSERT INTO process_status (id, role, pid, rss_bytes, heap_bytes, started_at, seen_at) VALUES ('t1', 'triage', 1, 1, 1, now_ms() - 3600000, now_ms() - 300000)`);
     const down = (await alerts()).body;
@@ -160,13 +160,13 @@ describe('when Claude stops', () => {
     await setTriageEnabled(env.db, wid(), true);
     await file();
     await env.triage.drain();
-    const start = await env.server.inject({ method: 'POST', url: `${w()}/tickets/triage/runs`, ...form(ws.owner, { never: '1', untouched: '1', mode: 'preview' }) });
+    const start = await env.server.inject({ method: 'POST', url: `${w()}/triage/runs`, ...form(ws.owner, { never: '1', untouched: '1', mode: 'preview' }) });
     expect(start.statusCode).toBe(302);
     env.anthropic.queue.push(NO_CREDITS);
     await env.triage.drain();
     expect((await paused())?.reason).toBe('credits');
     const run = (await env.db.query('SELECT id FROM triage_runs')).rows[0];
-    const page = await env.server.inject({ method: 'GET', url: `${w()}/tickets/triage/runs/${run.id}`, ...get(ws.owner) });
+    const page = await env.server.inject({ method: 'GET', url: `${w()}/triage/runs/${run.id}`, ...get(ws.owner) });
     expect(page.body).toContain('Paused: the Anthropic account is out of credits. It carries on by itself once credits are added');
     expect((await alerts()).body).toContain('the re-run “Preview” (');
   });

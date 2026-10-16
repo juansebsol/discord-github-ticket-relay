@@ -18,32 +18,32 @@ and filed by a GitHub App. Reporters never need a GitHub account.
 
 ## Features
 
-**Tickets**
+**Discord tickets**
 
 - **Discord-native:** members open tickets from a panel in your server and get a private confirmation with the issue link. No GitHub account needed.
 - **Ticket types and forms:** members pick a type (e.g. Bug report, Feature request); each adds its GitHub label and a `[Bug]` title prefix. Each type has its own Discord form with short-answer, paragraph and file-upload questions; answers appear as headings in the issue.
 - **Screenshots:** members attach PNG or JPG images (up to 10 MB per ticket). They're stored on your server with location data removed and embedded in the issue.
 - **Inbox:** every ticket with its status, triage and GitHub link; retry, link an existing issue or close, with search and filters.
 - **Spam and duplicates:** a per-member rate limit and duplicate window; a ticket is never filed twice, even when GitHub's reply is unclear.
+- **Files:** see what's stored, clean up files of closed or spam tickets by rule (or automatically once a day), and set a storage limit.
 
-**Utilities**
+**Tools**
 
-- **Issues:** search every issue, open and closed, across your connected repositories. Kept up to date every 2 minutes, no webhooks needed.
+- **GitHub issues:** search every issue, open and closed, across your connected repositories, including the ones opened directly on GitHub. Kept up to date every 2 minutes, no webhooks needed.
 - **AI triage (optional):** Claude flags priority, duplicates, regressions, spam and more, and sorts tickets with your own label groups. Each action can be off, a suggestion, or automatic above a confidence threshold, with separate settings for issues opened directly on GitHub.
-  - Every ticket shows its triage state (To review, Partly applied, Applied…), and suggestions say exactly what applying them does.
+  - AI triage › Review lists everything with suggestions waiting, from Discord tickets and GitHub issues. Every ticket shows its triage state (To review, Partly applied, Applied…), and suggestions say exactly what applying them does.
   - Apply or dismiss in bulk, e.g. all duplicates at 80%+ confidence.
   - Re-run triage on older tickets and compare settings before applying anything.
-  - Triage › Activity shows what it's doing live, with a log kept 90 days.
+  - AI triage › Activity shows what it's doing live, with a log kept 90 days.
   - It runs in its own worker with a monthly limit and keeps GitHub API headroom for filing, so filing never depends on it.
   - If Claude stops (out of credits, a rejected key, the monthly limit), every page shows an alert until it's fixed. Out of credits, it checks again every 5 minutes and carries on by itself.
-- **Files:** see what's stored, clean up files of closed or spam tickets by rule (or automatically once a day), and set a storage limit.
-- **Contributor Roles:** a second panel where members sign in with GitHub and get a role based on their merged PRs or commits across all your apps, e.g. Junior Contributor at 1, Contributor at 10.
+- **Contributor roles:** a second panel where members sign in with GitHub and get a role based on their merged PRs or commits across all your apps, e.g. Junior Contributor at 1, Contributor at 10.
 - **Server health:** processes, memory, disk, queues, GitHub API usage and alerts, with a Dev mode so restarts while you deploy aren't counted as crashes.
 
 **Team**
 
 - **Roles:** owners, admins and moderators; several workspaces on one install.
-- **Moderators:** view-only by default. Admins turn on acting on tickets, verifications, issue search, file cleanup and server health per person, and give no access, view or edit on Apps & repositories and on each Triage page.
+- **Moderators:** start with the tickets inbox and contributor verifications, view only. Admins give each one no access, view or edit on every page of every tool (tickets, issues, AI triage, contributor roles, Apps & repositories, server health), a whole tool at once or page by page.
 
 **Reliable and secure**
 
@@ -52,7 +52,7 @@ and filed by a GitHub App. Reporters never need a GitHub account.
 
 ## Screenshots
 
-**Overview:** tickets needing attention, utility stats and the latest tickets.
+**Overview:** tickets needing attention, stats for each tool and the latest tickets.
 
 ![Admin console overview](docs/images/admin-overview.png)
 

@@ -54,7 +54,7 @@ export async function claudeCard(web: Web, ctx: WorkspaceRequestContext): Promis
   const wid = ctx.workspace.id;
   const [status, key, triage] = await Promise.all([keyStatus(web, wid), getClaudeKey(web.deps.db, wid), getTriageSettings(web.deps.db, wid)]);
   const usedBy = setting('Used by', 'Features in this workspace that call Claude with this key.',
-    html`<div class="tags">${linkBtn(`${b}/tickets/triage`, html`AI triage · ${triage.enabled ? 'On' : 'Off'}`, { size: 'sm', variant: 'ghost', trail: 'arrow-right' })}</div>`);
+    html`<div class="tags">${linkBtn(`${b}/triage/actions`, html`AI triage · ${triage.enabled || triage.githubEnabled ? 'On' : 'Off'}`, { size: 'sm', variant: 'ghost', trail: 'arrow-right' })}</div>`);
   const body = key
     ? html`${setting('API key', html`Added${key.addedBy ? ` by ${key.addedBy}` : ''}${key.addedAt ? ` ${timeAgo(key.addedAt)}` : ''}.${status.checkedAt ? ` Checked ${timeAgo(status.checkedAt)}${status.detail ? `: ${status.detail}` : ''}.` : ''}`, html`<code>${key.hint}</code>`)}
         ${usedBy}

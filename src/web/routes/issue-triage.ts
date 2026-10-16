@@ -1,7 +1,7 @@
 /**
- * Issues › Triage: issues opened directly on GitHub that triage looked at, and a page per issue
- * with the same Triage card as tickets (What Apply does, Apply, Dismiss). The issue text is
- * shown live from GitHub; only its triage result is stored here.
+ * GitHub issues › Opened on GitHub: issues opened directly on GitHub that triage looked at, and
+ * a page per issue with the same Triage card as tickets (What Apply does, Apply, Dismiss). The
+ * issue text is shown live from GitHub; only its triage result is stored here.
  */
 import type { FastifyInstance } from 'fastify';
 import { can } from '../../domain/permissions.js';
@@ -13,11 +13,12 @@ import { html, raw, type SafeHtml } from '../../lib/html.js';
 import type { IssueTriageRow, Subject } from '../../triage/engine.js';
 import { getTriageSettings, parseTriageConfig, type TriageConfig } from '../../triage/settings.js';
 import { actionMatcher, CONFIDENCE_STEPS, confidenceFilter, TRIAGE_STATES, triageFilter, triageFilterGroups } from '../../triage/state.js';
-import { bulkBanner, bulkBar } from './triage-bulk.js';
+import { bulkBanner, bulkBar, workspacePath } from './triage-bulk.js';
 import { setFlash } from '../session.js';
-import type { Web, WorkspaceRequestContext } from '../server.js';
+import type { Web } from '../server.js';
 import { avatar, empty, formatDate, icon, labelTag, linkBtn, notice, pageHeader, pill, segLinks, selectWrap, tag, timeAgo, when } from '../ui.js';
-import { ticketsHeader, triageCard, triageCell } from './tickets.js';
+import { triageCard, triageCell } from './tickets.js';
+import { areaHref, canOpen, IN_WORKSPACE_REPOS, pageLink, toolHeader, toolHref } from './tool.js';
 
 const PAGE = 50;
 const LIVE_TIMEOUT_MS = 5000;
@@ -84,7 +85,10 @@ export function issueTable(rows: IssueTableRow[], o: { select?: boolean } = {}):
 
 type IssueQuery = { show?: string; f?: string; conf?: string };
 
-/** The Triage list's filters as SQL on issue_triage t (the first parameter is the workspace). */
+/**
+ * The Triage list's filters as SQL on issue_triage t (the first parameter is the workspace). Only
+ * issues in repositories the workspace still has an app for: the others can't be opened or acted on.
+ */
 function issueFilters(wid: string, q: IssueQuery, config: TriageConfig) {
   const show = SHOWS.find((x) => x.key === q.show) ?? SHOWS[0]!;
   // More filters: priority, what triage flagged, labels (status is the tabs).
@@ -95,7 +99,7 @@ function issueFilters(wid: string, q: IssueQuery, config: TriageConfig) {
     params.push(v);
     return `$${params.length}`;
   };
-  const where = `t.workspace_id = $1 AND ${show.where}${extra ? ` AND ${extra.where(bind)}` : ''}${confSpec ? ` AND ${confSpec.where(bind)}` : ''}`;
+  const where = `t.workspace_id = $1 AND ${IN_WORKSPACE_REPOS} AND ${show.where}${extra ? ` AND ${extra.where(bind)}` : ''}${confSpec ? ` AND ${confSpec.where(bind)}` : ''}`;
   return { show, extra, confSpec, where, params, bind };
 }
 
@@ -105,24 +109,6 @@ export async function issueTriageSubjects(web: Web, wid: string, q: IssueQuery, 
   const f = issueFilters(wid, q, settings.config);
   const { rows } = await web.deps.db.query<{ repo_id: number; number: number }>(`SELECT t.repo_id, t.number FROM issue_triage t WHERE ${f.where} LIMIT ${f.bind(limit)}`, f.params);
   return rows.map((r) => ({ kind: 'issue', repoId: r.repo_id, number: r.number }));
-}
-
-/** "All issues" and "Triage" inside the Issues tab. */
-export function issuesNav(ctx: WorkspaceRequestContext, current: 'all' | 'triage', toReview?: number): SafeHtml {
-  return html`<div class="subnav">${segLinks('Issues', [
-    { href: `${ctx.base}/tickets/issues/triage`, label: 'Opened on GitHub · Triage', count: toReview || undefined, current: current === 'triage' },
-    { href: `${ctx.base}/tickets/issues`, label: 'All issues', current: current === 'all' },
-  ])}</div>`;
-}
-
-/** How many issues opened on GitHub wait for review (the Triage count), or null when this was never used. */
-export async function issueTriageCount(web: Web, workspaceId: string): Promise<number | null> {
-  const { rows } = await web.deps.db.query<{ n: number; total: number }>(
-    `SELECT sum(status = 'done' AND suggestion_count > 0) AS n, count(*) AS total FROM issue_triage WHERE workspace_id = $1`,
-    [workspaceId],
-  );
-  const settings = await getTriageSettings(web.deps.db, workspaceId);
-  return rows[0]?.total || settings.githubEnabled ? Number(rows[0]?.n ?? 0) : null;
 }
 
 function eventText(e: { kind: string; detail: Record<string, unknown> }, names: Map<string, string>): { by: string | null; text: SafeHtml } {
@@ -153,8 +139,8 @@ export function registerIssueTriageRoutes(app: FastifyInstance, web: Web): void 
     return a.length ? { owner: a[0]!.repo_owner, name: a[0]!.repo_name, apps: a.map((x) => x.name) } : null;
   }
 
-  app.get('/w/:wid/tickets/issues/triage', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply, { permission: 'issues.view' });
+  app.get('/w/:wid/issues/github', async (req, reply) => {
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'issues-github.view' });
     if (!ctx) return reply;
     const wid = ctx.workspace.id;
     const b = ctx.base;
@@ -163,7 +149,7 @@ export function registerIssueTriageRoutes(app: FastifyInstance, web: Web): void 
     const settings = await getTriageSettings(deps.db, wid);
     const { show, extra, confSpec, where, params, bind } = issueFilters(wid, q, settings.config);
     const { rows: counts } = await deps.db.query<Record<string, number>>(
-      `SELECT ${SHOWS.map((x) => `sum(${x.where.replace(/\bt\./g, '')}) AS "${x.key}"`).join(', ')} FROM issue_triage WHERE workspace_id = $1`,
+      `SELECT ${SHOWS.map((x) => `sum(${x.where}) AS "${x.key}"`).join(', ')} FROM issue_triage t WHERE t.workspace_id = $1 AND ${IN_WORKSPACE_REPOS}`,
       [wid],
     );
     const count = (k: Show) => Number(counts[0]?.[k] ?? 0);
@@ -177,8 +163,8 @@ export function registerIssueTriageRoutes(app: FastifyInstance, web: Web): void 
        WHERE ${where} ORDER BY COALESCE(x.created_at, t.created_at) DESC LIMIT ${bind(PAGE + 1)} OFFSET ${bind((page - 1) * PAGE)}`,
       params,
     )]);
-    // Bulk Apply/Dismiss: people who can act pick issues with a matching suggestion.
-    const act = can(ctx.membership, 'tickets.act');
+    // Bulk Apply/Dismiss: people with Edit on Review pick issues with a matching suggestion.
+    const act = can(ctx.membership, 'triage.review.edit');
     const matcher = actionMatcher({ triage: extra?.value, conf: confSpec?.value }, settings.config);
     const matches = (r: Row) => r.status === 'done' && (r.suggestions ?? []).some(matcher.test);
     const shownRows = rows.slice(0, PAGE);
@@ -192,7 +178,7 @@ export function registerIssueTriageRoutes(app: FastifyInstance, web: Web): void 
       if (confSpec) p.set('conf', confSpec.value);
       if (o.page && o.page > 1) p.set('page', String(o.page));
       const qs = p.toString();
-      return `${b}/tickets/issues/triage${qs ? `?${qs}` : ''}`;
+      return `${areaHref(ctx, 'issues-github')}${qs ? `?${qs}` : ''}`;
     };
     const apps = await listApps(deps.db, wid);
     const appsOf = (repoId: number) => apps.filter((a) => a.repo_id === repoId).map((a) => a.name).join(', ') || null;
@@ -208,7 +194,7 @@ export function registerIssueTriageRoutes(app: FastifyInstance, web: Web): void 
       author: r.author,
       authorAvatar: r.author_avatar,
       updatedAt: r.issue_updated_at ?? r.updated_at,
-      href: `${b}/tickets/issues/${String(r.repo_id)}/${String(r.number)}`,
+      href: `${b}/issues/${String(r.repo_id)}/${String(r.number)}`,
       external: false,
       triage: triageCell(r),
       extra: r.status === 'skipped' || r.status === 'failed' ? html`<div class="sub">${r.status === 'skipped' ? r.skip_reason : r.error}</div>` : '',
@@ -216,19 +202,18 @@ export function registerIssueTriageRoutes(app: FastifyInstance, web: Web): void 
     })), { select: anySelectable });
 
     const body = html`
-      ${await ticketsHeader(web, ctx, 'issues')}
-      ${issuesNav(ctx, 'triage', count('review'))}
+      ${await toolHeader(web, ctx, 'issues', 'issues-github')}
       <div class="stack">
-        ${!settings.githubEnabled ? notice('info', 'Triage of issues opened on GitHub is off', can(ctx.membership, 'triage.actions.edit') ? html`Turn it on in <a href="${b}/tickets/triage">Triage › Actions</a>${can(ctx.membership, 'triage.runs.edit') ? html`, or use <a href="${b}/tickets/triage/runs">Re-run</a> for issues already open` : ''}.` : 'An admin can turn it on in Triage › Actions.') : ''}
+        ${!settings.githubEnabled ? notice('info', 'Triage of issues opened on GitHub is off', can(ctx.membership, 'triage.actions.edit') ? html`Turn it on in ${pageLink(ctx, 'triage.actions', 'AI triage › Actions')}${can(ctx.membership, 'triage.runs.edit') ? html`, or use ${pageLink(ctx, 'triage.runs', 'Re-run')} for issues already open` : ''}.` : 'An admin can turn it on in AI triage › Actions.') : ''}
         <div class="card">
           <div class="card-h"><div><h2>Issues opened on GitHub</h2><div class="desc">Issues people opened directly on GitHub (not through Discord) that triage looked at. Open one to see what triage suggests and what applying it does.</div></div></div>
           <div class="toolbar">${segLinks('Show', SHOWS.map((x) => ({ href: link({ show: x.key, page: 1 }), label: x.label, count: count(x.key), current: x.key === show.key })))}
-            <form method="get" action="${b}/tickets/issues/triage" class="tools">${show.key !== 'review' ? html`<input type="hidden" name="show" value="${show.key}">` : ''}
+            <form method="get" action="${areaHref(ctx, 'issues-github')}" class="tools">${show.key !== 'review' ? html`<input type="hidden" name="show" value="${show.key}">` : ''}
               ${selectWrap(html`<select name="f" aria-label="More filters" data-autosubmit><option value="">All priorities and flags</option>${triageFilterGroups(settings.config).filter((g) => g.label !== 'Triage status').map((g) => html`<optgroup label="${g.label}">${g.options.map((o) => html`<option value="${o.value}" ${o.value === extra?.value ? raw('selected') : ''}>${o.label}</option>`)}</optgroup>`)}</select>`, { sm: true })}
               ${selectWrap(html`<select name="conf" aria-label="Filter by triage confidence" data-autosubmit><option value="">Any confidence</option>${CONFIDENCE_STEPS.map((c) => html`<option value="${String(c)}" ${String(c) === confSpec?.value ? raw('selected') : ''}>Confidence ${String(c)}%+</option>`)}</select>`, { sm: true })}
               <button type="submit" class="btn sm nojs">Show</button></form></div>
           ${act ? await bulkBanner(web, ctx) : ''}
-          ${anySelectable ? bulkBar(ctx, { matcher, selectable: shownRows.length, matching: Number(total[0]?.n ?? 0), from: 'issues', hidden: { show: show.key, f: extra?.value, conf: confSpec?.value }, back: link({ page }) }) : ''}
+          ${anySelectable ? bulkBar(ctx, { matcher, selectable: shownRows.length, matching: Number(total[0]?.n ?? 0), from: 'issues', noun: 'issues', hidden: { show: show.key, f: extra?.value, conf: confSpec?.value }, back: link({ page }) }) : ''}
           <div class="card-b flush">${shownRows.length
             ? table
             : empty('inbox', show.key === 'review' ? 'Nothing to review' : 'No issues here', show.key === 'review' ? 'Triage suggestions for issues opened on GitHub show up here.' : 'Nothing matches this filter.')}</div>
@@ -236,11 +221,11 @@ export function registerIssueTriageRoutes(app: FastifyInstance, web: Web): void 
             ${page > 1 ? linkBtn(link({ page: page - 1 }), 'Previous', { size: 'sm', icon: 'chevron-left' }) : ''}${hasMore ? linkBtn(link({ page: page + 1 }), 'Next', { size: 'sm', trail: 'chevron-right' }) : ''}</div></div>` : ''}
         </div>
       </div>`;
-    return web.render(reply, ctx, 'Triage · Issues', 'tickets', body, { width: 'full' });
+    return web.render(reply, ctx, 'Opened on GitHub · GitHub issues', 'issues', body, { width: 'full' });
   });
 
-  app.get('/w/:wid/tickets/issues/:repoId/:number', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply, { permission: 'issues.view' });
+  app.get('/w/:wid/issues/:repoId/:number', async (req, reply) => {
+    const ctx = await web.requireWorkspace(req, reply, { permission: ['issues.view', 'issues-github.view'] });
     if (!ctx) return reply;
     const wid = ctx.workspace.id;
     const p = req.params as { repoId: string; number: string };
@@ -278,12 +263,12 @@ export function registerIssueTriageRoutes(app: FastifyInstance, web: Web): void 
     const url = `https://github.com/${repo.owner}/${repo.name}/issues/${number}`;
     const issue = live.kind === 'ok' ? live.issue : null;
     const text = issue ? issue.body.replace(/<!--[\s\S]*?-->/g, '').trim().slice(0, 20_000) : '';
-    const actionBase = `${b}/tickets/issues/${repoId}/${number}`;
+    const actionBase = `${b}/issues/${repoId}/${number}`;
 
     const body = html`
       ${pageHeader({
         title: issue?.title ?? `Issue #${number}`,
-        crumbs: [{ href: `${b}/tickets/issues`, label: 'Issues' }, { href: `${b}/tickets/issues/triage`, label: 'Triage' }, { label: `#${number}` }],
+        crumbs: [{ href: toolHref(ctx, 'issues') ?? undefined, label: 'GitHub issues' }, ...(canOpen(ctx.membership, 'issues-github') ? [{ href: areaHref(ctx, 'issues-github'), label: 'Opened on GitHub' }] : []), { label: `#${number}` }],
         after: [issue ? (issue.state === 'open' ? pill('Open', 'ok') : pill('Closed', 'closed')) : live.kind === 'missing' ? pill('Deleted on GitHub', 'warn') : '', pill('Opened on GitHub', 'neutral')],
         description: `${repo.owner}/${repo.name}${issue?.author ? ` · opened by ${issue.author}` : ''}${issue ? ` ${timeAgo(issue.createdAt)}` : ''}`,
         actions: [linkBtn(url, 'Open on GitHub', { external: true, trail: 'arrow-up-right' })],
@@ -314,20 +299,21 @@ export function registerIssueTriageRoutes(app: FastifyInstance, web: Web): void 
             ${issue?.labels.length ? html`<dt>Labels</dt><dd>${issue.labels.map((l) => labelTag(l))}</dd>` : ''}
             ${issue ? html`<dt>Opened</dt><dd>${when(issue.createdAt)}</dd>` : ''}
           </dl></aside>
-          ${t ? triageCard(t, { repo_owner: repo.owner, repo_name: repo.name }, { act: can(ctx.membership, 'tickets.act'), csrf: ctx.csrf, actionBase }) : html`<div class="card"><div class="card-h"><div class="title">${icon('bot', 16)}<h2>Triage</h2></div></div><div class="card-b tight"><p class="small muted">Not triaged. Issues opened on GitHub are triaged when they’re opened while triage for them is on, or by a re-run.</p></div></div>`}
+          ${t ? triageCard(t, { repo_owner: repo.owner, repo_name: repo.name }, { act: can(ctx.membership, 'triage.review.edit'), csrf: ctx.csrf, actionBase }) : html`<div class="card"><div class="card-h"><div class="title">${icon('bot', 16)}<h2>Triage</h2></div></div><div class="card-b tight"><p class="small muted">Not triaged. Issues opened on GitHub are triaged when they’re opened while triage for them is on, or by a re-run.</p></div></div>`}
         </div>
       </div>`;
-    return web.render(reply, ctx, issue?.title ?? `Issue #${number}`, 'tickets', body);
+    return web.render(reply, ctx, issue?.title ?? `Issue #${number}`, 'issues', body);
   });
 
   for (const verb of ['apply', 'dismiss'] as const) {
-    app.post(`/w/:wid/tickets/issues/:repoId/:number/triage/${verb}`, async (req, reply) => {
-      const ctx = await web.requireWorkspace(req, reply, { permission: 'tickets.act' });
+    app.post(`/w/:wid/issues/:repoId/:number/triage/${verb}`, async (req, reply) => {
+      const ctx = await web.requireWorkspace(req, reply, { permission: 'triage.review.edit' });
       if (!ctx) return reply;
       const p = req.params as { repoId: string; number: string };
       const repoId = Number(p.repoId);
       const number = Number(p.number);
-      const kind = String((req.body as { kind?: string }).kind ?? '');
+      const body = (req.body ?? {}) as { kind?: string; back?: string };
+      const kind = String(body.kind ?? '');
       try {
         if (!(await repoOf(ctx.workspace.id, repoId))) throw new UserFacingError('That issue isn’t in this workspace’s repositories.', 404);
         const action = verb === 'apply'
@@ -338,7 +324,8 @@ export function registerIssueTriageRoutes(app: FastifyInstance, web: Web): void 
         if (!(err instanceof UserFacingError)) throw err;
         setFlash(reply, 'error', err.message);
       }
-      return reply.redirect(`${ctx.base}/tickets/issues/${repoId}/${number}`);
+      // Back where it was pressed (AI triage › Review sends its list), else the issue.
+      return reply.redirect(workspacePath(ctx, body.back) ?? `${ctx.base}/issues/${repoId}/${number}`);
     });
   }
 }

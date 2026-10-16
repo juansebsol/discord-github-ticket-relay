@@ -3,6 +3,7 @@ import { DEFAULT_PANEL_INTRO, DEFAULT_PANEL_TITLE, MORE_APPS_VALUE } from '../..
 import { formFor } from '../../domain/forms.js';
 import { inspectGuild } from '../../domain/discord-checks.js';
 import { checkPanel, panelPayloadFor, publishPanel, unpublishPanel } from '../../domain/panel.js';
+import { can, type MemberAccess } from '../../domain/permissions.js';
 import { getApp, getDiscordConnection, getGitHubConnection, getPanel, listApps, setTicketsChannel } from '../../domain/store.js';
 import { acceptSubmission } from '../../domain/submissions.js';
 import { enabledTicketTypes, getTicketType } from '../../domain/ticket-types.js';
@@ -14,13 +15,14 @@ import { botIdentity, botMessage, discordMd, formPreview, previewCaption, select
 import { setFlash } from '../session.js';
 import type { Web } from '../server.js';
 import { csrfField, icon, linkBtn, pill, selectWrap, setting, submitBtn, timeAgo, type IconName } from '../ui.js';
-import { ticketsHeader } from './tickets.js';
+import { toolHeader } from './tool.js';
+import { viewOnlyFooter } from './triage.js';
 
 const LIMITS = { panel_title: 200, panel_intro: 1500 } as const;
 
 const CHECK_ICONS: Record<Check['status'], [IconName, string]> = { ok: ['circle-check', 'ok'], warning: ['triangle-alert', 'warn'], error: ['circle-x', 'danger'] };
 
-/** Health checklist rows (Tickets › Panel, Contributor Roles › Panel). */
+/** Health checklist rows (Discord tickets › Panel, Contributor roles › Panel). */
 export function checklist(checks: { status: Check['status']; title: string; detail?: string; fix?: { label: string; href: string } }[]): SafeHtml {
   return html`<ul class="checklist">${checks.map((c) => {
     const [name, tone] = CHECK_ICONS[c.status];
@@ -36,6 +38,20 @@ export function textField(o: { id: string; name?: string; label: string; value: 
     ${o.hint ? html`<div class="hint">${o.hint}</div>` : ''}</div>`;
 }
 
+/**
+ * A health check's fix link, when this person can follow it: setup and deployment stay with
+ * admins, apps need Edit on Apps, and choosing the channel needs Edit on the Panel. "Check
+ * again" only reloads the page; links outside the workspace are kept.
+ */
+function fixFor(m: MemberAccess, base: string, fix: { label: string; href: string } | undefined): { label: string; href: string } | undefined {
+  if (!fix || !fix.href.startsWith(`${base}/`)) return fix;
+  const path = fix.href.slice(base.length);
+  if (path === '/tickets/panel') return fix;
+  if (path.startsWith('/tickets/panel')) return can(m, 'panel.edit') ? fix : undefined;
+  if (path === '/apps' || path.startsWith('/apps/')) return can(m, 'apps.edit') ? fix : undefined;
+  return can(m, 'manage') ? fix : undefined;
+}
+
 /** Saved panel text, or null when it matches the built-in default. */
 function cleanText(value: unknown, max: number, fallback: string): string | null {
   const v = String(value ?? '').replace(/\r\n/g, '\n').trim().slice(0, max);
@@ -48,11 +64,14 @@ export function registerPanelRoutes(app: FastifyInstance, web: Web): void {
   app.get('/w/:wid/panel', async (req, reply) => reply.redirect(`/w/${(req.params as { wid: string }).wid}/tickets/panel`));
 
   app.get('/w/:wid/tickets/panel', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply);
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'panel.view' });
     if (!ctx) return reply;
     const wid = ctx.workspace.id;
     const b = ctx.base;
     const ws = ctx.workspace;
+    const m = ctx.membership;
+    // Without Edit the page shows the same settings and preview, with its controls turned off.
+    const edit = can(m, 'panel.edit');
     const [report, apps, panel, conn, types, bot] = await Promise.all([
       validateWorkspace(deps, wid, b),
       listApps(deps.db, wid),
@@ -75,49 +94,54 @@ export function registerPanelRoutes(app: FastifyInstance, web: Web): void {
     const strip =
       state.state === 'published'
         ? state.channelChanged
-          ? html`${pill('Channel changed', 'warn')}<span class="small muted">Still posted in the old channel. Update the panel to move it to #${channelName ?? ''}.</span>`
+          ? html`${pill('Channel changed', 'warn')}<span class="small muted">${edit ? `Still posted in the old channel. Update the panel to move it to #${channelName ?? ''}.` : `Still posted in the old channel, not #${channelName ?? ''} yet.`}</span>`
           : state.outdated
             ? html`${pill('Out of date', 'warn')}<span class="small muted">The apps or text changed since it was posted ${timeAgo(panel!.published_at)}.</span>`
             : html`${pill('Published', 'ok')}<span class="small muted">in #${channelName ?? ''} · updated ${timeAgo(panel!.published_at)}</span>`
         : state.state === 'missing'
-          ? html`${pill('Deleted in Discord', 'warn')}<span class="small muted">Someone deleted the panel message. Publish it again.</span>`
-          : html`${pill('Not published', 'neutral')}<span class="small muted">${report.canPublish ? 'Ready to post.' : 'Fix the health checks below to publish.'}</span>`;
+          ? html`${pill('Deleted in Discord', 'warn')}<span class="small muted">${edit ? 'Someone deleted the panel message. Publish it again.' : 'Someone deleted the panel message.'}</span>`
+          : html`${pill('Not published', 'neutral')}<span class="small muted">${report.canPublish ? 'Ready to post.' : edit ? 'Fix the health checks below to publish.' : 'The health checks below need fixing first.'}</span>`;
     const publishLabel = state.state === 'published' ? (state.channelChanged ? 'Move panel' : 'Update panel') : state.state === 'missing' ? 'Publish again' : 'Publish panel';
 
     const channelControl = !conn
-      ? html`<span class="small muted">Connect Discord first.</span> ${linkBtn(`${b}/setup/discord`, 'Connect', { size: 'sm', trail: 'arrow-right', variant: 'ghost' })}`
+      ? can(m, 'manage')
+        ? html`<span class="small muted">Connect Discord first.</span> ${linkBtn(`${b}/setup/discord`, 'Connect', { size: 'sm', trail: 'arrow-right', variant: 'ghost' })}`
+        : html`<span class="small muted">Discord isn’t connected yet. An admin can connect it.</span>`
       : guild?.ok
         ? selectWrap(html`<select id="channel" name="channel_id" aria-label="Tickets channel">
             ${conn.tickets_channel_id && !guild.channels.some((c) => c.id === conn.tickets_channel_id) ? html`<option value="" selected disabled>#${conn.tickets_channel_name ?? 'deleted channel'} (no longer available)</option>` : ''}
-            ${conn.tickets_channel_id ? '' : html`<option value="" selected disabled>Choose a channel…</option>`}
+            ${conn.tickets_channel_id ? '' : html`<option value="" selected disabled>${edit ? 'Choose a channel…' : 'No channel chosen yet'}</option>`}
             ${guild.channels.map((c) => html`<option value="${c.id}" ${c.id === conn.tickets_channel_id ? raw('selected') : ''} ${c.missing.length ? raw('disabled') : ''}>#${c.name}${c.missing.length ? ` (bot missing: ${c.missing.join(', ')})` : c.category ? ` · ${c.category}` : ''}</option>`)}
           </select>`)
         : html`<span class="small muted">${guild && !guild.ok ? guild.message : 'Discord can’t be reached right now.'}</span>`;
 
     const firstType = types[0];
     const sample = enabledApps[0];
+    // Fix links only for pages this person can use; the rest stay as text.
+    const checks = report.checks.filter((c) => c.area !== 'panel').map((c) => ({ ...c, fix: fixFor(m, b, c.fix) }));
 
-    const body = html`
-      ${await ticketsHeader(web, ctx, 'panel')}
-      <div class="panel-grid">
-        <form method="post" action="${b}/tickets/panel" class="card" data-dirty>
-          ${csrfField(ctx.csrf)}
-          <div class="card-h strip"><div class="row">${strip}</div></div>
+    const sections = html`
           <div class="section" id="channel">
             ${setting('Channel', 'Where members open tickets. The bot needs to post there.', channelControl, { for: guild?.ok ? 'channel' : undefined, flat: true })}
           </div>
           <div class="section">
             <div class="section-h"><div><h3>Content</h3><div class="desc">The heading and introduction members see above the menu.</div></div>
-              <button type="button" class="btn ghost sm" data-reset-fields="panel_title panel_intro"><span class="lead">${icon('undo-2', 14)}</span><span class="lbl">Reset to default</span></button></div>
+              ${edit ? html`<button type="button" class="btn ghost sm" data-reset-fields="panel_title panel_intro"><span class="lead">${icon('undo-2', 14)}</span><span class="lbl">Reset to default</span></button>` : ''}</div>
             <div class="fields">
               ${textField({ id: 'panel_title', label: 'Heading', value: title, max: LIMITS.panel_title, placeholder: DEFAULT_PANEL_TITLE, preview: 'pv-title' })}
-              ${textField({ id: 'panel_intro', label: 'Introduction', value: intro, max: LIMITS.panel_intro, rows: 3, placeholder: DEFAULT_PANEL_INTRO, preview: 'pv-intro', md: true, hint: 'Discord formatting works, for example **bold**.' })}
+              ${textField({ id: 'panel_intro', label: 'Introduction', value: intro, max: LIMITS.panel_intro, rows: 3, placeholder: DEFAULT_PANEL_INTRO, preview: 'pv-intro', md: true, hint: edit ? 'Discord formatting works, for example **bold**.' : undefined })}
             </div>
           </div>
           <div class="section">
             <div class="section-h"><div><h3>Health</h3><div class="desc">Checked live against GitHub and Discord when this page loads.</div></div>${linkBtn(`${b}/tickets/panel`, 'Check again', { variant: 'ghost', size: 'sm', icon: 'refresh-cw' })}</div>
-            ${checklist(report.checks.filter((c) => c.area !== 'panel'))}
-          </div>
+            ${checklist(checks)}
+          </div>`;
+
+    const settingsCard = edit
+      ? html`<form method="post" action="${b}/tickets/panel" class="card" data-dirty>
+          ${csrfField(ctx.csrf)}
+          <div class="card-h strip"><div class="row">${strip}</div></div>
+          ${sections}
           <div class="section">
             <div class="section-h"><div><h3>Test ticket</h3><div class="desc">Files a real GitHub issue through the whole pipeline, marked as a test and attributed to you.</div></div></div>
             ${enabledApps.length
@@ -138,7 +162,17 @@ export function registerPanelRoutes(app: FastifyInstance, web: Web): void {
                 : html`${submitBtn('Save changes', { variant: 'primary', loading: 'Saving…', name: 'intent', value: 'save', attrs: raw('data-dirty-enable') })}`}
             </div>
           </div>
-        </form>
+        </form>`
+      : html`<div class="card">
+          <div class="card-h strip"><div class="row">${strip}</div></div>
+          <fieldset class="plain view-only" disabled>${sections}</fieldset>
+          <div class="card-f">${viewOnlyFooter('the panel')}</div>
+        </div>`;
+
+    const body = html`
+      ${await toolHeader(web, ctx, 'tickets', 'panel')}
+      <div class="panel-grid">
+        ${settingsCard}
 
         <div class="panel-preview">
           ${previewCaption(channelName, messageLink)}
@@ -152,17 +186,17 @@ export function registerPanelRoutes(app: FastifyInstance, web: Web): void {
             ${types.length ? html`<div class="dp"><p class="dp-modal-title">What kind of ticket is this?</p>
                 <div class="dp-options">${types.map((t) => html`<div class="dp-option"><strong>${t.name}</strong>${t.description ? html`<span>${t.description}</span>` : ''}</div>`)}</div></div><div class="mt-8"></div>` : ''}
             ${formPreview({ name: sample.name, repoPrivate: sample.repo_private }, firstType ? { name: firstType.name } : undefined, formFor(firstType ?? null))}
-            <p class="dp-note">${firstType ? html`Form for “${firstType.name}”. Change the questions on <a href="${b}/tickets/types/${firstType.id}/form">its form page</a>. ` : ''}After submitting, the member gets a private confirmation with the ticket number and a link to the issue.</p>` : ''}
+            <p class="dp-note">${firstType ? html`Form for “${firstType.name}”. ${can(m, 'types.edit') ? html`Change the questions on <a href="${b}/tickets/types/${firstType.id}/form">its form page</a>. ` : ''}` : ''}After submitting, the member gets a private confirmation with the ticket number and a link to the issue.</p>` : ''}
         </div>
       </div>
-      <form method="post" action="${b}/tickets/panel/test" id="test-form" hidden data-confirm-title="Send a test ticket?" data-confirm-body="This creates a real issue on GitHub, labelled as a test. You can close it afterwards." data-confirm-label="Send test">${csrfField(ctx.csrf)}</form>
-      ${panel ? html`<form method="post" action="${b}/tickets/panel/remove" id="remove-form" hidden data-confirm-title="Remove the panel from #${channelName ?? 'the channel'}?" data-confirm-body="Members can’t open new tickets until you post it again. Existing tickets are kept." data-confirm-label="Remove panel" data-confirm-danger>${csrfField(ctx.csrf)}</form>` : ''}`;
-    return web.render(reply, ctx, 'Ticket panel', 'tickets', body);
+      ${edit ? html`<form method="post" action="${b}/tickets/panel/test" id="test-form" hidden data-confirm-title="Send a test ticket?" data-confirm-body="This creates a real issue on GitHub, labelled as a test. You can close it afterwards." data-confirm-label="Send test">${csrfField(ctx.csrf)}</form>` : ''}
+      ${edit && panel ? html`<form method="post" action="${b}/tickets/panel/remove" id="remove-form" hidden data-confirm-title="Remove the panel from #${channelName ?? 'the channel'}?" data-confirm-body="Members can’t open new tickets until you post it again. Existing tickets are kept." data-confirm-label="Remove panel" data-confirm-danger>${csrfField(ctx.csrf)}</form>` : ''}`;
+    return web.render(reply, ctx, 'Panel · Discord tickets', 'tickets', body);
   });
 
   /** Saves the channel and text (fields left out stay unchanged), then publishes when asked to. */
   app.post('/w/:wid/tickets/panel', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply);
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'panel.edit' });
     if (!ctx) return reply;
     const back = `${ctx.base}/tickets/panel`;
     const body = (req.body ?? {}) as Record<string, string | undefined>;
@@ -208,15 +242,16 @@ export function registerPanelRoutes(app: FastifyInstance, web: Web): void {
   });
 
   app.post('/w/:wid/tickets/panel/remove', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply);
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'panel.edit' });
     if (!ctx) return reply;
     await unpublishPanel(deps, ctx.workspace.id);
     setFlash(reply, 'success', 'Panel removed from Discord');
     return reply.redirect(`${ctx.base}/tickets/panel`);
   });
 
+  /** Files a real test ticket, attributed to whoever sends it. */
   app.post('/w/:wid/tickets/panel/test', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply);
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'panel.edit' });
     if (!ctx) return reply;
     const target = await getApp(deps.db, ctx.workspace.id, String((req.body as { app_id?: string }).app_id ?? ''));
     const gh = await getGitHubConnection(deps.db, ctx.workspace.id);

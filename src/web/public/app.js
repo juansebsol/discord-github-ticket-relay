@@ -248,6 +248,8 @@
     if (form && form.hasAttribute('data-async')) {
       var data = new URLSearchParams(new FormData(form));
       var prev = !input.checked;
+      // Set from elsewhere (Members: a tool's select), focus stays where it is.
+      var hadFocus = document.activeElement === input;
       input.disabled = true;
       fetch(form.action, { method: 'POST', body: data, credentials: 'same-origin', headers: { accept: 'application/json' } })
         .then(function (res) {
@@ -263,7 +265,7 @@
           if (input.type === 'checkbox') input.checked = prev;
           toast(err && err.shown ? err.shown : 'Not saved. Check your connection and try again.', 'danger');
         })
-        .then(function () { input.disabled = false; input.focus({ preventScroll: true }); });
+        .then(function () { input.disabled = false; if (hadFocus) input.focus({ preventScroll: true }); });
       return;
     }
     if (input.hasAttribute('data-autosubmit') && form) form.submit();
@@ -388,11 +390,20 @@
     if (!location.hash || location.hash.length < 2) return;
     var row = document.getElementById(location.hash.slice(1));
     if (!row || !row.hasAttribute('data-flash')) return;
+    // Hidden at this width (a table column on a phone): use its phone version instead.
+    var alt = row.getAttribute('data-flash-alt');
+    if (!row.offsetParent && alt && document.getElementById(alt)) row = document.getElementById(alt);
+    if (row.tagName === 'DETAILS') row.open = true;
     row.scrollIntoView({ block: 'center', behavior: reduceMotion ? 'auto' : 'smooth' });
-    row.classList.remove('flash');
-    void row.offsetWidth;
-    row.classList.add('flash');
-    var first = row.querySelector('input:not([type=hidden])');
+    // A column header lights up its whole column.
+    var col = row.getAttribute('data-flash-col');
+    var targets = col ? [row].concat($$('[data-col="' + col + '"]')) : [row];
+    targets.forEach(function (el) {
+      el.classList.remove('flash');
+      void el.offsetWidth;
+      el.classList.add('flash');
+    });
+    var first = col ? document.querySelector('[data-col="' + col + '"] select') : row.querySelector('input:not([type=hidden]), select');
     if (first) first.focus({ preventScroll: true });
   }
   window.addEventListener('hashchange', flashTarget);
@@ -630,7 +641,9 @@
     var counting = false;
     $$('[data-selected-text="' + formId + '"]').forEach(function (t) {
       counting = counting || t.hasAttribute('data-count-matches');
-      var text = n ? n + (n === 1 ? ' ticket selected' : ' tickets selected') : t.getAttribute('data-empty-text') || 'Select tickets to delete their files.';
+      // A list of tickets and issues (data-selected-plain) counts "3 selected".
+      var plain = t.hasAttribute('data-selected-plain');
+      var text = n ? (plain ? n + ' selected' : n + (n === 1 ? ' ticket selected' : ' tickets selected')) : t.getAttribute('data-empty-text') || 'Select tickets to delete their files.';
       if (n && t.hasAttribute('data-count-matches') && matched < n) text = n + ' selected · ' + (matched ? matched + ' with a matching suggestion' : 'none with a matching suggestion');
       t.textContent = text;
     });
@@ -700,38 +713,73 @@
     });
     show();
   });
-  // ---- Members › Triage access ------------------------------------------------------------------
+  // ---- Members › Moderator access ---------------------------------------------------------------
 
-  /** The highest level a page's select offers ("edit", or "view" for Activity). */
+  /** The level a page's select can take for "No access / View all / Edit all" (Inbox stays View, Activity tops out at View). */
   function capLevel(select, level) {
     var has = [].some.call(select.options, function (o) { return o.value === level; });
     return has ? level : 'view';
   }
-  // "All pages" sets every page of that moderator, then saves them together.
-  $$('[data-set-levels]').forEach(function (all) {
-    var formId = all.getAttribute('data-set-levels');
-    all.addEventListener('change', function () {
-      var selects = $$('select[form="' + formId + '"]');
+  /** Each "All pages" and tool select shows the level its pages share, or Custom when they differ. */
+  function syncSetLevels(formId) {
+    var selects = $$('select[form="' + formId + '"]');
+    $$('[data-set-levels="' + formId + '"]').forEach(function (ctl) {
+      var group = ctl.getAttribute('data-set-group');
+      var mine = group ? selects.filter(function (x) { return x.getAttribute('data-tool') === group; }) : selects;
+      var match = ['none', 'view', 'edit'].filter(function (l) {
+        return mine.every(function (x) { return x.value === capLevel(x, l); });
+      })[0];
+      ctl.value = match || '';
+      ctl.setAttribute('data-level', match || 'custom');
+    });
+    // A phone block's summary: "12 of 19 pages · 3 editable".
+    var block = selects[0] && selects[0].closest('details.mod-block');
+    var count = block && block.querySelector('summary .count');
+    if (count) {
+      var levels = selects.filter(function (x) { return x.classList.contains('level-select'); });
+      var open = levels.filter(function (x) { return x.value !== 'none'; }).length;
+      var edit = levels.filter(function (x) { return x.value === 'edit'; }).length;
+      count.textContent = open + ' of ' + levels.length + (levels.length === 1 ? ' page' : ' pages') + (edit ? ' · ' + edit + ' editable' : ' · view only');
+    }
+  }
+  // "All pages" sets every page of that moderator, a tool's select only that tool's pages; they're saved together.
+  $$('[data-set-levels]').forEach(function (ctl) {
+    var formId = ctl.getAttribute('data-set-levels');
+    var group = ctl.getAttribute('data-set-group');
+    ctl.addEventListener('change', function () {
+      var selects = $$('select[form="' + formId + '"]').filter(function (x) { return !group || x.getAttribute('data-tool') === group; });
       selects.forEach(function (sel) {
-        sel.value = capLevel(sel, all.value);
+        sel.value = capLevel(sel, ctl.value);
         sel.setAttribute('data-level', sel.value);
       });
       if (selects[0]) selects[0].dispatchEvent(new Event('change', { bubbles: true }));
+      else syncSetLevels(formId);
     });
   });
-  // Each page's select shows its level; "All pages" says Custom when they differ.
+  /** The table and the phone blocks each have a form per moderator: the other one follows, so either saves what's shown. */
+  function mirrorLevels(form) {
+    var action = form.getAttribute('action');
+    $$('form[data-async]').forEach(function (twin) {
+      if (twin === form || twin.getAttribute('action') !== action) return;
+      $$('select.level-select[form="' + twin.id + '"]').forEach(function (x) {
+        var src = form.elements.namedItem(x.name);
+        if (!src || src.tagName !== 'SELECT') return;
+        x.value = src.value;
+        x.setAttribute('data-level', x.value);
+      });
+      syncSetLevels(twin.id);
+    });
+  }
+  // Each page's select shows its level.
   document.addEventListener('change', function (e) {
     var sel = e.target;
     if (!sel.classList || !sel.classList.contains('level-select')) return;
     sel.setAttribute('data-level', sel.value);
     var formId = sel.getAttribute('form');
-    var all = document.querySelector('[data-set-levels="' + formId + '"]');
-    if (!all) return;
-    var selects = $$('select[form="' + formId + '"]');
-    var match = ['none', 'view', 'edit'].filter(function (l) {
-      return selects.every(function (x) { return x.value === capLevel(x, l); });
-    })[0];
-    all.value = match || '';
+    if (!formId) return;
+    syncSetLevels(formId);
+    var form = document.getElementById(formId);
+    if (form) mirrorLevels(form);
   });
 
   // ---- Triage › Actions: modes per source ------------------------------------------------------

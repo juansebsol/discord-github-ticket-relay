@@ -130,17 +130,17 @@ describe('label groups', () => {
     expect(r.suggestions).toEqual([expect.objectContaining({ kind: 'group:area1', labels: ['file', 'render'] })]); // up to two for Area
 
     // Adding a group from a preset in the console: it starts off.
-    await env.server.inject({ method: 'POST', url: `${w()}/tickets/triage/labels/add`, ...form(ws.owner, { preset: 'platform' }) });
+    await env.server.inject({ method: 'POST', url: `${w()}/triage/labels/add`, ...form(ws.owner, { preset: 'platform' }) });
     const groups = (await getTriageSettings(env.db, wid())).config.labelGroups;
     expect(groups.at(-1)).toMatchObject({ name: 'Platform', mode: 'off' });
-    const page = await env.server.inject({ method: 'GET', url: `${w()}/tickets/triage/labels`, ...get(ws.owner) });
+    const page = await env.server.inject({ method: 'GET', url: `${w()}/triage/labels`, ...get(ws.owner) });
     expect(page.statusCode).toBe(200);
     expect(page.body).toContain('macos: macOS only.');
   });
 
   it('saves a group from “label: description” lines and rejects duplicates', async () => {
     await enable({ labelGroups: [{ id: 'grp1', mode: 'off', name: 'Kind', instruction: '', pick: 'one', options: [{ label: 'x', description: '' }] }] });
-    const save = (options: string) => env.server.inject({ method: 'POST', url: `${w()}/tickets/triage/labels/grp1`, ...form(ws.owner, { name: 'Kind', mode: 'suggest', pick: 'any', instruction: 'What it is.', options }) });
+    const save = (options: string) => env.server.inject({ method: 'POST', url: `${w()}/triage/labels/grp1`, ...form(ws.owner, { name: 'Kind', mode: 'suggest', pick: 'any', instruction: 'What it is.', options }) });
     await save('bug: Wrong behaviour.\nfeature: Something new.\n\n');
     expect((await getTriageSettings(env.db, wid())).config.labelGroups[0]).toMatchObject({ mode: 'suggest', pick: 'any', options: [{ label: 'bug', description: 'Wrong behaviour.' }, { label: 'feature', description: 'Something new.' }] });
     await save('bug: one\nBug: two');
@@ -169,7 +169,7 @@ describe('prompt settings', () => {
   it('saves products, check wording and examples, and the actions form keeps them', async () => {
     await enable({ duplicate: { mode: 'suggest' } });
     await env.server.inject({
-      method: 'POST', url: `${w()}/tickets/triage/prompt`,
+      method: 'POST', url: `${w()}/triage/prompt`,
       ...form(ws.owner, { products: 'PhotoCraft and VectorCraft share an installer.', rule_duplicate: 'duplicates: only exact copies.', rule_spam: DEFAULT_CHECK_RULES.spam, examples: '', instructions: 'Payments are always high.' }),
     });
     let c = (await getTriageSettings(env.db, wid())).config;
@@ -177,14 +177,14 @@ describe('prompt settings', () => {
     expect(c.checkRules.spam).toBeUndefined(); // the built-in wording isn't stored
 
     await env.server.inject({
-      method: 'POST', url: `${w()}/tickets/triage`,
+      method: 'POST', url: `${w()}/triage/actions`,
       ...form(ws.owner, { model: 'claude-haiku-5-5', threshold: '90', monthly_limit: '500', app_ids: ws.apps.map((a) => a.id), priority_mode: 'off', priority_label_critical: 'a', priority_label_high: 'b', priority_label_medium: 'c', priority_label_low: 'd', duplicate_mode: 'suggest', duplicate_label: 'duplicate' }),
     });
     c = (await getTriageSettings(env.db, wid())).config;
     expect(c.products).toContain('share an installer');
     expect(c.instructions).toBe('Payments are always high.');
 
-    const full = await env.server.inject({ method: 'GET', url: `${w()}/tickets/triage/prompt/full`, ...get(ws.owner) });
+    const full = await env.server.inject({ method: 'GET', url: `${w()}/triage/prompt/full`, ...get(ws.owner) });
     expect(full.body).toContain('duplicates: only exact copies.');
     expect(full.body).toContain('PhotoCraft and VectorCraft share an installer.');
     expect(full.body).not.toContain('## Examples');
@@ -193,7 +193,7 @@ describe('prompt settings', () => {
   it('won’t save an action that is on but would change nothing', async () => {
     await enable({});
     const res = await env.server.inject({
-      method: 'POST', url: `${w()}/tickets/triage`,
+      method: 'POST', url: `${w()}/triage/actions`,
       ...form(ws.owner, { model: 'claude-haiku-5-5', threshold: '90', monthly_limit: '500', app_ids: ws.apps.map((a) => a.id), priority_mode: 'off', priority_label_critical: 'a', priority_label_high: 'b', priority_label_medium: 'c', priority_label_low: 'd', related_mode: 'auto', related_label: '', related_comment: '' }),
     });
     expect(res.statusCode).toBe(302);
@@ -216,7 +216,7 @@ describe('re-running triage', () => {
     expect(env.anthropic.requests).toHaveLength(0);
 
     await saveTriageConfig(env.db, wid(), parseTriageConfig({ ...(await getTriageSettings(env.db, wid())).config, priority: { mode: 'auto' } }));
-    const start = await env.server.inject({ method: 'POST', url: `${w()}/tickets/triage/runs`, ...form(ws.owner, { never: '1', untouched: '1', limit: '10', mode: 'preview', name: 'Priority test' }) });
+    const start = await env.server.inject({ method: 'POST', url: `${w()}/triage/runs`, ...form(ws.owner, { never: '1', untouched: '1', limit: '10', mode: 'preview', name: 'Priority test' }) });
     expect(start.statusCode).toBe(302);
     const runUrl = start.headers.location as string;
     env.anthropic.queue.push({ ...env.anthropic.verdict, priority: 'high', priority_confidence: 95 });
@@ -258,7 +258,7 @@ describe('re-running triage', () => {
     expect(issue(done.issue_number).labels).toEqual(['priority: medium']);
 
     const calls = env.anthropic.requests.length;
-    await env.server.inject({ method: 'POST', url: `${w()}/tickets/triage/runs`, ...form(ws.owner, { untouched: '1', limit: '10', mode: 'apply' }) });
+    await env.server.inject({ method: 'POST', url: `${w()}/triage/runs`, ...form(ws.owner, { untouched: '1', limit: '10', mode: 'apply' }) });
     env.anthropic.queue.push({ ...env.anthropic.verdict, priority: 'high', priority_confidence: 95 });
     await env.triage.drain();
     // Only the ticket with nothing applied was picked.
@@ -276,25 +276,25 @@ describe('re-running triage', () => {
     await env.triage.drain();
     expect((await result(t.id)).suggestion_count).toBe(1);
 
-    const first = await env.server.inject({ method: 'POST', url: `${w()}/tickets/triage/runs`, ...form(ws.owner, { untouched: '1', limit: '10', mode: 'apply' }) });
-    const second = await env.server.inject({ method: 'POST', url: `${w()}/tickets/triage/runs`, ...form(ws.owner, { untouched: '1', limit: '10', mode: 'preview' }) });
-    expect(second.headers.location).toBe(`${w()}/tickets/triage/runs`); // refused: one at a time
+    const first = await env.server.inject({ method: 'POST', url: `${w()}/triage/runs`, ...form(ws.owner, { untouched: '1', limit: '10', mode: 'apply' }) });
+    const second = await env.server.inject({ method: 'POST', url: `${w()}/triage/runs`, ...form(ws.owner, { untouched: '1', limit: '10', mode: 'preview' }) });
+    expect(second.headers.location).toBe(`${w()}/triage/runs`); // refused: one at a time
     await env.triage.drain();
     expect(await result(t.id)).toMatchObject({ status: 'done', suggestion_count: 0 });
     const run = (await env.db.query('SELECT * FROM triage_runs WHERE workspace_id = $1', [wid()])).rows[0];
     expect(run.status).toBe('done');
-    expect(first.headers.location).toBe(`${w()}/tickets/triage/runs/${run.id}`);
+    expect(first.headers.location).toBe(`${w()}/triage/runs/${run.id}`);
     const item = (await env.db.query('SELECT * FROM triage_run_items WHERE run_id = $1', [run.id])).rows[0];
     expect(item).toMatchObject({ status: 'done', apply_status: 'done' });
     expect(item.before.suggestions).toEqual([expect.objectContaining({ kind: 'spam' })]);
 
     // A new run that's stopped before the worker gets to it.
-    const third = await env.server.inject({ method: 'POST', url: `${w()}/tickets/triage/runs`, ...form(ws.owner, { never: '1', untouched: '1', limit: '10', mode: 'preview' }) });
+    const third = await env.server.inject({ method: 'POST', url: `${w()}/triage/runs`, ...form(ws.owner, { never: '1', untouched: '1', limit: '10', mode: 'preview' }) });
     await env.server.inject({ method: 'POST', url: `${third.headers.location}/cancel`, ...form(ws.owner) });
     const calls = env.anthropic.requests.length;
     await env.triage.drain();
     expect(env.anthropic.requests.length).toBe(calls);
-    const list = await env.server.inject({ method: 'GET', url: `${w()}/tickets/triage/runs`, ...get(ws.owner) });
+    const list = await env.server.inject({ method: 'GET', url: `${w()}/triage/runs`, ...get(ws.owner) });
     expect(list.body).toContain('Stopped');
   });
 });
@@ -309,7 +309,7 @@ describe('re-running at scale', () => {
       await env.db.query(`INSERT INTO submissions (${cols.join(', ')}) VALUES (${cols.map((_, j) => `$${j + 1}`).join(', ')})`, cols.map((c) => row[c]));
     }
   }
-  const start = (fields: Record<string, string>) => env.server.inject({ method: 'POST', url: `${w()}/tickets/triage/runs`, ...form(ws.owner, { never: '1', untouched: '1', mode: 'preview', ...fields }) });
+  const start = (fields: Record<string, string>) => env.server.inject({ method: 'POST', url: `${w()}/triage/runs`, ...form(ws.owner, { never: '1', untouched: '1', mode: 'preview', ...fields }) });
   const latestRun = async () => (await env.db.query('SELECT * FROM triage_runs WHERE workspace_id = $1 ORDER BY created_at DESC LIMIT 1', [wid()])).rows[0];
   const items = async (runId: string) => (await env.db.query('SELECT * FROM triage_run_items WHERE run_id = $1 ORDER BY position', [runId])).rows;
 
@@ -317,7 +317,7 @@ describe('re-running at scale', () => {
     const t = await file();
     await clones(t.id, 229);
     await enable({ priority: { mode: 'suggest' }, monthlyLimit: 5000 });
-    const est = await env.server.inject({ method: 'GET', url: `${w()}/tickets/triage/runs/estimate?untouched=1&never=1&count=all`, ...get(ws.owner) });
+    const est = await env.server.inject({ method: 'GET', url: `${w()}/triage/runs/estimate?untouched=1&never=1&count=all`, ...get(ws.owner) });
     expect(est.json()).toMatchObject({ allLabel: 'All matching (230)' });
     expect(est.json().text).toContain('230 tickets');
     await start({ count: 'all' });
@@ -325,13 +325,13 @@ describe('re-running at scale', () => {
     expect(await items(run.id)).toHaveLength(230);
     expect(run.scope).toMatchObject({ matched: 230 });
     await env.triage.drain();
-    const page = await env.server.inject({ method: 'GET', url: `${w()}/tickets/triage/runs/${run.id}`, ...get(ws.owner) });
+    const page = await env.server.inject({ method: 'GET', url: `${w()}/triage/runs/${run.id}`, ...get(ws.owner) });
     expect(page.body).toContain('Page 1 of 5');
     expect(page.body).toContain('page=2');
 
     // The monthly limit caps a run: the newest tickets go first.
     await saveTriageConfig(env.db, wid(), parseTriageConfig({ ...(await getTriageSettings(env.db, wid())).config, monthlyLimit: 1 + 10 }));
-    const est2 = await env.server.inject({ method: 'GET', url: `${w()}/tickets/triage/runs/estimate?untouched=1&never=1&count=all`, ...get(ws.owner) });
+    const est2 = await env.server.inject({ method: 'GET', url: `${w()}/triage/runs/estimate?untouched=1&never=1&count=all`, ...get(ws.owner) });
     expect(est2.json().text).toContain('The newest 10 of');
     expect(est2.json().warn).toContain('Raise the monthly limit');
   });
@@ -349,7 +349,7 @@ describe('re-running at scale', () => {
     expect((await items(run.id)).map((i: { change: string }) => i.change).sort()).toEqual(['new', 'new', 'same']);
 
     // "Apply all changed results", approving the suggestions too.
-    await env.server.inject({ method: 'POST', url: `/w/${wid()}/tickets/triage/runs/${run.id}/apply`, ...form(ws.owner, { scope: 'filter', show: 'changed', include: 'all' }) });
+    await env.server.inject({ method: 'POST', url: `/w/${wid()}/triage/runs/${run.id}/apply`, ...form(ws.owner, { scope: 'filter', show: 'changed', include: 'all' }) });
     expect((await items(run.id)).filter((i: { apply_status: string }) => i.apply_status === 'pending')).toHaveLength(2);
     await env.triage.drain();
     expect(issue(a.issue_number).labels).toEqual(['priority: medium']);
@@ -358,7 +358,7 @@ describe('re-running at scale', () => {
     expect(await result(a.id)).toMatchObject({ suggestions: [], applied_actions: [expect.objectContaining({ kind: 'priority' })] });
 
     // Without suggestions, applying the rest only replaces its suggestions.
-    await env.server.inject({ method: 'POST', url: `/w/${wid()}/tickets/triage/runs/${run.id}/apply`, ...form(ws.owner, { scope: 'filter', show: 'all', include: 'auto' }) });
+    await env.server.inject({ method: 'POST', url: `/w/${wid()}/triage/runs/${run.id}/apply`, ...form(ws.owner, { scope: 'filter', show: 'all', include: 'auto' }) });
     await env.triage.drain();
     expect(issue(c.issue_number).labels).toEqual([]);
     expect((await result(c.id)).suggestions).toEqual([expect.objectContaining({ kind: 'priority' })]);
@@ -372,11 +372,11 @@ describe('re-running at scale', () => {
     await start({ count: 'all' });
     await env.triage.drain();
     const run = await latestRun();
-    await env.server.inject({ method: 'POST', url: `/w/${wid()}/tickets/triage/runs/${run.id}/apply`, ...form(ws.owner, { scope: 'filter', show: 'all', include: 'all' }) });
-    const page = await env.server.inject({ method: 'GET', url: `${w()}/tickets/triage/runs/${run.id}`, ...get(ws.owner) });
+    await env.server.inject({ method: 'POST', url: `/w/${wid()}/triage/runs/${run.id}/apply`, ...form(ws.owner, { scope: 'filter', show: 'all', include: 'all' }) });
+    const page = await env.server.inject({ method: 'GET', url: `${w()}/triage/runs/${run.id}`, ...get(ws.owner) });
     expect(page.body).toContain('Stop applying');
     expect(page.body).toContain('Applying results');
-    await env.server.inject({ method: 'POST', url: `/w/${wid()}/tickets/triage/runs/${run.id}/stop-applying`, ...form(ws.owner) });
+    await env.server.inject({ method: 'POST', url: `/w/${wid()}/triage/runs/${run.id}/stop-applying`, ...form(ws.owner) });
     await env.triage.drain();
     expect(issue(a.issue_number).labels).toEqual([]);
     expect((await items(run.id)).every((i: { apply_status: string | null }) => i.apply_status === null)).toBe(true);
@@ -393,7 +393,7 @@ describe('re-running at scale', () => {
     const run = await latestRun();
     expect(run.waiting_reason).toBe('github');
     expect((await items(run.id))[0]).toMatchObject({ status: 'pending', attempts: 0 });
-    const page = await env.server.inject({ method: 'GET', url: `${w()}/tickets/triage/runs/${run.id}`, ...get(ws.owner) });
+    const page = await env.server.inject({ method: 'GET', url: `${w()}/triage/runs/${run.id}`, ...get(ws.owner) });
     expect(page.body).toContain('Waiting for GitHub’s hourly limit to reset');
 
     // A new ticket is still filed and triaged meanwhile.
@@ -417,10 +417,10 @@ describe('re-running at scale', () => {
     const run = await latestRun();
     // Even with GitHub's budget low, the inbox is updated (no GitHub calls needed).
     env.triage.engine.deps.github!.rateLimits.set(ws.installationId, { limit: 5000, remaining: 10, resetAt: new Date(Date.now() + 30 * 60_000), at: new Date() });
-    const page = await env.server.inject({ method: 'GET', url: `${w()}/tickets/triage/runs/${run.id}`, ...get(ws.owner) });
+    const page = await env.server.inject({ method: 'GET', url: `${w()}/triage/runs/${run.id}`, ...get(ws.owner) });
     expect(page.body).toContain('Update the inbox only (nothing on GitHub)');
     expect(page.body).toContain('data-confirm-title="Update the inbox with these results?"');
-    await env.server.inject({ method: 'POST', url: `/w/${wid()}/tickets/triage/runs/${run.id}/apply`, ...form(ws.owner, { scope: 'filter', show: 'all', include: 'inbox' }) });
+    await env.server.inject({ method: 'POST', url: `/w/${wid()}/triage/runs/${run.id}/apply`, ...form(ws.owner, { scope: 'filter', show: 'all', include: 'inbox' }) });
     const githubCalls = env.github.requests;
     await env.triage.drain();
     expect(issue(a.issue_number).labels).toEqual([]);
@@ -430,7 +430,7 @@ describe('re-running at scale', () => {
     expect(r).toMatchObject({ status: 'done', priority: 'high', applied_actions: [], suggestion_count: 2 });
     expect(r.suggestions.map((x: { kind: string }) => x.kind)).toEqual(['priority', 'spam']);
     expect((await items(run.id))[0]).toMatchObject({ apply_status: 'done', apply_inbox_only: true });
-    const after = await env.server.inject({ method: 'GET', url: `${w()}/tickets/triage/runs/${run.id}`, ...get(ws.owner) });
+    const after = await env.server.inject({ method: 'GET', url: `${w()}/triage/runs/${run.id}`, ...get(ws.owner) });
     expect(after.body).toContain('In the inbox');
 
     // Each suggestion is then approved on its own ticket.

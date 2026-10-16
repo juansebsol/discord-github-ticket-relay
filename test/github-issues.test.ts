@@ -124,37 +124,37 @@ describe('triage of issues opened on GitHub', () => {
     await env.triage.drain();
     expect(issue(num).labels).toEqual([]);
 
-    const list = await env.server.inject({ method: 'GET', url: `${w()}/tickets/issues/triage`, ...get(ws.owner) });
+    const list = await env.server.inject({ method: 'GET', url: `${w()}/issues/github`, ...get(ws.owner) });
     expect(list.statusCode).toBe(200);
-    expect(list.body).toContain(`/tickets/issues/${ws.repoIds[0]}/${num}`);
+    expect(list.body).toContain(`/issues/${ws.repoIds[0]}/${num}`);
     expect(list.body).toContain('To review');
     // A table like the inbox: who opened it on GitHub, the GitHub link, when it changed.
     expect(list.body).toContain('<th>Reporter</th>');
     expect(list.body).toContain('<span class="small">someone</span>');
     expect(list.body).toContain(`/issues/${num}" target="_blank"`);
-    const all = await env.server.inject({ method: 'GET', url: `${w()}/tickets/issues`, ...get(ws.owner) });
+    const all = await env.server.inject({ method: 'GET', url: `${w()}/issues`, ...get(ws.owner) });
     expect(all.body).toContain('<span class="small">someone</span>');
 
-    const page = await env.server.inject({ method: 'GET', url: `${w()}/tickets/issues/${ws.repoIds[0]}/${num}`, ...get(ws.owner) });
+    const page = await env.server.inject({ method: 'GET', url: `${w()}/issues/${ws.repoIds[0]}/${num}`, ...get(ws.owner) });
     expect(page.statusCode).toBe(200);
     expect(page.body).toContain('Buy followers cheap');
     expect(page.body).toContain('What Apply does');
-    expect(page.body).toContain(`/tickets/issues/${ws.repoIds[0]}/${num}/triage/apply`);
+    expect(page.body).toContain(`/issues/${ws.repoIds[0]}/${num}/triage/apply`);
 
     const mod = await joinAs('moderator', 'mia');
-    const denied = await env.server.inject({ method: 'POST', url: `${w()}/tickets/issues/${ws.repoIds[0]}/${num}/triage/apply`, ...form(mod, { kind: 'spam' }) });
+    const denied = await env.server.inject({ method: 'POST', url: `${w()}/issues/${ws.repoIds[0]}/${num}/triage/apply`, ...form(mod, { kind: 'spam' }) });
     expect(denied.statusCode).toBe(403);
 
-    await env.server.inject({ method: 'POST', url: `${w()}/tickets/issues/${ws.repoIds[0]}/${num}/triage/apply`, ...form(ws.owner, { kind: 'spam' }) });
+    await env.server.inject({ method: 'POST', url: `${w()}/issues/${ws.repoIds[0]}/${num}/triage/apply`, ...form(ws.owner, { kind: 'spam' }) });
     expect(issue(num).labels).toEqual(['spam']);
-    await env.server.inject({ method: 'POST', url: `${w()}/tickets/issues/${ws.repoIds[0]}/${num}/triage/dismiss`, ...form(ws.owner, { kind: 'priority' }) });
+    await env.server.inject({ method: 'POST', url: `${w()}/issues/${ws.repoIds[0]}/${num}/triage/dismiss`, ...form(ws.owner, { kind: 'priority' }) });
     expect(await result(num)).toMatchObject({ suggestion_count: 0 });
     const kinds = (await env.db.query('SELECT kind FROM issue_triage_events ORDER BY id')).rows.map((r) => r.kind);
     expect(kinds).toEqual(['triage_done', 'triage_applied', 'triage_dismissed']);
 
     // An issue that's a Discord ticket goes to its ticket page.
     const t = await fileTicket();
-    const redirect = await env.server.inject({ method: 'GET', url: `${w()}/tickets/issues/${ws.repoIds[0]}/${t.issue_number}`, ...get(ws.owner) });
+    const redirect = await env.server.inject({ method: 'GET', url: `${w()}/issues/${ws.repoIds[0]}/${t.issue_number}`, ...get(ws.owner) });
     expect(redirect.headers.location).toBe(`${w()}/tickets/${t.id}`);
   });
 });
@@ -165,7 +165,7 @@ describe('settings for issues opened on GitHub', () => {
   it('saves each action’s GitHub mode separately, and keeps it when the form leaves it out', async () => {
     await setApiKey(env.db, env.deps.box, wid(), KEY, ws.owner.user.id);
     await env.server.inject({
-      method: 'POST', url: `${w()}/tickets/triage`,
+      method: 'POST', url: `${w()}/triage/actions`,
       ...form(ws.owner, { ...base, app_ids: ws.apps[0]!.id, priority_mode: 'auto', priority_gh_mode: 'suggest', duplicate_mode: 'off', duplicate_gh_mode: 'auto', duplicate_label: 'duplicate' }),
     });
     let c = (await getTriageSettings(env.db, wid())).config;
@@ -173,18 +173,18 @@ describe('settings for issues opened on GitHub', () => {
     expect(c.duplicate.mode).toBe('off');
     expect(c.githubModes).toMatchObject({ priority: 'suggest', duplicate: 'auto', spam: 'off' });
 
-    await env.server.inject({ method: 'POST', url: `${w()}/tickets/triage`, ...form(ws.owner, { ...base, app_ids: ws.apps[0]!.id, priority_mode: 'auto', duplicate_label: 'duplicate' }) });
+    await env.server.inject({ method: 'POST', url: `${w()}/triage/actions`, ...form(ws.owner, { ...base, app_ids: ws.apps[0]!.id, priority_mode: 'auto', duplicate_label: 'duplicate' }) });
     c = (await getTriageSettings(env.db, wid())).config;
     expect(c.githubModes).toMatchObject({ priority: 'suggest', duplicate: 'auto' });
 
-    const page = await env.server.inject({ method: 'GET', url: `${w()}/tickets/triage`, ...get(ws.owner) });
+    const page = await env.server.inject({ method: 'GET', url: `${w()}/triage/actions`, ...get(ws.owner) });
     expect(page.body).toContain('name="priority_gh_mode"');
     expect(page.body).toContain('Issues opened on GitHub');
     expect(page.body).toContain('Copy Discord settings to GitHub');
   });
 
   it('needs a key to switch on, and starts from now', async () => {
-    const toggle = (enabled: boolean) => env.server.inject({ method: 'POST', url: `${w()}/tickets/triage/github-enabled`, ...form(ws.owner, enabled ? { set: '1', enabled: '1' } : { set: '1' }), headers: { ...form(ws.owner).headers, accept: 'application/json' } });
+    const toggle = (enabled: boolean) => env.server.inject({ method: 'POST', url: `${w()}/triage/github-enabled`, ...form(ws.owner, enabled ? { set: '1', enabled: '1' } : { set: '1' }), headers: { ...form(ws.owner).headers, accept: 'application/json' } });
     expect((await toggle(true)).json()).toMatchObject({ ok: false });
     await setApiKey(env.db, env.deps.box, wid(), KEY, ws.owner.user.id);
     expect((await toggle(true)).json()).toMatchObject({ ok: true });
@@ -192,9 +192,9 @@ describe('settings for issues opened on GitHub', () => {
     expect(s.githubEnabled).toBe(true);
     expect(s.githubEnabledAt).toBeInstanceOf(Date);
     expect(s.enabled).toBe(false); // Discord tickets have their own switch
-    // The Issues tab now opens on the GitHub triage view.
-    const inbox = await env.server.inject({ method: 'GET', url: `${w()}/tickets`, ...get(ws.owner) });
-    expect(inbox.body).toContain(`href="${w()}/tickets/issues/triage"`);
+    // Issues opened on GitHub are listed under GitHub issues.
+    const issues = await env.server.inject({ method: 'GET', url: `${w()}/issues`, ...get(ws.owner) });
+    expect(issues.body).toContain(`<a class="tab" href="${w()}/issues/github"`);
   });
 });
 
@@ -207,17 +207,17 @@ describe('re-runs with GitHub issues', () => {
     await env.triage.drain(); // both were opened before triage was on: nothing happens
     expect(env.anthropic.requests).toHaveLength(0);
 
-    const start = (source: string) => env.server.inject({ method: 'POST', url: `${w()}/tickets/triage/runs`, ...form(ws.owner, { source, never: '1', untouched: '1', count: 'all', mode: 'preview' }) });
+    const start = (source: string) => env.server.inject({ method: 'POST', url: `${w()}/triage/runs`, ...form(ws.owner, { source, never: '1', untouched: '1', count: 'all', mode: 'preview' }) });
     const subjects = async () => (await env.db.query('SELECT subject FROM triage_run_items i JOIN triage_runs r ON r.id = i.run_id ORDER BY r.created_at DESC, i.position')).rows.map((r) => r.subject);
 
-    const est = await env.server.inject({ method: 'GET', url: `${w()}/tickets/triage/runs/estimate?source=github&untouched=1&never=1&count=all`, ...get(ws.owner) });
+    const est = await env.server.inject({ method: 'GET', url: `${w()}/triage/runs/estimate?source=github&untouched=1&never=1&count=all`, ...get(ws.owner) });
     expect(est.json()).toMatchObject({ allLabel: 'All matching (1)', never: 'Never triaged (1)' });
 
     const gRun = await start('github');
     expect(await subjects()).toEqual([`gh:${ws.repoIds[0]}:${gh}`]);
     await env.triage.drain();
     const page = await env.server.inject({ method: 'GET', url: gRun.headers.location as string, ...get(ws.owner) });
-    expect(page.body).toContain(`/tickets/issues/${ws.repoIds[0]}/${gh}`);
+    expect(page.body).toContain(`/issues/${ws.repoIds[0]}/${gh}`);
     expect(page.body).toContain('opened on GitHub');
 
     // Updating the inbox only: the GitHub issue gets its suggestions in Issues › Triage.

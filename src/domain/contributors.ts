@@ -6,7 +6,7 @@ import { computeBasePermissions, Permission } from '../discord/permissions.js';
 import { GitHubApiError } from '../github/client.js';
 import { sha256 } from '../lib/crypto.js';
 import { consumeState, createState, type StateRow } from './oauth-state.js';
-import { getAppByPublicId, getDiscordConnection, getGitHubConnection, listApps } from './store.js';
+import { getDiscordConnection, getGitHubConnection, listApps } from './store.js';
 import { UserFacingError, type AppRow, type Deps, type DiscordConnectionRow, type WorkspaceRow } from './types.js';
 
 /**
@@ -612,7 +612,7 @@ export async function revokeVerification(deps: Deps, workspaceId: string, verifi
   if (deps.discord && conn) {
     for (const tier of tiers) {
       try {
-        await deps.discord.removeMemberRole(conn.guild_id, v.discord_user_id, tier.role_id, 'Contributor verification revoked by an admin');
+        await deps.discord.removeMemberRole(conn.guild_id, v.discord_user_id, tier.role_id, 'Contributor verification revoked in Ticket Relay');
       } catch (err) {
         if (err instanceof DiscordApiError && err.code === DiscordErrorCode.UnknownMember) break;
         throw new UserFacingError(`Discord did not let the bot remove @${tier.role_name}. Check that it has Manage Roles and sits above the role.`);

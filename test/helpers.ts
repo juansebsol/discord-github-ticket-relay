@@ -7,7 +7,8 @@ import { loadConfig, type Config } from '../src/config.js';
 import { openDatabase, type Db } from '../src/db/database.js';
 import { createApp as createAppRow, saveDiscordGuild, saveGitHubConnection, setTicketsChannel } from '../src/domain/store.js';
 import type { AppRow, UserRow, WorkspaceRow } from '../src/domain/types.js';
-import { createWorkspace, upsertUser } from '../src/domain/workspaces.js';
+import { AREA_KEYS, type MemberAccess } from '../src/domain/permissions.js';
+import { createWorkspace, setModeratorAccess, upsertUser } from '../src/domain/workspaces.js';
 import { createSession } from '../src/web/session.js';
 import { FakeAnthropic, FakeDiscord, FakeGitHub, fakeFetch } from './fakes.js';
 import { TEST_DATABASE_PATH } from './global-setup.js';
@@ -132,6 +133,11 @@ export async function makeWorkspace(
     }));
   }
   return { workspace, owner, guildId, channelId, installationId, repoIds, apps };
+}
+
+/** Sets exactly what a moderator can open; pages left out get no access (the Inbox stays View). */
+export async function grant(env: TestEnv, workspaceId: string, userId: string, access: MemberAccess['access']): Promise<void> {
+  await setModeratorAccess(env.db, workspaceId, userId, Object.fromEntries(AREA_KEYS.map((a) => [a, access[a] ?? 'none'])));
 }
 
 let interactionCounter = 0;

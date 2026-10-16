@@ -61,7 +61,7 @@ async function validateAppInput(deps: Deps, installationId: number, body: unknow
 
 /** How to get a change into Discord: update the panel, or ask an admin to (moderators can't open it). */
 function panelStep(ctx: WorkspaceRequestContext, what: string): string {
-  return can(ctx.membership, 'manage') ? `Update the panel to ${what}.` : `An admin needs to update the panel to ${what}.`;
+  return can(ctx.membership, 'panel.edit') ? `Update the panel to ${what}.` : `Someone with Edit on the Panel needs to update it to ${what}.`;
 }
 
 export function registerAppRoutes(app: FastifyInstance, web: Web): void {
@@ -98,27 +98,27 @@ export function registerAppRoutes(app: FastifyInstance, web: Web): void {
 
     const body = html`
       ${pageHeader({
-        eyebrow: 'General setup · Step 3 of 3',
+        eyebrow: 'Setup · Step 3 of 3',
         title: 'Apps & repositories',
         after: [apps.length ? badge(apps.length) : '', edit ? '' : viewOnlyTag('You can see the apps and their repositories. Ask an admin if you need to change them.')],
-        description: 'The apps members pick in Discord, each mapped to a GitHub repository. Tickets and Contributor Roles both use this list.',
+        description: 'The apps members pick in Discord, each mapped to a GitHub repository. Discord tickets and Contributor roles both use this list.',
         actions: addApp ?? undefined,
       })}
       ${panel.state === 'published' && panel.outdated
-        ? notice('info', 'The ticket panel in Discord doesn’t show your latest changes yet', can(ctx.membership, 'manage') ? 'Members still see the old list of apps.' : 'Members still see the old list of apps until an admin updates the panel.', { action: can(ctx.membership, 'manage') ? linkBtn(`${b}/tickets/panel`, 'Update panel', { size: 'sm' }) : undefined })
+        ? notice('info', 'The ticket panel in Discord doesn’t show your latest changes yet', can(ctx.membership, 'panel.edit') ? 'Members still see the old list of apps.' : 'Members still see the old list of apps until someone updates the panel.', { action: can(ctx.membership, 'panel.edit') ? linkBtn(`${b}/tickets/panel`, 'Update panel', { size: 'sm' }) : undefined })
         : ''}
       <div class="card">
         ${apps.length === 0
           ? empty('boxes', 'No apps yet', edit ? 'Add the first app members can file tickets for, for example “Mobile app” or “Billing portal”.' : 'An admin can add the apps members file tickets for.', addApp)
           : html`<div class="card-b flush"><div class="table-wrap wide"><table>
-              <thead><tr><th class="col-main">App</th><th>Repository</th><th class="center">Tickets</th><th class="center">Contributor Roles</th><th>Extra labels</th>${edit ? html`<th class="actions"><span class="sr-only">Actions</span></th>` : ''}</tr></thead>
+              <thead><tr><th class="col-main">App</th><th>Repository</th><th class="center">Tickets</th><th class="center">Contributor roles</th><th>Extra labels</th>${edit ? html`<th class="actions"><span class="sr-only">Actions</span></th>` : ''}</tr></thead>
               <tbody>${apps.map((a, i) => {
                 const shared = repoUse.get(a.repo_id)! - 1;
                 return html`<tr class="${a.enabled ? '' : 'off'}">
                   <td><span class="who-cell">${avatar(a.name, 28, { square: true, letters: 2 })}<span><span class="cell-title">${a.name}</span>${a.description ? html`<span class="sub">${a.description}</span>` : ''}</span></span></td>
                   <td><span class="inline nowrap">${icon('folder-git-2', 14, 'muted')}<span class="mono">${a.repo_owner}/${a.repo_name}</span>${tag(a.repo_private ? 'Private' : 'Public', { icon: a.repo_private ? 'lock' : 'globe' })}</span>${shared > 0 ? html`<div class="sub">Shared with ${plural(shared, 'other app')}</div>` : ''}</td>
                   <td class="center">${ticketState(a)}</td>
-                  <td class="center">${a.contributor_enabled ? html`<span class="inline" aria-label="Counts for Contributor Roles" title="Counts for Contributor Roles">${icon('circle-check', 16, 'ok')}</span>` : html`<span class="em" aria-label="Not counted">—</span>`}</td>
+                  <td class="center">${a.contributor_enabled ? html`<span class="inline" aria-label="Counts for Contributor roles" title="Counts for Contributor roles">${icon('circle-check', 16, 'ok')}</span>` : html`<span class="em" aria-label="Not counted">—</span>`}</td>
                   <td>${a.labels.length ? html`<div class="tags">${a.labels.map((l) => labelTag(l))}</div>` : html`<span class="em">—</span>`}</td>
                   ${edit ? html`<td class="actions"><div class="row">
                     ${iconBtn('pencil', `Edit ${a.name}`, { size: 'sm', href: `${b}/apps/${a.id}/edit` })}

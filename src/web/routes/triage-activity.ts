@@ -1,5 +1,5 @@
 /**
- * Triage › Activity: what triage is doing right now (queues, what it's working on, waits) and a
+ * AI triage › Activity: what triage is doing right now (queues, what it's working on, waits) and a
  * log of everything it did: triaged, applied, suggested, dismissed, skipped or failed, and why.
  * Updates live while the page is open.
  */
@@ -12,8 +12,7 @@ import { getTriageSettings, monthlyUsage, pauseMessage } from '../../triage/sett
 import type { Web, WorkspaceRequestContext } from '../server.js';
 import { actionEffectsShort, actionTitle } from '../triage-view.js';
 import { empty, formatDate, icon, linkBtn, notice, plural, segLinks, selectWrap, tag, timeAgo, type IconName } from '../ui.js';
-import { canTriage, ticketsHeader } from './tickets.js';
-import { triageNav } from './triage.js';
+import { canOpen, canOpenIssue, toolHeader } from './tool.js';
 
 const PAGE = 50;
 /** The worker reports in every 30 seconds. */
@@ -58,7 +57,7 @@ function whatHappened(l: LogRow, names: Map<string, string>): SafeHtml {
 
 /** A re-run's name, linked for someone who can open Re-run. */
 function runLink(b: string | null, id: string, name: string): SafeHtml {
-  return b ? html`<a href="${b}/tickets/triage/runs/${id}">${name}</a>` : html`${name}`;
+  return b ? html`<a href="${b}/triage/runs/${id}">${name}</a>` : html`${name}`;
 }
 
 /** `runs` is the workspace base when this person can open Re-run, otherwise null. */
@@ -78,16 +77,25 @@ function sourceTag(l: LogRow, names: Map<string, string>, b: string, runs: strin
     default: {
       const who = l.by_user ? names.get(l.by_user) ?? 'An admin' : 'Someone';
       return l.bulk_id || l.detail?.bulk
-        ? html`${tag(`Bulk by ${who}`, { icon: 'list-filter' })}${l.bulk_id ? html` · <a href="${b}/tickets/triage/activity?bulk=${l.bulk_id}">this bulk</a>` : ''}`
+        ? html`${tag(`Bulk by ${who}`, { icon: 'list-filter' })}${l.bulk_id ? html` · <a href="${b}/triage/activity?bulk=${l.bulk_id}">this bulk</a>` : ''}`
         : html`${tag(`${who} reviewed`, { icon: 'user-cog' })}`;
     }
   }
 }
 
-function subject(l: LogRow, b: string, runs: string | null): SafeHtml {
+/** `issuePages`: whether this person can open an issue's own page; without it, the issue opens on GitHub. */
+function subject(l: LogRow, b: string, runs: string | null, issuePages: boolean): SafeHtml {
   if (l.submission_id) return html`<a class="cell-title" href="${b}/tickets/${l.submission_id}">${l.title ?? l.ticket_ref ?? l.ref ?? 'Ticket'}</a> <span class="muted nowrap">${l.ticket_ref ?? ''}</span>`;
-  if (l.repo_id && l.number) return html`<a class="cell-title" href="${b}/tickets/issues/${String(l.repo_id)}/${String(l.number)}">${l.title ?? `Issue #${l.number}`}</a> <span class="muted nowrap">${l.owner && l.name ? `${l.owner}/${l.name}` : ''}#${String(l.number)}</span>`;
-  if (l.run_id) return runs ? html`<a class="cell-title" href="${runs}/tickets/triage/runs/${l.run_id}">${l.run_name || 'Re-run'}</a>` : html`<span class="cell-title">${l.run_name || 'Re-run'}</span>`;
+  if (l.repo_id && l.number) {
+    const title = l.title ?? `Issue #${l.number}`;
+    const link = issuePages
+      ? html`<a class="cell-title" href="${b}/issues/${String(l.repo_id)}/${String(l.number)}">${title}</a>`
+      : l.owner && l.name
+        ? html`<a class="cell-title" href="https://github.com/${l.owner}/${l.name}/issues/${String(l.number)}" target="_blank" rel="noopener noreferrer">${title}<span class="rv-ext" title="Opens on GitHub">${icon('arrow-up-right', 14)}</span></a>`
+        : html`<span class="cell-title">${title}</span>`;
+    return html`${link} <span class="muted nowrap">${l.owner && l.name ? `${l.owner}/${l.name}` : ''}#${String(l.number)}</span>`;
+  }
+  if (l.run_id) return runs ? html`<a class="cell-title" href="${runs}/triage/runs/${l.run_id}">${l.run_name || 'Re-run'}</a>` : html`<span class="cell-title">${l.run_name || 'Re-run'}</span>`;
   if (l.bulk_id) return html`<span class="cell-title">Bulk apply</span>`;
   return html`<span class="cell-title">AI triage</span>`;
 }
@@ -97,12 +105,13 @@ export function registerTriageActivityRoutes(app: FastifyInstance, web: Web): vo
 
   function nowPanel(ctx: WorkspaceRequestContext, now: ActivityNow, settings: Awaited<ReturnType<typeof getTriageSettings>>, limitReached: boolean): SafeHtml {
     const b = ctx.base;
-    const runs = canTriage(ctx, 'runs') ? b : null;
+    const runs = canOpen(ctx.membership, 'triage.runs') ? b : null;
+    const issuePages = canOpenIssue(ctx.membership);
     const workerOk = now.workerSeenAt ? Date.now() - now.workerSeenAt.getTime() < WORKER_STALE_MS : null;
     const busy = now.queued.tickets + now.queued.issues + now.queued.evaluate + now.queued.apply;
     const workingLink = (w: ActivityNow['working'][number]) => {
       const run = w.run_id ? now.runs.find((r) => r.id === w.run_id) : null;
-      const what = w.submission_id ? html`<a href="${b}/tickets/${w.submission_id}">a Discord ticket</a>` : w.repo_id ? html`<a href="${b}/tickets/issues/${String(w.repo_id)}/${String(w.number)}">issue #${String(w.number)}</a>` : html`a ticket`;
+      const what = w.submission_id ? html`<a href="${b}/tickets/${w.submission_id}">a Discord ticket</a>` : w.repo_id ? (issuePages ? html`<a href="${b}/issues/${String(w.repo_id)}/${String(w.number)}">issue #${String(w.number)}</a>` : html`issue #${String(w.number)}`) : html`a ticket`;
       return html`<li>${icon('loader-circle', 14, 'muted')}<span>${w.kind === 'rerun' ? (w.job === 'apply' ? 'Applying a result for ' : 'Re-running ') : 'Triaging '}${what}${run ? html` · ${runLink(runs, run.id, run.name || 're-run')}` : ''}</span></li>`;
     };
     return html`<div class="card">
@@ -110,7 +119,7 @@ export function registerTriageActivityRoutes(app: FastifyInstance, web: Web): vo
 </div>
       ${workerOk === false ? html`<div class="card-b tight">${notice('danger', 'The triage worker isn’t running', html`It last checked in ${timeAgo(now.workerSeenAt!)}. Nothing is triaged or applied until it’s back.${can(ctx.membership, 'health.view') ? html` Check <a href="${b}/health">Server health</a>.` : ''}`)}</div>` : ''}
       ${settings.paused ? html`<div class="card-b tight">${notice('warn', 'Triage is paused', pauseMessage(settings.paused.reason, settings.paused.detail, settings.config.model))}</div>` : ''}
-      ${limitReached ? html`<div class="card-b tight">${notice('warn', 'Monthly limit reached', 'Nothing more is triaged this month. Raise the limit in Actions.')}</div>` : ''}
+      ${limitReached ? html`<div class="card-b tight">${notice('warn', 'Monthly limit reached', `Nothing more is triaged this month.${can(ctx.membership, 'triage.actions.edit') ? ' Raise the limit in Actions.' : ''}`)}</div>` : ''}
       <div class="stats four">
         <div class="stat"><div class="l">${icon('message-circle', 14)}New Discord tickets</div><div class="v">${String(now.queued.tickets)}</div><div class="sub">${settings.enabled ? 'waiting' : 'triage off'}</div></div>
         <div class="stat"><div class="l">${icon('github', 14)}New GitHub issues</div><div class="v">${String(now.queued.issues)}</div><div class="sub">${settings.githubEnabled ? 'waiting' : 'triage off'}</div></div>
@@ -121,7 +130,7 @@ export function registerTriageActivityRoutes(app: FastifyInstance, web: Web): vo
         <ul class="tri-effects">
           <li>${icon(workerOk === false ? 'circle-x' : 'circle-check', 14, workerOk === false ? 'danger' : 'ok')}<span>Triage worker: ${workerOk === null ? 'no check-in recorded yet' : workerOk ? html`running, checked in ${timeAgo(now.workerSeenAt!)}` : 'not running'}</span></li>
           ${now.working.length ? now.working.map(workingLink) : html`<li>${icon('clock', 14)}<span class="muted">${busy ? 'Between items.' : 'Idle.'}</span></li>`}
-          ${now.bulks.filter((x) => x.status === 'running').map((x) => html`<li>${icon('list-filter', 14)}<span><a href="${b}/tickets/triage/activity?bulk=${x.id}">Bulk apply</a> of ${x.description}: ${plural(x.pending, 'ticket')} to go${x.waiting_until_at && x.waiting_until_at.getTime() > Date.now() ? ` · waiting for GitHub’s hourly limit until ${x.waiting_until_at.toISOString().slice(11, 16)} UTC` : ''}</span></li>`)}
+          ${now.bulks.filter((x) => x.status === 'running').map((x) => html`<li>${icon('list-filter', 14)}<span><a href="${b}/triage/activity?bulk=${x.id}">Bulk apply</a> of ${x.description}: ${plural(x.pending, 'ticket')} to go${x.waiting_until_at && x.waiting_until_at.getTime() > Date.now() ? ` · waiting for GitHub’s hourly limit until ${x.waiting_until_at.toISOString().slice(11, 16)} UTC` : ''}</span></li>`)}
           ${now.runs.map((r) => {
             const waiting = r.waiting_until_at && r.waiting_until_at.getTime() > Date.now()
               ? (r.waiting_reason === 'github' ? ` · waiting for GitHub’s hourly limit until ${r.waiting_until_at.toISOString().slice(11, 16)} UTC, so new tickets can still be filed` : ` · Claude asked to slow down, carrying on ${timeAgo(r.waiting_until_at)}`)
@@ -133,12 +142,13 @@ export function registerTriageActivityRoutes(app: FastifyInstance, web: Web): vo
     </div>`;
   }
 
-  app.get('/w/:wid/tickets/triage/activity', async (req, reply) => {
+  app.get('/w/:wid/triage/activity', async (req, reply) => {
     const ctx = await web.requireWorkspace(req, reply, { permission: 'triage.activity.view' });
     if (!ctx) return reply;
     const wid = ctx.workspace.id;
     const b = ctx.base;
-    const runs = canTriage(ctx, 'runs') ? b : null;
+    const runs = canOpen(ctx.membership, 'triage.runs') ? b : null;
+    const issuePages = canOpenIssue(ctx.membership);
     const q = req.query as { result?: string; source?: string; run?: string; bulk?: string; before?: string; partial?: string };
     const result = (['ok', 'failed', 'skipped', 'info'] as const).find((r) => r === q.result) ?? null;
     const source = SOURCES.find((s) => s.value === q.source)?.value ?? null;
@@ -167,14 +177,14 @@ export function registerTriageActivityRoutes(app: FastifyInstance, web: Web): vo
       if (rn) p.set('run', rn);
       if (o.before) p.set('before', String(o.before));
       const qs = p.toString();
-      return `${b}/tickets/triage/activity${qs ? `?${qs}` : ''}`;
+      return `${b}/triage/activity${qs ? `?${qs}` : ''}`;
     };
     const log = html`<ol class="log">${entries.map((l) => {
       const [name, tone] = RESULT_ICON[l.result];
       return html`<li class="log-row log-${l.result}">
         <span class="log-ic">${icon(name, 16, tone)}</span>
         <div class="grow">
-          <div class="log-t">${subject(l, b, runs)} ${sourceTag(l, names, b, runs)}</div>
+          <div class="log-t">${subject(l, b, runs, issuePages)} ${sourceTag(l, names, b, runs)}</div>
           <div class="log-d small">${whatHappened(l, names)}</div>
         </div>
         <time class="when" datetime="${l.at.toISOString()}" title="${formatDate(l.at)}">${timeAgo(l.at)}</time>
@@ -189,7 +199,7 @@ export function registerTriageActivityRoutes(app: FastifyInstance, web: Web): vo
           { href: link({ result: 'failed', before: null }), label: 'Failed', current: result === 'failed' },
           { href: link({ result: 'skipped', before: null }), label: 'Skipped', current: result === 'skipped' },
         ])}
-        <form method="get" action="${b}/tickets/triage/activity" class="tools">
+        <form method="get" action="${b}/triage/activity" class="tools">
           ${result ? html`<input type="hidden" name="result" value="${result}">` : ''}${runId ? html`<input type="hidden" name="run" value="${runId}">` : ''}${bulkId ? html`<input type="hidden" name="bulk" value="${bulkId}">` : ''}
           ${selectWrap(html`<select name="source" aria-label="Where from" data-autosubmit><option value="">Everything</option>${SOURCES.map((s) => html`<option value="${s.value}" ${s.value === source ? raw('selected') : ''}>${s.label}</option>`)}</select>`, { sm: true })}
           <button type="submit" class="btn sm nojs">Show</button>
@@ -205,9 +215,8 @@ export function registerTriageActivityRoutes(app: FastifyInstance, web: Web): vo
     if (q.partial === '1') return reply.header('x-live-partial', '1').header('Cache-Control', 'no-store').type('text/html').send(live.toString());
     const partialSrc = `${link({})}${link({}).includes('?') ? '&' : '?'}partial=1`;
     const body = html`
-      ${await ticketsHeader(web, ctx, 'triage')}
-      ${triageNav(ctx, 'activity', before ? null : html`<span class="live" data-live-status>${raw('<span class="pulse" aria-hidden="true"></span>')}<span class="t">Live</span></span>`)}
+      ${await toolHeader(web, ctx, 'triage', 'triage.activity', { actions: before ? null : html`<span class="live" data-live-status>${raw('<span class="pulse" aria-hidden="true"></span>')}<span class="t">Live</span></span>` })}
       <div class="stack" ${before ? '' : raw(`data-live="5000" data-live-src="${partialSrc}"`)}>${live}</div>`;
-    return web.render(reply, ctx, 'Activity · Triage', 'tickets', body, { width: 'full' });
+    return web.render(reply, ctx, 'Activity · AI triage', 'triage', body, { width: 'full' });
   });
 }

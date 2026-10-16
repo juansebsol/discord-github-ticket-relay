@@ -346,9 +346,9 @@ export type PauseReason = 'no_key' | 'key_invalid' | 'credits' | 'model_unavaila
 export function pauseMessage(reason: PauseReason, detail: string | null, model: string): string {
   switch (reason) {
     case 'no_key':
-      return 'There’s no Claude API key. Add one below to resume.';
+      return 'There’s no Claude API key. Add one in Settings › Claude API to resume.';
     case 'key_invalid':
-      return 'Claude rejected the API key. Replace it below to resume.';
+      return 'Claude rejected the API key. Replace it in Settings › Claude API to resume.';
     case 'credits':
       return 'The Anthropic account behind this key is out of credits. Add credits in the Anthropic Console: triage checks again every 5 minutes and carries on by itself.';
     case 'model_unavailable':

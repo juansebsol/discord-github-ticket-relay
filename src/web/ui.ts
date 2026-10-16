@@ -183,10 +183,15 @@ export function pageHeader(o: {
   </header>`;
 }
 
-/** Link tabs under a page header; hidden when only one tab would show. */
-export function tabs(label: string, items: { href: string; label: string; current: boolean; count?: number }[]): SafeHtml {
+/**
+ * Link tabs under a page header; hidden when only one tab would show. A `locked` tab is shown
+ * greyed out with a lock, not as a link; its text says why. `tone` colors the count.
+ */
+export function tabs(label: string, items: { href: string; label: string; current: boolean; count?: number; tone?: BadgeTone; locked?: string }[]): SafeHtml {
   if (items.length < 2) return html``;
-  return html`<nav class="tabs" aria-label="${label}">${items.map((t) => html`<a class="tab" href="${t.href}" ${t.current ? raw('aria-current="page"') : ''}>${t.label}${t.count ? badge(t.count) : ''}</a>`)}</nav>`;
+  return html`<nav class="tabs" aria-label="${label}">${items.map((t) => (t.locked
+    ? html`<span class="tab locked" aria-disabled="true" title="${t.locked}">${icon('lock', 12)}${t.label}<span class="sr-only"> (no access)</span></span>`
+    : html`<a class="tab" href="${t.href}" ${t.current ? raw('aria-current="page"') : ''}>${t.label}${t.count ? badge(t.count, t.tone) : ''}</a>`))}</nav>`;
 }
 
 /** A settings row: label and description on the left, a control on the right. */
@@ -220,8 +225,19 @@ export function viewOnlyTag(why: string): SafeHtml {
   return tag('View only', { icon: 'eye', title: why });
 }
 
-export function badge(n: number | string, tone: '' | 'warn' = ''): SafeHtml {
+/** Warn: something needs attention. Accent: something waits for someone (suggestions to review). */
+export type BadgeTone = '' | 'warn' | 'accent';
+
+export function badge(n: number | string, tone: BadgeTone = ''): SafeHtml {
   return html`<span class="badge${tone ? ` ${tone}` : ''}">${String(n)}</span>`;
+}
+
+/** A small status chip for page headers: a colored dot and a short line ("3 repositories · synced 2 min ago"). */
+export function chip(text: Content, o: { tone?: 'ok' | 'warn' | null; title?: string; href?: string } = {}): SafeHtml {
+  const inner = html`<span class="dot${o.tone ? ` ${o.tone}` : ''}" aria-hidden="true"></span><span class="t">${text}</span>`;
+  return o.href
+    ? html`<a class="chip" href="${o.href}" ${o.title ? html`title="${o.title}"` : ''}>${inner}</a>`
+    : html`<span class="chip" ${o.title ? html`title="${o.title}"` : ''}>${inner}</span>`;
 }
 
 function hash(s: string): number {
