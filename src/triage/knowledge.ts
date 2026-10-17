@@ -42,6 +42,8 @@ export interface KnowledgeSources {
   questions: number;
   /** GitHub didn't let the app read the repository's files (no Contents: read). */
   filesBlocked: boolean;
+  /** Claude ran out of room before the end; the TRIAGE.md is what it wrote until then. */
+  cutOff?: boolean;
 }
 
 /** One of Claude's questions from triage, and what it found when it last wrote the TRIAGE.md. */
@@ -126,27 +128,6 @@ export async function saveKnowledge(q: Queryable, workspaceId: string, appId: st
     [appId, workspaceId, text, userId],
   );
   return true;
-}
-
-/**
- * Asks the triage worker to write (or rewrite) these apps' TRIAGE.md. Apps already waiting or
- * being written are left as they are. Returns how many were queued.
- */
-export async function requestWrites(q: Queryable, workspaceId: string, appIds: string[], userId: string | null): Promise<number> {
-  let queued = 0;
-  for (const appId of appIds) {
-    const { rows } = await q.query(
-      `INSERT INTO app_knowledge (app_id, workspace_id, auto_status, auto_requested_at, auto_requested_by)
-       SELECT a.id, a.workspace_id, 'queued', now_ms(), $3 FROM apps a WHERE a.id = $1 AND a.workspace_id = $2
-       ON CONFLICT (app_id) DO UPDATE SET auto_status = 'queued', auto_requested_at = now_ms(), auto_requested_by = excluded.auto_requested_by,
-         auto_attempts = 0, auto_error = NULL, updated_at = now_ms()
-       WHERE app_knowledge.auto_status IS NULL OR app_knowledge.auto_status NOT IN ('queued', 'running')
-       RETURNING app_id`,
-      [appId, workspaceId, userId],
-    );
-    queued += rows.length;
-  }
-  return queued;
 }
 
 /** The app's TRIAGE.md as the triage prompt takes it (Claude's part and the team's notes). */

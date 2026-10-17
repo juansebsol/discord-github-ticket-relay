@@ -10,6 +10,7 @@ import { html } from '../lib/html.js';
 import { empty, linkBtn, pageHeader } from './ui.js';
 import type { Processor } from '../domain/processor.js';
 import type { TriageEngine } from '../triage/engine.js';
+import { runShown } from '../triage/knowledge-runs.js';
 import { getDiscordConnection, getGitHubConnection, getPanel, listApps } from '../domain/store.js';
 import { UserFacingError, type Deps, type Role } from '../domain/types.js';
 import { getMembership, listMemberships, type Membership } from '../domain/workspaces.js';
@@ -80,7 +81,7 @@ export interface Web {
 }
 
 export async function computeProgress(deps: Deps, workspaceId: string): Promise<SetupProgress> {
-  const [gh, dc, apps, panel, attention, dev, review] = await Promise.all([
+  const [gh, dc, apps, panel, attention, dev, review, knowledgeRun] = await Promise.all([
     getGitHubConnection(deps.db, workspaceId),
     getDiscordConnection(deps.db, workspaceId),
     listApps(deps.db, workspaceId),
@@ -95,6 +96,8 @@ export async function computeProgress(deps: Deps, workspaceId: string): Promise<
               AND EXISTS (SELECT 1 FROM apps a WHERE a.workspace_id = t.workspace_id AND a.repo_id = t.repo_id)) AS n`,
       [workspaceId],
     ),
+    // Claude writing TRIAGE.md files (AI triage › Knowledge): pages show the Live studio's pill.
+    runShown(deps.db, workspaceId),
   ]);
   return {
     github: !gh ? 'todo' : gh.status === 'active' ? 'done' : 'problem',
@@ -104,6 +107,7 @@ export async function computeProgress(deps: Deps, workspaceId: string): Promise<
     attention: attention.rows[0]!.n,
     review: Number(review.rows[0]?.n ?? 0),
     devMode: Boolean(dev.rows[0]?.on),
+    knowledgeRun,
   };
 }
 

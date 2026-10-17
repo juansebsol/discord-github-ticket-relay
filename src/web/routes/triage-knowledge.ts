@@ -22,18 +22,18 @@ import {
   listQuestions,
   notesOf,
   questionCounts,
-  requestWrites,
   saveKnowledge,
   sectionsOf,
   type AppKnowledge,
   type Question,
 } from '../../triage/knowledge.js';
-import { WRITE_ESTIMATE } from '../../triage/knowledge-writer.js';
+import { splitAnswers, WRITE_ESTIMATE } from '../../triage/knowledge-writer.js';
+import { emptyLive, finishRunIfDone, latestRun, LIVE_STEPS, requestWrites, stopWrites, type LiveState, type LiveStep, type LiveTag } from '../../triage/knowledge-runs.js';
 import { formatCost, getTriageSettings, KNOWLEDGE_EVERY_DAYS, KNOWLEDGE_SOONER, parseTriageConfig, resolveApiKey, saveTriageConfig, tokenCost } from '../../triage/settings.js';
 import { renderMarkdown } from '../markdown.js';
 import { setFlash } from '../session.js';
 import type { Web, WorkspaceRequestContext } from '../server.js';
-import { avatar, badge, csrfField, empty, formatDate, icon, linkBtn, notice, pageHeader, pill, plural, postBtn, selectWrap, setting, submitBtn, switchInput, tag, timeAgo } from '../ui.js';
+import { avatar, badge, csrfField, empty, formatDate, icon, initials, linkBtn, notice, pageHeader, pill, plural, postBtn, selectWrap, setting, submitBtn, switchInput, tag, timeAgo } from '../ui.js';
 import { areaHref, canOpen, canOpenIssue, knowledgeHref, pageLink, toolHeader, toolHref } from './tool.js';
 import { viewOnlyFooter } from './triage.js';
 
@@ -106,6 +106,69 @@ async function issuesPerRepo(q: Queryable, repoIds: number[]): Promise<Map<numbe
   return new Map(rows.map((r) => [Number(r.repo_id), { total: Number(r.total), open: Number(r.open) }]));
 }
 
+// ---- The Live studio ---------------------------------------------------------------------------
+
+const STEP_LABELS: Record<LiveStep, [done: string, now: string]> = {
+  repo: ['Read repo', 'Reading repo'],
+  issues: ['Issues', 'Reading issues'],
+  thinking: ['Thought', 'Thinking'],
+  writing: ['Wrote', 'Writing'],
+  answers: ['Answers', 'Answering'],
+};
+const PHASES: Record<LiveStep, string> = { repo: 'Reading the repository', issues: 'Reading the issues', thinking: 'Thinking', writing: 'Writing', answers: 'Answering its questions' };
+const TAGS: Record<LiveTag, string> = { github: 'GitHub', issues: 'Issues', tickets: 'Tickets', claude: 'Claude', answer: 'Answer', done: 'Done', error: 'Error', stop: 'Stopped' };
+
+/** "0:35", "4:12", "1:02:03". */
+function clock(ms: number): string {
+  const t = Math.max(0, Math.round(ms / 1000));
+  const h = Math.floor(t / 3600);
+  const m = Math.floor((t % 3600) / 60);
+  const sec = String(t % 60).padStart(2, '0');
+  return h ? `${h}:${String(m).padStart(2, '0')}:${sec}` : `${m}:${sec}`;
+}
+
+/** "1.2s", "21s", "1m 4s". */
+function took(ms: number): string {
+  return ms < 10_000 ? `${(Math.max(0, ms) / 1000).toFixed(1)}s` : ms < 60_000 ? `${Math.round(ms / 1000)}s` : `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1000)}s`;
+}
+
+const timeLeft = (ms: number) => (ms < 60_000 ? 'less than a minute left' : `about ${Math.round(ms / 60_000)} min left`);
+
+type RunAppState = 'running' | 'queued' | 'done' | 'failed' | 'stopped';
+
+interface RunAppRow {
+  app_id: string;
+  name: string;
+  position: number;
+  repo_owner: string;
+  repo_name: string;
+  auto_status: string | null;
+  auto_requested_at: Date | null;
+  auto_started_at: Date | null;
+  auto_finished_at: Date | null;
+  auto_model: string | null;
+  auto_input_tokens: number | null;
+  auto_output_tokens: number | null;
+  auto_body: string;
+  auto_error: string | null;
+  auto_live: LiveState | null;
+}
+
+function runAppState(r: RunAppRow): RunAppState {
+  if (r.auto_status === 'running') return 'running';
+  if (r.auto_status === 'queued') return 'queued';
+  return r.auto_live?.result ?? (r.auto_status === 'failed' ? 'failed' : 'done');
+}
+
+/** One app's steps for the studio, with how long each took (the one under way: so far). */
+function liveSteps(live: LiveState, state: RunAppState, elapsed: number) {
+  return LIVE_STEPS.filter((key) => key !== 'answers' || live.answers.length).map((key) => {
+    const step = live.steps.find((x) => x.key === key);
+    const now = Boolean(step && step.to === undefined && state === 'running');
+    return { label: STEP_LABELS[key][now ? 1 : 0], state: !step ? 'todo' : now ? 'active' : 'done', time: step ? took((step.to ?? elapsed) - step.from) : '' };
+  });
+}
+
 export function registerTriageKnowledgeRoutes(app: FastifyInstance, web: Web): void {
   const { deps } = web;
   const listUrl = (ctx: WorkspaceRequestContext) => areaHref(ctx, 'triage.knowledge');
@@ -163,10 +226,11 @@ export function registerTriageKnowledgeRoutes(app: FastifyInstance, web: Web): v
       variant, icon: 'refresh-cw', fields: { scope: 'all' }, loading: 'Starting…',
       confirm: { title: `Update all ${apps.length} TRIAGE.md files?`, body: `Claude reads each app’s repository and issues again and rewrites its TRIAGE.md, in the background. Your team’s notes stay as they are.${costLine(c.model, apps.length) ? ` Cost: ${costLine(c.model, apps.length)}.` : ''}`, label: 'Update all' },
     });
+    const watch = html`<button type="button" class="btn js-only" data-kn-open>${icon('eye', 14)}Watch</button>`;
     const write = !edit
-      ? ''
+      ? working ? html`<div class="row"><span class="kn-busy">${icon('loader-circle', 16, 'kn-spin')}Writing ${plural(working, 'TRIAGE.md', 'TRIAGE.md files')}…</span>${watch}</div>` : ''
       : working
-        ? html`<span class="kn-busy">${icon('loader-circle', 16, 'kn-spin')}Writing ${plural(working, 'TRIAGE.md', 'TRIAGE.md files')}…</span>`
+        ? html`<div class="row"><span class="kn-busy">${icon('loader-circle', 16, 'kn-spin')}Writing ${plural(working, 'TRIAGE.md', 'TRIAGE.md files')}…</span>${watch}</div>`
         : !key
           ? html`<span class="small muted">${needsKey(ctx)}</span>`
           : html`<div class="row">
@@ -253,13 +317,14 @@ export function registerTriageKnowledgeRoutes(app: FastifyInstance, web: Web): v
     // With Keep them up to date on: when it's rewritten next.
     const upcoming = !c.knowledgeAuto || !k?.auto_at ? '' : settings.enabled || settings.githubEnabled ? nextUpdate(k.auto_at, c.knowledgeEveryDays) : 'updates start when AI triage is on';
     const writtenDoc = isWritten(k)
-      ? html`<div class="card-b"><div class="kn-doc">${renderMarkdown(k.auto_body, repoUrl)}</div></div>
+      ? html`${k.auto_sources?.cutOff ? html`<div class="card-b tight">${notice('warn', null, 'Claude ran out of room before the end, so the last part may be missing. Update it to try again.')}</div>` : ''}
+          <div class="card-b"><div class="kn-doc">${renderMarkdown(k.auto_body, repoUrl)}</div></div>
           <details class="kn-raw"><summary>${icon('chevron-right', 14, 'chev')}Markdown<span class="muted"> · exactly what Claude reads</span></summary><pre class="prompt-pre">${k.auto_body}</pre></details>
           <div class="card-note">${[k.auto_model, k.auto_input_tokens ? `${n((k.auto_input_tokens ?? 0) + (k.auto_output_tokens ?? 0))} tokens` : '', used !== null && k.auto_input_tokens ? formatCost(used) : ''].filter(Boolean).join(' · ')}${k.auto_at ? html` · written ${ago(k.auto_at)}` : ''}${upcoming ? ` · ${upcoming}` : ''}</div>`
       : '';
     const writtenInner = html`
       ${busy(s)
-        ? html`<div class="kn-progress">${icon('loader-circle', 20, 'kn-spin')}<div><strong>${s === 'running' ? `Claude is reading ${a.name}’s repository and ${repoIssues.total ? `${n(repoIssues.total)} issues` : 'issues'}…` : 'Waiting its turn…'}</strong><p class="small muted">It takes about a minute, in the background: you can leave this page.${isWritten(k) ? ' Until then, tickets use the version below.' : ''}</p></div></div>`
+        ? html`<div class="kn-progress">${icon('loader-circle', 20, 'kn-spin')}<div><strong>${s === 'running' ? `Claude is reading ${a.name}’s repository and ${repoIssues.total ? `${n(repoIssues.total)} issues` : 'issues'}…` : 'Waiting its turn…'}</strong><p class="small muted">It takes about a minute, in the background: you can leave this page.${isWritten(k) ? ' Until then, tickets use the version below.' : ''}</p></div><button type="button" class="btn sm js-only" data-kn-open="${a.id}">${icon('eye', 14)}Watch</button></div>`
         : ''}
       ${s === 'failed' ? html`<div class="card-b tight">${notice('warn', isWritten(k) ? 'Couldn’t update it' : 'Couldn’t write it', `${k?.auto_error ?? 'Something went wrong.'}${isWritten(k) ? ' Tickets still use the version below.' : ''}`, { action: writeBtn('Try again', false) || null })}</div>` : ''}
       ${isWritten(k)
@@ -397,9 +462,9 @@ export function registerTriageKnowledgeRoutes(app: FastifyInstance, web: Web): v
     const [apps, knowledge] = await Promise.all([listApps(deps.db, wid), listKnowledge(deps.db, wid)]);
     const queued = await requestWrites(deps.db, wid, apps.filter((a) => all || !isWritten(knowledge.get(a.id))).map((a) => a.id), ctx.user.id);
     setFlash(reply, queued ? 'success' : 'info', queued
-      ? `Claude is ${all ? 'updating' : 'writing'} ${plural(queued, 'TRIAGE.md', 'TRIAGE.md files')}, about a minute each. This page updates as they’re done.`
+      ? `Claude is ${all ? 'updating' : 'writing'} ${plural(queued, 'TRIAGE.md', 'TRIAGE.md files')}, about a minute each.`
       : 'They’re already being written.');
-    return reply.redirect(listUrl(ctx));
+    return reply.redirect(`${listUrl(ctx)}?watch=1`);
   });
 
   app.post('/w/:wid/triage/knowledge/auto', async (req, reply) => {
@@ -428,7 +493,10 @@ export function registerTriageKnowledgeRoutes(app: FastifyInstance, web: Web): v
     // Just switched on: the ones never written start now; the others follow the schedule.
     const [apps, knowledge] = await Promise.all([listApps(deps.db, wid), listKnowledge(deps.db, wid)]);
     const queued = await requestWrites(deps.db, wid, apps.filter((a) => !isWritten(knowledge.get(a.id))).map((a) => a.id), ctx.user.id);
-    return respond(true, `${queued ? `Claude is writing the ${plural(queued, 'missing TRIAGE.md', 'missing TRIAGE.md files')} now, then rewrites them ${when}.` : `Claude rewrites each TRIAGE.md ${when}.`}${later}`);
+    const message = `${queued ? `Claude is writing the ${plural(queued, 'missing TRIAGE.md', 'missing TRIAGE.md files')} now, then rewrites them ${when}.` : `Claude rewrites each TRIAGE.md ${when}.`}${later}`;
+    // Writes started: the page reloads with the Live studio open.
+    if (queued && web.wantsJson(req)) return reply.send({ ok: true, message, go: `${listUrl(ctx)}?watch=1` });
+    return respond(true, message);
   });
 
   app.post('/w/:wid/triage/knowledge/:appId/write', async (req, reply) => {
@@ -439,9 +507,156 @@ export function registerTriageKnowledgeRoutes(app: FastifyInstance, web: Web): v
     if (!(await resolveApiKey(deps, ctx.workspace.id))) setFlash(reply, 'error', 'Add a Claude API key in Settings first.');
     else {
       const queued = await requestWrites(deps.db, ctx.workspace.id, [a.id], ctx.user.id);
-      setFlash(reply, queued ? 'success' : 'info', queued ? `Claude is writing the TRIAGE.md for ${a.name}, in about a minute. This page updates when it’s done.` : 'It’s already being written.');
+      setFlash(reply, queued ? 'success' : 'info', queued ? `Claude is writing the TRIAGE.md for ${a.name}, in about a minute.` : 'It’s already being written.');
+      return reply.redirect(`${knowledgeHref(ctx, a.id)}?watch=1`);
     }
     return reply.redirect(knowledgeHref(ctx, a.id));
+  });
+
+  // ---- Live: what the studio and its pill show, and Stop ----------------------------------------
+
+  app.get('/w/:wid/triage/knowledge/live', async (req, reply) => {
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'triage.knowledge.view' });
+    if (!ctx) return reply;
+    const wid = ctx.workspace.id;
+    reply.header('Cache-Control', 'no-store');
+    const run = await latestRun(deps.db, wid);
+    if (!run) return reply.send({ run: null });
+    const [{ rows }, settings] = await Promise.all([
+      deps.db.query<RunAppRow>(
+        `SELECT k.app_id, a.name, a.position, a.repo_owner, a.repo_name, k.auto_status, k.auto_requested_at, k.auto_started_at, k.auto_finished_at,
+                k.auto_model, k.auto_input_tokens, k.auto_output_tokens, k.auto_body, k.auto_error, k.auto_live
+           FROM app_knowledge k JOIN apps a ON a.id = k.app_id WHERE k.auto_run_id = $1`,
+        [run.id],
+      ),
+      getTriageSettings(deps.db, wid),
+    ]);
+    const now = Date.now();
+    const edit = can(ctx.membership, 'triage.knowledge.edit');
+    const apps = rows.map((r) => ({ r, state: runAppState(r) }));
+    // A run with nothing left (an app removed while it waited) ends here.
+    if (!run.finished_at && !apps.some((x) => x.state === 'running' || x.state === 'queued')) {
+      await finishRunIfDone(deps.db, run.id);
+      run.finished_at = new Date(now);
+    }
+    // Finished first (as they finished), then the one being written, then the waiting ones in turn.
+    const rank: Record<RunAppState, number> = { done: 0, failed: 0, stopped: 0, running: 1, queued: 2 };
+    const ms = (d: Date | null) => d?.getTime() ?? 0;
+    apps.sort((x, y) => rank[x.state] - rank[y.state] || (x.state === 'queued'
+      ? ms(x.r.auto_requested_at) - ms(y.r.auto_requested_at) || x.r.position - y.r.position
+      : ms(x.r.auto_finished_at) - ms(y.r.auto_finished_at)));
+    const running = apps.find((x) => x.state === 'running');
+    const waiting = apps.filter((x) => x.state === 'queued');
+    const finished = apps.filter((x) => x.state === 'done' || x.state === 'failed' || x.state === 'stopped');
+    const done = apps.filter((x) => x.state === 'done');
+    const failed = apps.filter((x) => x.state === 'failed').length;
+    const skipped = apps.filter((x) => x.state === 'stopped').length;
+    const durations = apps.filter((x) => (x.state === 'done' || x.state === 'failed') && x.r.auto_started_at && x.r.auto_finished_at).map((x) => ms(x.r.auto_finished_at) - ms(x.r.auto_started_at));
+    const each = durations.length ? durations.reduce((t, d) => t + d, 0) / durations.length : 60_000;
+    const runningFor = running?.r.auto_started_at ? now - ms(running.r.auto_started_at) : 0;
+    const eta = waiting.length * each + (running ? Math.max(5_000, each - runningFor) : 0);
+    const spent = done.reduce((t, x) => t + (tokenCost(x.r.auto_model ?? '', x.r.auto_input_tokens ?? 0, x.r.auto_output_tokens ?? 0) ?? 0), 0);
+    const cost = done.length && tokenCost(settings.config.model, 1, 1) !== null ? formatCost(spent) : null;
+    const active = !run.finished_at;
+    const elapsed = ms(run.finished_at ?? new Date(now)) - ms(run.started_at);
+    const scheduled = !run.started_by;
+    const total = apps.length;
+    const summary = [
+      `${done.length} written`,
+      failed ? `${failed} couldn’t be written` : '',
+      skipped ? `${skipped} stopped` : '',
+    ].filter(Boolean).join(' · ');
+    const runningLive = running?.r.auto_live ?? emptyLive();
+    const runningStep = runningLive.steps.at(-1)?.key;
+    const writingFrom = runningLive.steps.find((x) => x.key === 'writing')?.from;
+    const speed = running && writingFrom !== undefined && runningLive.text ? Math.round(runningLive.text.length / 4 / Math.max(1, (runningFor - writingFrom) / 1000)) : 0;
+
+    // The app shown in the middle: the one asked for, else the one being written, else the last done.
+    const askedFor = String((req.query as { app?: string }).app ?? '');
+    const pick = apps.find((x) => x.r.app_id === askedFor) ?? running ?? finished.at(-1) ?? apps[0];
+    let selected = null;
+    if (pick) {
+      const live = pick.r.auto_live ?? emptyLive();
+      const repoUrl = `https://github.com/${pick.r.repo_owner}/${pick.r.repo_name}`;
+      const pickFor = pick.r.auto_started_at ? (pick.state === 'running' ? now : ms(pick.r.auto_finished_at) || now) - ms(pick.r.auto_started_at) : 0;
+      const shown = pick.state === 'running' ? splitAnswers(live.text).body : pick.state === 'queued' ? '' : pick.r.auto_body;
+      const step = live.steps.at(-1)?.key;
+      const writing = pick.state === 'running' && (step === 'writing' || step === 'answers');
+      const tokens = pick.state === 'running' ? (live.text ? `≈ ${plural(Math.round(live.text.length / 4), 'token')}` : '') : live.outputTokens ? `${plural(live.outputTokens, 'token')} written${live.inputTokens ? ` · ${n(live.inputTokens)} read` : ''}` : '';
+      selected = {
+        id: pick.r.app_id,
+        name: pick.r.name,
+        initials: initials(pick.r.name, 2),
+        state: pick.state,
+        steps: pick.state === 'queued' ? [] : liveSteps(live, pick.state, pickFor),
+        html: shown.trim() ? renderMarkdown(shown, repoUrl).toString() : '',
+        empty: pick.state === 'queued'
+          ? 'Waiting its turn: Claude writes the apps one at a time.'
+          : pick.state === 'failed' ? `Couldn’t write it: ${live.error ?? pick.r.auto_error ?? 'something went wrong'}.`
+            : pick.state === 'stopped' ? (pick.r.auto_body.trim() ? 'Stopped: its previous TRIAGE.md stays (below).' : 'Stopped before Claude wrote anything.')
+              : pick.state === 'running' && !shown.trim() ? (step ? `${PHASES[step]}…` : 'Starting…') : '',
+        writing,
+        tokens,
+        speed: pick === running ? speed : 0,
+        cutOff: Boolean(live.cutOff),
+        log: live.log.map((l) => ({ time: clock(l.at), tag: l.tag, label: TAGS[l.tag], text: l.text })),
+        answers: live.answers.map((a) => ({ question: a.question, html: a.answer ? renderMarkdown(a.answer, repoUrl).toString() : '', state: a.done ? (a.answer ? 'found' : 'unknown') : 'pending' })),
+        found: `${live.answers.filter((a) => a.answer).length} of ${live.answers.length} found`,
+        skip: edit && (pick.state === 'running' || pick.state === 'queued') && active ? { app: pick.r.app_id, label: pick.state === 'running' ? `Skip ${pick.r.name}` : 'Take it out of the queue' } : null,
+      };
+    }
+    return reply.send({
+      run: {
+        id: run.id,
+        active,
+        stopped: Boolean(run.stopped_at),
+        title: active
+          ? `Claude is ${scheduled ? 'updating' : 'writing'} your TRIAGE.md files`
+          : run.stopped_at ? `Stopped · ${summary}` : done.length === total ? (total === 1 ? 'TRIAGE.md written' : `All ${total} TRIAGE.md files written`) : summary,
+        sub: active
+          ? [`${finished.length} of ${total}`, `${clock(elapsed)} elapsed`, timeLeft(eta), cost ? `${cost} so far` : '', settings.config.model].filter(Boolean).join(' · ')
+          : [`Took ${clock(elapsed)}`, cost, settings.config.model, scheduled ? 'scheduled update' : run.started_by_name ? `started by ${run.started_by_name}` : ''].filter(Boolean).join(' · '),
+        total,
+        finished: finished.length,
+        percent: active ? Math.min(99, Math.round(((finished.length + (running ? Math.min(0.9, runningFor / each) : 0)) / Math.max(1, total)) * 100)) : 100,
+        pill: active
+          ? { icon: 'running', title: running ? `Writing ${running.r.name}` : 'Writing TRIAGE.md files', sub: [speed ? `${speed} tok/s` : runningStep ? PHASES[runningStep] : 'Starting', timeLeft(eta)].join(' · ') }
+          : { icon: failed ? 'failed' : run.stopped_at ? 'stopped' : 'done', title: run.stopped_at ? `Stopped · ${done.length} written` : done.length === total ? (total === 1 ? 'TRIAGE.md written' : `All ${total} written`) : summary, sub: [cost, 'Open to see them'].filter(Boolean).join(' · ') },
+      },
+      apps: apps.map((x, i) => ({
+        id: x.r.app_id,
+        name: x.r.name,
+        state: x.state,
+        note: x.state === 'running' ? clock(runningFor) : x.state === 'queued' ? (i === apps.indexOf(waiting[0]!) ? 'Up next' : '') : x.state === 'done' ? took(ms(x.r.auto_finished_at) - ms(x.r.auto_started_at)) : x.state === 'failed' ? 'Failed' : 'Stopped',
+        asked: x.r.auto_live?.answers.length ?? 0,
+        answered: x.r.auto_live?.answers.filter((a) => a.answer).length ?? 0,
+        url: knowledgeHref(ctx, x.r.app_id),
+      })),
+      current: running?.r.app_id ?? null,
+      selected,
+      edit,
+      page: listUrl(ctx),
+    });
+  });
+
+  app.post('/w/:wid/triage/knowledge/stop', async (req, reply) => {
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'triage.knowledge.edit' });
+    if (!ctx) return reply;
+    const wid = ctx.workspace.id;
+    const respond = (ok: boolean, message: string) => {
+      if (web.wantsJson(req)) return reply.code(ok ? 200 : 400).send(ok ? { ok, message } : { ok, error: message });
+      setFlash(reply, ok ? 'success' : 'error', message);
+      return reply.redirect(listUrl(ctx));
+    };
+    const appId = String((req.body as { app?: string } | null)?.app ?? '');
+    if (appId) {
+      const a = await getApp(deps.db, wid, appId);
+      if (!a) return respond(false, 'That app was removed.');
+      const r = await stopWrites(deps.db, wid, [a.id], ctx.user.id);
+      return respond(true, r.cancelled ? `Skipping ${a.name}: it keeps the TRIAGE.md it had.` : r.unqueued ? `${a.name} won’t be written this time.` : `${a.name} isn’t being written.`);
+    }
+    const r = await stopWrites(deps.db, wid, 'all', ctx.user.id);
+    return respond(true, r.unqueued || r.cancelled ? 'Stopped. The ones already written keep their new TRIAGE.md.' : 'Nothing was being written.');
   });
 
   // ---- The team's notes --------------------------------------------------------------------------

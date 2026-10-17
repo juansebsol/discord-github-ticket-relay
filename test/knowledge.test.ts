@@ -6,7 +6,7 @@ import { IssueIndexer, setDuplicateOf } from '../src/domain/issue-index.js';
 import { acceptSubmission } from '../src/domain/submissions.js';
 import { createInvite } from '../src/domain/workspaces.js';
 import { KNOWLEDGE_MAX } from '../src/triage/knowledge.js';
-import { cleanDoc } from '../src/triage/knowledge-writer.js';
+import { cleanDoc, splitAnswers } from '../src/triage/knowledge-writer.js';
 import { getTriageSettings, parseTriageConfig, saveTriageConfig, setApiKey, setTriageEnabled } from '../src/triage/settings.js';
 import { renderMarkdown } from '../src/web/markdown.js';
 import { form, get, grant, makeAdmin, makeApp, makeWorkspace, resetDb, testDb, type Admin, type ConfiguredWorkspace, type TestEnv } from './helpers.js';
@@ -15,6 +15,7 @@ const KEY = 'sk-ant-test-key-0123456789abcdef';
 const QUESTION = 'Is the blank PNG export on Windows a known issue?';
 const WRITTEN = '# TRIAGE.md\n\n## Known issues\n- PNG export of a spread leaves the right page blank on Windows: #1, #2\n\n## Fixed recently\n- Crash when opening large files: #3, fixed in v0.9.2';
 const NOTES = '- Refunds go to the store, not GitHub.';
+const ANSWERS = '## Answers to the triager’s questions';
 
 let env: TestEnv;
 let ws: ConfiguredWorkspace;
@@ -124,10 +125,12 @@ describe('Knowledge: Claude writes each app’s TRIAGE.md', () => {
     await enable();
     await seedRepository();
     await ask();
-    env.anthropic.knowledge = { triage_md: WRITTEN, answers: [{ id: 1, answer: 'Yes: #1, reported twice.' }] };
+    env.anthropic.knowledge = { text: `${WRITTEN}\n\n${ANSWERS}\nQ1: Yes: #1, reported twice.` };
 
     const started = await post('/triage/knowledge/write', { scope: 'missing' });
-    expect(flash(started)).toBe('Claude is writing 2 TRIAGE.md files, about a minute each. This page updates as they’re done.');
+    expect(flash(started)).toBe('Claude is writing 2 TRIAGE.md files, about a minute each.');
+    // The page it goes back to opens the Live studio.
+    expect(started.headers.location).toBe(`${w()}/triage/knowledge?watch=1`);
     expect((await knowledgeRow(photo().id)).auto_status).toBe('queued');
     const waiting = (await page('/triage/knowledge')).body;
     expect(waiting).toContain('Writing 2 TRIAGE.md files…');
@@ -139,6 +142,9 @@ describe('Knowledge: Claude writes each app’s TRIAGE.md', () => {
     await env.triage.drain();
     expect(writes()).toHaveLength(2);
     const req = writes().find((r) => r.body.messages[0].content.startsWith('Write the TRIAGE.md for PhotoCraft'))!;
+    // Streamed plain text, with room for Claude's thinking.
+    expect(req.body).toMatchObject({ stream: true, max_tokens: 32000 });
+    expect(req.body.output_config).toBeUndefined();
     const data = JSON.parse(req.body.messages[0].content.slice(req.body.messages[0].content.indexOf('\n') + 1));
     expect(data.app).toMatchObject({ name: 'PhotoCraft', repository: `${repo(0).owner}/${repo(0).name}`, repository_description: 'Photo editing for comics' });
     // Badges and HTML left out.
@@ -160,7 +166,7 @@ describe('Knowledge: Claude writes each app’s TRIAGE.md', () => {
     expect(row.auto_body).toBe(WRITTEN.replace('# TRIAGE.md\n\n', ''));
     expect(row.auto_sources).toEqual({
       readme: 'README.md', files: ['CHANGELOG.md', 'docs/FAQ.md'], releases: 1, latestRelease: 'v0.9.2',
-      issues: { total: 4, open: 2, fixed: 1, notPlanned: 1 }, tickets: 1, questions: 1, filesBlocked: false,
+      issues: { total: 4, open: 2, fixed: 1, notPlanned: 1 }, tickets: 1, questions: 1, filesBlocked: false, cutOff: false,
     });
     expect(row.auto_answers).toEqual([{ question: QUESTION, answer: 'Yes: #1, reported twice.' }]);
     expect(row.auto_input_tokens).toBe(1200);
@@ -235,6 +241,24 @@ describe('Knowledge: Claude writes each app’s TRIAGE.md', () => {
     expect((await getTriageSettings(env.db, wid())).paused).toBeNull();
   });
 
+  it('keeps what Claude wrote when it runs out of room, and says so', async () => {
+    await enable();
+    env.anthropic.queue.push({ text: `${WRITTEN}\n- Half a li`, stop: 'max_tokens' });
+    await post(`/triage/knowledge/${photo().id}/write`);
+    await env.triage.drain();
+    const row = await knowledgeRow(photo().id);
+    expect(row.auto_status).toBe('done');
+    expect(row.auto_body).toBe(WRITTEN.replace('# TRIAGE.md\n\n', ''));
+    expect(row.auto_sources.cutOff).toBe(true);
+    expect((await page(`/triage/knowledge/${photo().id}`)).body).toContain('Claude ran out of room before the end, so the last part may be missing.');
+
+    // Out of room before a single line: nothing to keep.
+    env.anthropic.queue.push({ text: '## Known iss', stop: 'max_tokens' });
+    await post(`/triage/knowledge/${vector().id}/write`);
+    await env.triage.drain();
+    expect(await knowledgeRow(vector().id)).toMatchObject({ auto_status: 'failed', auto_error: 'Claude ran out of room before it wrote anything.' });
+  });
+
   it('needs a Claude API key', async () => {
     expect(flash(await post('/triage/knowledge/write', { scope: 'missing' }))).toBe('Add a Claude API key in Settings first.');
     expect((await env.db.query('SELECT count(*) AS n FROM app_knowledge')).rows[0].n).toBe(0);
@@ -244,7 +268,7 @@ describe('Knowledge: Claude writes each app’s TRIAGE.md', () => {
   it('keeps them up to date when switched on: weekly, and sooner after new questions', async () => {
     await enable();
     const on = await saveAuto({ auto: '1' });
-    expect(on.json()).toEqual({ ok: true, message: 'Claude is writing the 2 missing TRIAGE.md files now, then rewrites them every week, and sooner after 3 new questions.' });
+    expect(on.json()).toEqual({ ok: true, message: 'Claude is writing the 2 missing TRIAGE.md files now, then rewrites them every week, and sooner after 3 new questions.', go: `${w()}/triage/knowledge?watch=1` });
     expect((await getTriageSettings(env.db, wid())).config.knowledgeAuto).toBe(true);
     await env.triage.drain();
     expect(writes()).toHaveLength(2);
@@ -277,8 +301,8 @@ describe('Knowledge: Claude writes each app’s TRIAGE.md', () => {
     expect(list).toContain('<select name="every" form="kn-auto"');
     expect(list).toContain('<option value="7" selected>Every week</option>');
     expect(list).toContain('<option value="3" selected>After 3 new questions</option>');
-    // 20k in and 2.5k out per update with Haiku, 2 apps, every week.
-    expect(list).toContain('On this schedule, <span data-kn-month data-each="0.00325" data-apps="2">about $0.03</span> a month for 2 apps.');
+    // 25k in and 8k out (thinking included) per update with Haiku, 2 apps, every week.
+    expect(list).toContain('On this schedule, <span data-kn-month data-each="0.0065" data-apps="2">about $0.06</span> a month for 2 apps.');
 
     // Picked while off: saved for later.
     expect((await saveAuto({ every: '30', sooner: '0' })).json()).toEqual({ ok: true, message: 'Schedule saved: every month. Switch it on to start.' });
@@ -286,7 +310,7 @@ describe('Knowledge: Claude writes each app’s TRIAGE.md', () => {
     expect((await page('/triage/knowledge')).body).toContain('<option value="30" selected>Every month</option>');
 
     // On, then changed while on: the message says the schedule.
-    expect((await saveAuto({ auto: '1', every: '1', sooner: '1' })).json()).toEqual({ ok: true, message: 'Claude is writing the 2 missing TRIAGE.md files now, then rewrites them every day, and sooner after 1 new question.' });
+    expect((await saveAuto({ auto: '1', every: '1', sooner: '1' })).json()).toEqual({ ok: true, message: 'Claude is writing the 2 missing TRIAGE.md files now, then rewrites them every day, and sooner after 1 new question.', go: `${w()}/triage/knowledge?watch=1` });
     await env.triage.drain();
     expect(writes()).toHaveLength(2);
     expect((await page(`/triage/knowledge/${photo().id}`)).body).toContain('Claude reads it with every PhotoCraft ticket and rewrites it every day, and sooner after 1 new question.');
@@ -373,6 +397,145 @@ describe('Knowledge: Claude writes each app’s TRIAGE.md', () => {
   });
 });
 
+describe('The Live studio', () => {
+  const live = async (query = '', who: Admin = ws.owner) => (await env.server.inject({ method: 'GET', url: `${w()}/triage/knowledge/live${query}`, ...get(who) }));
+  const stopJson = (fields: Record<string, string> = {}, who: Admin = ws.owner) => env.server.inject({
+    method: 'POST', url: `${w()}/triage/knowledge/stop`,
+    headers: { ...form(who).headers, accept: 'application/json', 'x-requested-with': 'fetch' },
+    payload: new URLSearchParams({ _csrf: who.csrf, ...fields }).toString(),
+  });
+  const status = async (appId: string) => (await knowledgeRow(appId))?.auto_status ?? null;
+
+  it('follows a run as Claude writes, on every page, until it’s done', async () => {
+    await enable();
+    await seedRepository();
+    await ask();
+    env.anthropic.knowledge = { text: `${WRITTEN}\n\n${ANSWERS}\nQ1: Yes: #1, reported twice.` };
+    expect((await live()).json()).toEqual({ run: null });
+    expect((await page('/tickets')).body).not.toContain('id="kn-live"');
+
+    await post('/triage/knowledge/write', { scope: 'missing' });
+    const run = (await env.db.query('SELECT * FROM knowledge_runs')).rows;
+    expect(run).toHaveLength(1);
+    expect(run[0]).toMatchObject({ started_by: ws.owner.user.id, finished_at: null });
+    // Every page carries the studio and its pill while it runs.
+    const tickets = (await page('/tickets')).body;
+    expect(tickets).toContain(`<div id="kn-live" data-src="${w()}/triage/knowledge/live" data-stop="${w()}/triage/knowledge/stop"`);
+    expect(tickets).toContain('<dialog class="kn-studio" id="kn-studio"');
+    expect(tickets).toContain('data-kn-stopall');
+
+    const waiting = (await live()).json();
+    expect(waiting.run).toMatchObject({ active: true, total: 2, finished: 0, title: 'Claude is writing your TRIAGE.md files' });
+    expect(waiting.run.sub).toMatch(/^0 of 2 · 0:0\d elapsed · about 2 min left · claude-haiku-5-5$/);
+    expect(waiting.run.pill).toMatchObject({ icon: 'running', title: 'Writing TRIAGE.md files' });
+    expect(waiting.apps.map((a: { name: string; state: string; note: string }) => [a.name, a.state, a.note])).toEqual([['PhotoCraft', 'queued', 'Up next'], ['VectorCraft', 'queued', '']]);
+    expect(waiting.selected).toMatchObject({ name: 'PhotoCraft', state: 'queued', empty: 'Waiting its turn: Claude writes the apps one at a time.', skip: { app: photo().id, label: 'Take it out of the queue' } });
+
+    await env.triage.drain();
+    const done = (await live(`?app=${photo().id}`)).json();
+    expect(done.run).toMatchObject({ active: false, finished: 2, percent: 100, title: 'All 2 TRIAGE.md files written', pill: { icon: 'done', title: 'All 2 written' } });
+    expect(done.run.sub).toContain('started by');
+    expect(done.apps.map((a: { state: string }) => a.state)).toEqual(['done', 'done']);
+    expect(done.apps[0]).toMatchObject({ name: 'PhotoCraft', asked: 1, answered: 1, url: `${w()}/triage/knowledge/${photo().id}` });
+    const s = done.selected;
+    expect(s.steps.map((x: { label: string; state: string }) => `${x.label}:${x.state}`)).toEqual(['Read repo:done', 'Issues:done', 'Thought:done', 'Wrote:done', 'Answers:done']);
+    expect(s.html).toContain('<h3>Known issues</h3>');
+    expect(s.tokens).toBe('90 tokens written · 1,200 read');
+    expect(s.log.map((l: { label: string; text: string }) => `${l.label}: ${l.text}`)).toEqual([
+      'GitHub: Read README.md · 164 characters',
+      'GitHub: Read CHANGELOG.md · 58 characters',
+      'GitHub: Read docs/FAQ.md',
+      'GitHub: 1 release · latest v0.9.2',
+      'Issues: 4 issues · 2 open · 1 fixed · 1 not planned',
+      'Tickets: 1 recent ticket summary',
+      'Claude: Sent to claude-haiku-5-5, with 1 question to answer',
+      'Claude: Reading 1,200 tokens',
+      'Claude: Writing…',
+      `Answer: ${QUESTION} → Yes: #1, reported twice.`,
+      'Done: Saved · 90 tokens written · under $0.01',
+    ]);
+    expect(s.answers).toEqual([{ question: QUESTION, state: 'found', html: expect.stringContaining('Yes: <a') }]);
+    expect(s.found).toBe('1 of 1 found');
+    expect(s.skip).toBeNull();
+    expect((await env.db.query('SELECT finished_at FROM knowledge_runs')).rows[0].finished_at).not.toBeNull();
+
+    // The summary stays on pages for a little while, then goes.
+    expect((await page('/tickets')).body).toContain('id="kn-live"');
+    await env.db.query('UPDATE knowledge_runs SET finished_at = $1', [new Date(Date.now() - 3 * 60_000)]);
+    expect((await page('/tickets')).body).not.toContain('id="kn-live"');
+  });
+
+  it('adds to the run in progress instead of starting another', async () => {
+    await enable();
+    await post(`/triage/knowledge/${photo().id}/write`);
+    await post(`/triage/knowledge/${vector().id}/write`);
+    expect((await env.db.query('SELECT count(*) AS n FROM knowledge_runs')).rows[0].n).toBe(1);
+    expect((await live()).json().run.total).toBe(2);
+  });
+
+  it('stops everything: what’s waiting stays as it was', async () => {
+    await enable();
+    await post(`/triage/knowledge/${photo().id}/write`);
+    await env.triage.drain();
+    await post('/triage/knowledge/write', { scope: 'all' });
+    expect(await status(photo().id)).toBe('queued');
+    const res = await stopJson();
+    expect(res.json()).toEqual({ ok: true, message: 'Stopped. The ones already written keep their new TRIAGE.md.' });
+    // PhotoCraft keeps the one it had; VectorCraft has none.
+    expect(await status(photo().id)).toBe('done');
+    expect(await status(vector().id)).toBeNull();
+    const before = writes().length;
+    await env.triage.drain();
+    expect(writes()).toHaveLength(before);
+    const after = (await live()).json();
+    expect(after.run).toMatchObject({ active: false, stopped: true, title: 'Stopped · 0 written · 2 stopped' });
+    expect(after.apps.map((a: { state: string; note: string }) => `${a.state}:${a.note}`)).toEqual(['stopped:Stopped', 'stopped:Stopped']);
+    expect((await stopJson()).json()).toEqual({ ok: true, message: 'Nothing was being written.' });
+  });
+
+  it('takes one app out of the queue, and lets go of the one being written', async () => {
+    await enable();
+    await post('/triage/knowledge/write', { scope: 'missing' });
+    expect((await stopJson({ app: vector().id })).json()).toEqual({ ok: true, message: 'VectorCraft won’t be written this time.' });
+    await env.triage.drain();
+    expect(writes()).toHaveLength(1);
+    expect(await status(photo().id)).toBe('done');
+    expect(await status(vector().id)).toBeNull();
+
+    // Stop pressed while it reads: Claude isn't asked, and it keeps the TRIAGE.md it had.
+    await post(`/triage/knowledge/${photo().id}/write`);
+    const job = (await env.triage.engine.knowledge.claim())!;
+    expect(job.app_id).toBe(photo().id);
+    expect((await stopJson({ app: photo().id })).json()).toEqual({ ok: true, message: 'Skipping PhotoCraft: it keeps the TRIAGE.md it had.' });
+    await env.triage.engine.knowledge.process(job);
+    expect(writes()).toHaveLength(1);
+    const row = await knowledgeRow(photo().id);
+    expect(row).toMatchObject({ auto_status: 'done', auto_cancel: 0 });
+    expect(row.auto_live.result).toBe('stopped');
+    expect(row.auto_live.log.at(-1).text).toBe('Stopped. Its previous TRIAGE.md stays.');
+    expect((await env.db.query('SELECT finished_at FROM knowledge_runs ORDER BY started_at DESC LIMIT 1')).rows[0].finished_at).not.toBeNull();
+  });
+
+  it('can be watched by anyone who can see Knowledge, and stopped by those who can edit it', async () => {
+    await enable();
+    const mod = await makeAdmin(env, 'mia');
+    await env.server.inject({ method: 'POST', url: `/invite/${await createInvite(env.db, wid(), ws.owner.user.id, 'moderator')}`, ...form(mod) });
+    await post('/triage/knowledge/write', { scope: 'missing' });
+    expect((await page('/tickets', mod)).body).not.toContain('id="kn-live"');
+    expect((await live('', mod)).statusCode).toBe(403);
+
+    await grant(env, wid(), mod.user.id, { 'triage.knowledge': 'view' });
+    const tickets = (await page('/tickets', mod)).body;
+    expect(tickets).toContain('id="kn-live"');
+    expect(tickets).not.toContain('data-kn-stopall');
+    const view = (await live('', mod)).json();
+    expect(view.edit).toBe(false);
+    expect(view.selected.skip).toBeNull();
+    expect((await stopJson({}, mod)).statusCode).toBe(403);
+    expect((await knowledgeRow(photo().id)).auto_status).toBe('queued');
+  });
+});
+
 describe('What would have made Claude surer', () => {
   it('is kept for the team: on the ticket, on Review and per app, never on GitHub', async () => {
     await enable({ needsInfo: { mode: 'auto' } });
@@ -405,7 +568,7 @@ describe('What would have made Claude surer', () => {
     expect(editor).toContain(`href="${w()}/tickets/${t.id}"`);
 
     // Claude looks and can't find it: the team's.
-    env.anthropic.knowledge = { triage_md: WRITTEN, answers: [{ id: 1, answer: null }] };
+    env.anthropic.knowledge = { text: `${WRITTEN}\n\n${ANSWERS}\nQ1: unknown` };
     await post(`/triage/knowledge/${photo().id}/write`);
     await env.triage.drain();
     expect((await page(`/triage/knowledge/${photo().id}`)).body).toContain('Needs your team');
@@ -543,6 +706,13 @@ describe('Rendering a TRIAGE.md', () => {
     expect(out).toContain('<strong>bold</strong> <code>code</code> continued</li></ul>');
     expect(out).toContain('<p>See <a href="https://example.com/a" target="_blank" rel="noopener noreferrer">https://example.com/a</a>.</p>');
     expect(renderMarkdown('[x](javascript:alert(1))', 'https://github.com/o/r').toString()).toBe('<p>[x](javascript:alert(1))</p>');
+  });
+
+  it('reads Claude’s answers to its questions from the last section', () => {
+    const { body, answers } = splitAnswers(`## Known issues\n- Blank export: #1\n\n${ANSWERS}\nQ1: Yes: #1.\n- Q2) unknown\nQ3 – Windows 10 and later.\nsomething else`);
+    expect(body.trim()).toBe('## Known issues\n- Blank export: #1');
+    expect([...answers]).toEqual([[1, 'Yes: #1.'], [2, null], [3, 'Windows 10 and later.']]);
+    expect(splitAnswers('## Known issues\n- x').answers.size).toBe(0);
   });
 
   it('cleans the documents Claude reads', () => {

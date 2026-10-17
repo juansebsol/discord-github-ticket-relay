@@ -125,6 +125,8 @@ export class TriageAiError extends Error {
 /** Maps SDK errors to queue actions, using the SDK's typed error classes. */
 export function classifyAiError(err: unknown): TriageAiError {
   if (err instanceof TriageAiError) return err;
+  // Someone pressed Stop (AI triage › Knowledge).
+  if (err instanceof Anthropic.APIUserAbortError) return new TriageAiError('skip', 'Stopped.');
   if (err instanceof Anthropic.AuthenticationError || err instanceof Anthropic.PermissionDeniedError) {
     return new TriageAiError('pause', 'Claude rejected the API key.', 'key_invalid');
   }
@@ -162,25 +164,27 @@ export class TriageAi {
   }
 
   /**
-   * Anything else Claude writes with a fixed answer format, such as an app's TRIAGE.md. Longer
-   * than a ticket's triage, so it gets more time. Errors are classified like triage's.
+   * Longer writing in plain text, such as an app's TRIAGE.md, streamed. Newer models think before
+   * answering and the thinking counts toward max_tokens, so it gets plenty of room and time; if
+   * it still runs out, what it wrote is kept (cutOff). onText gets the text as it comes. Errors
+   * are classified like triage's.
    */
-  async write<T>(apiKey: string, model: string, system: string, user: string, schema: z.ZodType<T>): Promise<Written<T>> {
+  async writeText(apiKey: string, model: string, system: string, user: string, o: { maxTokens?: number; onText?: (delta: string, snapshot: string) => void; onEvent?: (event: StreamEventLike) => void; signal?: AbortSignal } = {}): Promise<WrittenText> {
     try {
-      const response = await this.client(apiKey).messages.parse(
-        {
-          model,
-          max_tokens: 8000,
-          system: [{ type: 'text', text: system }],
-          messages: [{ role: 'user', content: user }],
-          output_config: { format: zodOutputFormat(schema) },
-        },
-        { timeout: 180_000 },
+      const stream = this.client(apiKey).messages.stream(
+        { model, max_tokens: o.maxTokens ?? 32_000, system: [{ type: 'text', text: system }], messages: [{ role: 'user', content: user }] },
+        { timeout: 300_000, signal: o.signal },
       );
-      if (response.stop_reason === 'refusal') throw new TriageAiError('skip', 'Claude declined to write it.');
-      if (response.stop_reason === 'max_tokens') throw new TriageAiError('skip', 'Claude’s answer was cut off.');
-      if (!response.parsed_output) throw new TriageAiError('skip', 'Claude’s answer couldn’t be read.');
-      return { output: response.parsed_output as T, inputTokens: response.usage.input_tokens + (response.usage.cache_read_input_tokens ?? 0) + (response.usage.cache_creation_input_tokens ?? 0), outputTokens: response.usage.output_tokens };
+      if (o.onText) stream.on('text', o.onText);
+      if (o.onEvent) stream.on('streamEvent', (event) => o.onEvent!(event));
+      const message = await stream.finalMessage();
+      if (message.stop_reason === 'refusal') throw new TriageAiError('skip', 'Claude declined to write it.');
+      return {
+        text: message.content.map((b) => (b.type === 'text' ? b.text : '')).join(''),
+        cutOff: message.stop_reason === 'max_tokens',
+        inputTokens: message.usage.input_tokens + (message.usage.cache_read_input_tokens ?? 0) + (message.usage.cache_creation_input_tokens ?? 0),
+        outputTokens: message.usage.output_tokens,
+      };
     } catch (err) {
       throw classifyAiError(err);
     }
@@ -218,7 +222,8 @@ export class TriageAi {
     try {
       const response = await this.client(apiKey).messages.parse({
         model,
-        max_tokens: 8000,
+        // Claude Haiku 5.5 and newer models think before answering, and the thinking counts here.
+        max_tokens: 16_000,
         system: (Array.isArray(system) ? system : [system]).filter(Boolean).map((text) => ({ type: 'text' as const, text, cache_control: { type: 'ephemeral' as const } })),
         // Screenshots go before the text that refers to them.
         messages: [{
@@ -239,9 +244,18 @@ export class TriageAi {
   }
 }
 
-/** A structured answer to one of the other requests (writing an app's TRIAGE.md). */
-export interface Written<T> {
-  output: T;
+/** The parts of a stream event the live view uses: the input size, and when Claude starts thinking. */
+export interface StreamEventLike {
+  type: string;
+  message?: { usage?: { input_tokens?: number | null } };
+  content_block?: { type: string };
+}
+
+/** What Claude wrote in plain text (an app's TRIAGE.md). */
+export interface WrittenText {
+  text: string;
+  /** It ran out of room before the end; the text is what it wrote until then. */
+  cutOff: boolean;
   inputTokens: number;
   outputTokens: number;
 }

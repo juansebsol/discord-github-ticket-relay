@@ -23,6 +23,8 @@ const NAMES = [
   'circle-alert', 'circle-pause', 'external-link', 'minus', 'wrench',
   // Triage knowledge and screenshots
   'book-open', 'corner-down-left', 'image',
+  // Live studio
+  'chevron-up', 'square',
 ];
 
 const require = createRequire(import.meta.url);

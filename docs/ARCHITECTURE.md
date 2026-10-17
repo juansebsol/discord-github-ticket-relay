@@ -54,6 +54,12 @@ Discord endpoint, OAuth), one or more queue workers, and an optional triage work
   notes stay separate, are never rewritten, and win. With Keep up to date on, the worker rewrites
   them on the workspace's schedule (`knowledgeEveryDays`: 1 to 30 days), and sooner once Claude
   has asked `knowledgeSooner` new questions about an app (at most once a day; 0 turns that off).
+  Each "Write all", "Update now" or scheduled update is a run (`knowledge_runs`; apps join the run
+  in progress). While writing, the worker streams Claude's answer and saves the app's live state
+  (`app_knowledge.auto_live`: steps and their times, log lines, the text so far, answers as they
+  arrive) at most twice a second; each save also reads `auto_cancel`, so Stop aborts the request
+  mid-stream and the app keeps its previous TRIAGE.md. Pages carry the Live studio while a run is on
+  (and for two minutes after); app.js polls `/triage/knowledge/live`.
 - **No Discord gateway.** The bot is driven entirely by Discord's HTTP interactions endpoint and
   REST API. It needs no privileged intents and no slash-command registration.
 - **GitHub App auth.** Short-lived installation tokens are minted from the app's private key

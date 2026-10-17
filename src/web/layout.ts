@@ -8,6 +8,7 @@ import { AREA_KEYS, can, ROLE_LABELS, TOOL_NAMES, type MemberAccess } from '../d
 import { areaHref, firstPage, TOOL_ICONS, type ToolName } from './routes/tool.js';
 import type { Role, UserRow, WorkspaceRow } from '../domain/types.js';
 import { avatar, csrfField, discordAvatar, icon, iconBtn, initials, menu, notice, type IconName } from './ui.js';
+import { knowledgeLive } from './knowledge-live.js';
 
 export type StepState = 'done' | 'todo' | 'problem';
 
@@ -21,6 +22,8 @@ export interface SetupProgress {
   review?: number;
   /** Dev mode is on (the whole server): the sidebar shows it next to Server health. */
   devMode?: boolean;
+  /** Claude is writing TRIAGE.md files (AI triage › Knowledge), or just finished: pages carry the Live studio. */
+  knowledgeRun?: boolean;
 }
 
 export interface PageContext {
@@ -182,6 +185,7 @@ export function layout(ctx: PageContext, opts: { title: string; active: string; 
   </main>
 </div>
 ${ws && access ? html`<div id="alert-dock" data-dock-src="${base}/alerts" data-dock-ws="${ws.id}" hidden></div>` : ''}
+${ws && access && p?.knowledgeRun && can(access, 'triage.knowledge.view') ? knowledgeLive({ base, csrf: ctx.csrf, wid: ws.id, edit: can(access, 'triage.knowledge.edit') }) : ''}
 ${toastsFor(ctx.flash)}
 ${CONFIRM_DIALOG}
 ${ICON_TEMPLATES}

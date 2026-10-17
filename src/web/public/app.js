@@ -256,6 +256,7 @@
           return res.json().catch(function () { return {}; }).then(function (body) {
             if (!res.ok || !body.ok) throw { shown: body.error || (res.status === 403 ? 'You don’t have permission to change this.' : 'Not saved. Reload the page and try again.') };
             toast(body.message || 'Saved');
+            if (body.go) location.href = body.go;
             // Dev mode: the sidebar tag follows the switch, and Server health updates right away.
             if (form.hasAttribute('data-dev-mode')) $$('[data-dev-tag]').forEach(function (t) { t.hidden = !input.checked; });
             if (form.hasAttribute('data-live-refresh')) document.dispatchEvent(new CustomEvent('tr:live-refresh'));
@@ -1156,7 +1157,11 @@
           last = Date.now();
           failed = false;
           // Finished (a re-run): reload once for the full page and its buttons.
-          if (box.querySelector('[data-live-reload]')) location.reload();
+          if (box.querySelector('[data-live-reload]')) {
+            var st = document.getElementById('kn-studio');
+            if (st && st.open) st.addEventListener('close', function () { location.reload(); }, { once: true });
+            else location.reload();
+          }
         })
         .catch(function () { failed = true; })
         .then(function () { busy = false; label(); });
@@ -1166,6 +1171,344 @@
     document.addEventListener('visibilitychange', function () { if (!document.hidden && Date.now() - last > ms) refresh(); });
     document.addEventListener('tr:live-refresh', refresh);
   });
+
+  // ---- AI triage › Knowledge: the Live studio and its pill ------------------------------------
+  //
+  // While Claude writes TRIAGE.md files, pages carry the studio (a dialog) and its pill. Starting a
+  // run opens the studio (?watch=1); minimized, the pill shows on every page and a note pops up as
+  // each app is done. Both poll the live endpoint, faster while the studio is open.
+
+  var kn = document.getElementById('kn-live');
+  var studio = document.getElementById('kn-studio');
+  if (kn && studio) (function () {
+    var src = kn.getAttribute('data-src');
+    var stopUrl = kn.getAttribute('data-stop');
+    var csrf = kn.getAttribute('data-csrf');
+    var pillWrap = $('[data-kn-pillwrap]', kn);
+    var pill = $('[data-kn-pill]', kn);
+    var KEY = 'tr.kn.' + kn.getAttribute('data-ws');
+    var seen = load();
+    var selected = null; // an app picked in the queue; null follows Claude
+    var last = null;
+    var states = {};
+    var timer = null;
+    var busy = false;
+    var spark = [];
+    var stick = true;
+    var shownHtml = null;
+    var logKey = '';
+    var msgTimer = null;
+
+    function load() { try { return JSON.parse(sessionStorage.getItem(KEY) || '{}'); } catch (e) { return {}; } }
+    function save() { try { sessionStorage.setItem(KEY, JSON.stringify(seen)); } catch (e) { /* storage off: still works on this page */ } }
+    function q(sel) { return $(sel, studio); }
+    function el(tag, cls, text) {
+      var e = document.createElement(tag);
+      if (cls) e.className = cls;
+      if (text != null) e.textContent = text;
+      return e;
+    }
+    function knIcon(name) {
+      var t = document.getElementById('kn-icons');
+      var i = t && t.content.querySelector('[data-i="' + name + '"]');
+      return i ? i.firstElementChild.cloneNode(true) : document.createElement('span');
+    }
+
+    function open(app) {
+      if (app) selected = app;
+      if (!studio.open) studio.showModal();
+      render(last);
+      poll();
+    }
+    function minimize() { if (studio.open) studio.close(); }
+    // Escape minimizes: the work carries on.
+    studio.addEventListener('cancel', function (e) { e.preventDefault(); minimize(); });
+    studio.addEventListener('close', function () { render(last); schedule(); });
+
+    function schedule() {
+      clearTimeout(timer);
+      if (last && last.run && !last.run.active) return;
+      timer = setTimeout(poll, studio.open ? 900 : 2500);
+    }
+    function poll() {
+      if (busy) return;
+      if (document.hidden) return schedule();
+      busy = true;
+      fetch(src + (selected ? '?app=' + encodeURIComponent(selected) : ''), { credentials: 'same-origin', headers: { accept: 'application/json' } })
+        .then(function (res) { if (!res.ok) throw new Error('live'); return res.json(); })
+        .then(render)
+        .catch(function () { /* keep what's shown, try again */ })
+        .then(function () { busy = false; schedule(); });
+    }
+    document.addEventListener('visibilitychange', function () { if (!document.hidden && (!last || !last.run || last.run.active)) poll(); });
+
+    function render(data) {
+      if (!data) return;
+      last = data;
+      if (!data.run) {
+        kn.hidden = true;
+        root.style.setProperty('--kn-space', '0px');
+        if (studio.open) studio.close();
+        return;
+      }
+      if (selected && !data.apps.some(function (a) { return a.id === selected; })) selected = null;
+      notes(data);
+      renderPill(data);
+      if (studio.open) renderStudio(data);
+    }
+
+    // ---- The pill (minimized) and the note when an app is done.
+    function renderPill(data) {
+      var r = data.run;
+      var show = !studio.open && seen.closed !== r.id;
+      kn.hidden = !show;
+      pillWrap.hidden = !show;
+      if (!show) return root.style.setProperty('--kn-space', '0px');
+      $('[data-kn-count]', pill).textContent = r.finished + '/' + r.total;
+      var c = 2 * Math.PI * 16;
+      $('[data-kn-ring]', pill).style.strokeDasharray = (c * r.percent / 100).toFixed(1) + ' ' + c.toFixed(1);
+      $('[data-kn-pill-ic]', pill).replaceChildren(knIcon(r.pill.icon));
+      $('[data-kn-pill-title]', pill).textContent = r.pill.title;
+      $('[data-kn-pill-sub]', pill).textContent = r.pill.sub;
+      pill.setAttribute('aria-label', 'Open the Live studio: ' + r.pill.title);
+      pill.classList.toggle('is-done', !r.active);
+      $('[data-kn-pill-close]', kn).hidden = r.active;
+      root.style.setProperty('--kn-space', pillWrap.offsetHeight + 12 + 'px');
+    }
+    function notes(data) {
+      data.apps.forEach(function (a) {
+        var before = states[a.id];
+        if (before && before !== a.state && (a.state === 'done' || a.state === 'failed') && !studio.open) note(a);
+        states[a.id] = a.state;
+      });
+    }
+    function note(a) {
+      var region = document.getElementById('toasts');
+      if (!region) return;
+      var t = el('div', 'toast kn-note is-' + a.state + ' enter');
+      t.appendChild(knIcon(a.state));
+      var text = el('span');
+      text.appendChild(el('strong', null, a.name));
+      text.appendChild(document.createTextNode(a.state === 'done'
+        ? ' written' + (a.asked ? ' · ' + a.answered + ' of its ' + a.asked + (a.asked === 1 ? ' question' : ' questions') + ' answered' : '')
+        : ' couldn’t be written'));
+      t.appendChild(text);
+      var go = el('a', 'kn-note-go', 'Open');
+      go.href = a.url;
+      t.appendChild(go);
+      region.appendChild(t);
+      requestAnimationFrame(function () { t.classList.remove('enter'); });
+      setTimeout(function () { dismiss(t); }, 6000);
+    }
+
+    // ---- The studio.
+    function renderStudio(data) {
+      var r = data.run;
+      var s = data.selected;
+      q('[data-kn-title]').textContent = r.title;
+      q('[data-kn-sub]').textContent = r.sub;
+      q('[data-kn-bar]').style.width = r.percent + '%';
+      q('[data-kn-progress]').setAttribute('aria-valuenow', String(r.percent));
+      studio.classList.toggle('is-done', !r.active);
+      var stopWrap = q('[data-kn-stopwrap]');
+      if (stopWrap) stopWrap.hidden = !r.active;
+      q('[data-kn-done]').hidden = r.active;
+      q('[data-kn-min]').hidden = !r.active;
+      q('[data-kn-live]').classList.toggle('off', !r.active);
+      q('[data-kn-livet]').textContent = r.active ? 'Live' : 'Finished';
+      renderQueue(data);
+
+      // The app in the middle.
+      q('[data-kn-av]').textContent = s ? s.initials : '';
+      q('[data-kn-name]').textContent = s ? s.name : '';
+      var steps = q('[data-kn-steps]');
+      steps.replaceChildren();
+      (s ? s.steps : []).forEach(function (st) {
+        var chip = el('span', 'kn-chip is-' + st.state);
+        if (st.state === 'active') chip.appendChild(knIcon('running'));
+        chip.appendChild(document.createTextNode(st.label + (st.time ? ' · ' + st.time : '')));
+        steps.appendChild(chip);
+      });
+      var doc = q('[data-kn-doc]');
+      var html = s ? s.html : '';
+      if (html !== shownHtml) {
+        doc.innerHTML = html;
+        shownHtml = html;
+      }
+      var caret = $('.kn-caret', doc);
+      if (s && s.writing) {
+        if (!caret) caret = el('span', 'kn-caret');
+        var end = doc.lastElementChild;
+        while (end && (end.tagName === 'UL' || end.tagName === 'OL') && end.lastElementChild) end = end.lastElementChild;
+        (end || doc).appendChild(caret);
+      } else if (caret) caret.remove();
+      var empty = q('[data-kn-empty]');
+      empty.hidden = !(s && s.empty);
+      empty.textContent = s && s.empty ? s.empty : '';
+      var scroll = q('[data-kn-scroll]');
+      if (s && s.writing && stick) scroll.scrollTop = scroll.scrollHeight;
+
+      // Speed: a little line of the last half minute or so.
+      var following = s && s.id === data.current;
+      if (following && s.speed) {
+        spark.push(s.speed);
+        if (spark.length > 30) spark.shift();
+      }
+      var top = Math.max.apply(null, spark.concat([1]));
+      q('[data-kn-spark]').setAttribute('points', following ? spark.map(function (v, i) { return (i * 120 / 29).toFixed(1) + ',' + (22 - v / top * 18).toFixed(1); }).join(' ') : '');
+      q('[data-kn-tokens]').textContent = s ? [s.tokens, s.speed ? s.speed + ' tok/s' : ''].filter(Boolean).join(' · ') : '';
+      q('[data-kn-follow]').hidden = !(selected && data.current && selected !== data.current);
+      var skip = q('[data-kn-skip]');
+      if (skip) {
+        skip.hidden = !(s && s.skip);
+        if (s && s.skip) {
+          skip.textContent = s.skip.label;
+          skip.setAttribute('data-app', s.skip.app);
+        }
+      }
+
+      // The log: new lines are added, the rest stays.
+      var lines = q('[data-kn-log]');
+      var key = s ? s.id : '';
+      var have = lines.children.length;
+      if (key !== logKey || !s || s.log.length < have) {
+        lines.replaceChildren();
+        have = 0;
+        logKey = key;
+      }
+      (s ? s.log.slice(have) : []).forEach(function (l) {
+        var li = el('li', 'kn-l');
+        li.appendChild(el('span', 't', l.time));
+        li.appendChild(el('span', 'kn-tag ' + l.tag, l.label));
+        li.appendChild(el('span', 'x', l.text));
+        lines.appendChild(li);
+      });
+      if (s && s.log.length > have) lines.scrollTop = lines.scrollHeight;
+
+      var qs = q('[data-kn-qs]');
+      qs.hidden = !(s && s.answers.length);
+      var answers = q('[data-kn-answers]');
+      answers.replaceChildren();
+      if (s && s.answers.length) {
+        q('[data-kn-qcount]').textContent = s.found;
+        s.answers.forEach(function (a) {
+          var li = el('li', 'kn-a is-' + a.state);
+          li.appendChild(knIcon(a.state === 'found' ? 'done' : a.state === 'unknown' ? 'stopped' : 'queued'));
+          var body = el('div');
+          body.appendChild(el('div', 'qq', a.question));
+          var ans = el('div', 'aa');
+          if (a.html) ans.innerHTML = a.html;
+          else ans.textContent = a.state === 'unknown' ? 'Not in the repository or the issues: your team knows.' : '';
+          body.appendChild(ans);
+          li.appendChild(body);
+          answers.appendChild(li);
+        });
+      }
+    }
+    // The queue changes in place when only the times move, so focus and clicks aren't lost.
+    function renderQueue(data) {
+      var list = q('[data-kn-queue]');
+      var ids = data.apps.map(function (a) { return a.id + ':' + a.state; }).join(',');
+      if (list.getAttribute('data-ids') !== ids) {
+        list.replaceChildren();
+        data.apps.forEach(function (a) {
+          var li = el('li');
+          var b = el('button', 'kn-q is-' + a.state);
+          b.type = 'button';
+          b.setAttribute('data-app', a.id);
+          b.appendChild(knIcon(a.state));
+          b.appendChild(el('span', 'n', a.name));
+          b.appendChild(el('span', 'm'));
+          li.appendChild(b);
+          list.appendChild(li);
+        });
+        list.setAttribute('data-ids', ids);
+      }
+      var shownId = data.selected ? data.selected.id : null;
+      data.apps.forEach(function (a, i) {
+        var b = list.children[i] && list.children[i].firstElementChild;
+        if (!b) return;
+        $('.m', b).textContent = a.note || '';
+        if (a.id === shownId) b.setAttribute('aria-current', 'true'); else b.removeAttribute('aria-current');
+      });
+    }
+
+    function say(text) {
+      var m = q('[data-kn-msg]');
+      m.textContent = text;
+      clearTimeout(msgTimer);
+      msgTimer = setTimeout(function () { m.textContent = ''; }, 5000);
+    }
+    function stop(app) {
+      var body = new URLSearchParams();
+      body.set('_csrf', csrf);
+      if (app) body.set('app', app);
+      fetch(stopUrl, { method: 'POST', body: body, credentials: 'same-origin', headers: { accept: 'application/json' } })
+        .then(function (res) {
+          return res.json().catch(function () { return {}; }).then(function (b) {
+            if (!res.ok || !b.ok) throw { shown: b.error || 'Couldn’t stop it. Try again.' };
+            say(b.message || 'Stopped');
+          });
+        })
+        .catch(function (err) { say(err && err.shown ? err.shown : 'Couldn’t stop it. Check your connection and try again.'); })
+        .then(poll);
+    }
+
+    studio.addEventListener('click', function (e) {
+      var t = e.target.closest('button, a');
+      if (!t || !studio.contains(t)) return;
+      if (t.hasAttribute('data-kn-min')) return minimize();
+      if (t.hasAttribute('data-kn-done')) {
+        if (last && last.run) { seen.closed = last.run.id; save(); }
+        return studio.close();
+      }
+      if (t.hasAttribute('data-kn-stopall')) {
+        t.hidden = true;
+        q('[data-kn-confirm]').hidden = false;
+        return q('[data-kn-stopno]').focus();
+      }
+      if (t.hasAttribute('data-kn-stopno') || t.hasAttribute('data-kn-stopyes')) {
+        q('[data-kn-confirm]').hidden = true;
+        q('[data-kn-stopall]').hidden = false;
+        q('[data-kn-stopall]').focus();
+        if (t.hasAttribute('data-kn-stopyes')) stop(null);
+        return;
+      }
+      if (t.hasAttribute('data-kn-skip')) return stop(t.getAttribute('data-app'));
+      if (t.hasAttribute('data-kn-follow')) {
+        selected = null;
+        stick = true;
+        return poll();
+      }
+      if (t.classList.contains('kn-q')) {
+        var id = t.getAttribute('data-app');
+        selected = last && id === last.current ? null : id;
+        stick = true;
+        shownHtml = null;
+        return poll();
+      }
+    });
+    q('[data-kn-scroll]').addEventListener('scroll', function () {
+      var box = q('[data-kn-scroll]');
+      stick = box.scrollTop + box.clientHeight >= box.scrollHeight - 40;
+    });
+    pill.addEventListener('click', function () { open(); });
+    $('[data-kn-pill-close]', kn).addEventListener('click', function () {
+      if (last && last.run) { seen.closed = last.run.id; save(); }
+      render(last);
+    });
+    // "Watch" on the Knowledge pages, and right after starting a run.
+    document.addEventListener('click', function (e) {
+      var b = e.target.closest('[data-kn-open]');
+      if (b) open(b.getAttribute('data-kn-open') || null);
+    });
+    var url = new URL(location.href);
+    if (url.searchParams.get('watch') === '1') {
+      url.searchParams.delete('watch');
+      history.replaceState(null, '', url.pathname + url.search + url.hash);
+      open();
+    } else poll();
+  })();
 
   // ---- Alerts that follow you around (AI triage stopped) --------------------------------------
   //

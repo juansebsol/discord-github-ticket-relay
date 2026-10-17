@@ -445,8 +445,21 @@ export class FakeDiscord {
   }
 }
 
-/** What the next Claude call returns: an answer, an HTTP error, a refusal or unreadable text. */
-export type ClaudeBehavior = Json | { status: number; type: string; message?: string } | 'refusal' | 'garbage';
+/** What the next Claude call returns: an answer, plain text, an HTTP error, a refusal or unreadable text. */
+export type ClaudeBehavior = Json | { status: number; type: string; message?: string } | { text: string; stop?: 'end_turn' | 'max_tokens' } | 'refusal' | 'garbage';
+
+/** A message as a server-sent event stream (messages.stream), the text in a few pieces. */
+function sse(message: Json): Response {
+  const events: [string, Json][] = [['message_start', { type: 'message_start', message: { ...message, content: [], stop_reason: null, usage: { input_tokens: message.usage.input_tokens, output_tokens: 1 } } }]];
+  (message.content as { text: string }[]).forEach((block, index) => {
+    events.push(['content_block_start', { type: 'content_block_start', index, content_block: { type: 'text', text: '' } }]);
+    for (const piece of block.text.match(/[\s\S]{1,40}/g) ?? []) events.push(['content_block_delta', { type: 'content_block_delta', index, delta: { type: 'text_delta', text: piece } }]);
+    events.push(['content_block_stop', { type: 'content_block_stop', index }]);
+  });
+  events.push(['message_delta', { type: 'message_delta', delta: { stop_reason: message.stop_reason, stop_sequence: null }, usage: { output_tokens: message.usage.output_tokens } }]);
+  events.push(['message_stop', { type: 'message_stop' }]);
+  return new Response(events.map(([e, d]) => `event: ${e}\ndata: ${JSON.stringify(d)}\n\n`).join(''), { status: 200, headers: { 'content-type': 'text/event-stream', 'request-id': 'req_test' } });
+}
 
 /** In-memory Claude API: GET /v1/models and POST /v1/messages (structured output). */
 export class FakeAnthropic {
@@ -458,8 +471,8 @@ export class FakeAnthropic {
     parts: [], parts_confidence: 0, related: [], related_confidence: 0, shared: false, shared_confidence: 0, shared_apps: [], shared_issue: null,
     right_app: null, right_app_confidence: 0, version: null, labels: {}, priority: 'medium', priority_confidence: 80, missing_context: null,
   };
-  /** The default answer to a request to write an app's TRIAGE.md. */
-  knowledge: Json = { triage_md: '## What it is\n- A test app.', answers: [] };
+  /** The default answer to a request to write an app's TRIAGE.md (plain text). */
+  knowledge: ClaudeBehavior = { text: '## What it is\n- A test app.' };
   queue: ClaudeBehavior[] = [];
   requests: { key: string; body: Json }[] = [];
   models = [
@@ -487,13 +500,15 @@ export class FakeAnthropic {
       if (typeof behavior === 'object' && 'status' in behavior && typeof behavior.status === 'number') {
         return this.error(behavior.status, String(behavior.type), String(behavior.message ?? 'error'));
       }
-      const text = behavior === 'garbage' ? 'not json at all' : behavior === 'refusal' ? '' : JSON.stringify(behavior);
-      return json(200, {
+      const plain = typeof behavior === 'object' && behavior !== null && typeof (behavior as { text?: unknown }).text === 'string' ? (behavior as { text: string; stop?: string }) : null;
+      const text = plain ? plain.text : behavior === 'garbage' ? 'not json at all' : behavior === 'refusal' ? '' : JSON.stringify(behavior);
+      const message = {
         id: 'msg_test', type: 'message', role: 'assistant', model: body.model,
         content: behavior === 'refusal' ? [] : [{ type: 'text', text }],
-        stop_reason: behavior === 'refusal' ? 'refusal' : 'end_turn', stop_sequence: null,
+        stop_reason: behavior === 'refusal' ? 'refusal' : plain?.stop ?? 'end_turn', stop_sequence: null,
         usage: { input_tokens: 1200, output_tokens: 90 },
-      }, { 'request-id': 'req_test' });
+      };
+      return body.stream ? sse(message) : json(200, message, { 'request-id': 'req_test' });
     }
     return this.error(404, 'not_found_error', `fake anthropic: no route ${init.method} ${url.pathname}`);
   }
