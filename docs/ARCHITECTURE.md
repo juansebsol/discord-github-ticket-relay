@@ -52,7 +52,8 @@ Discord endpoint, OAuth), one or more queue workers, and an optional triage work
   (`missing_context`, copied to `question`). Each ticket then gets its own app's TRIAGE.md as a
   second cached system block, as background facts (it comes from public text); the team's own
   notes stay separate, are never rewritten, and win. With Keep up to date on, the worker rewrites
-  them weekly, and sooner after three new questions.
+  them on the workspace's schedule (`knowledgeEveryDays`: 1 to 30 days), and sooner once Claude
+  has asked `knowledgeSooner` new questions about an app (at most once a day; 0 turns that off).
 - **No Discord gateway.** The bot is driven entirely by Discord's HTTP interactions endpoint and
   REST API. It needs no privileged intents and no slash-command registration.
 - **GitHub App auth.** Short-lived installation tokens are minted from the app's private key

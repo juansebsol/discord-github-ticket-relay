@@ -1318,6 +1318,13 @@ a.feed-row:focus-visible { outline-offset: -2px; }
 .kn-spin { animation: spin 1s linear infinite; }
 .kn-busy { display: inline-flex; align-items: center; gap: 8px; height: 32px; font-size: 13px; color: var(--muted); white-space: nowrap; }
 .kn-auto { border-top: 1px solid var(--border); }
+.kn-auto .setting .desc { max-width: 640px; }
+.kn-cadence { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 20px; margin-top: 10px; color: var(--text); transition: opacity var(--t) var(--ease); }
+.kn-cadence label { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; line-height: 16px; font-weight: 500; color: var(--muted); }
+.kn-cadence .select select { min-width: 176px; }
+.kn-cadence-cost { display: block; margin-top: 8px; font-size: 12px; line-height: 16px; color: var(--muted); }
+/* The schedule only applies while the switch is on. */
+.kn-auto:has(input[name="auto"]:not(:checked)) .kn-cadence { opacity: 0.6; }
 .kn-grid { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr)); gap: 16px; }
 .kn-card { display: flex; flex-direction: column; gap: 12px; height: 100%; padding: 16px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); box-shadow: var(--shadow); color: var(--text); text-decoration: none; transition: border-color var(--t-fast), background var(--t-fast); }
 .kn-card:hover { border-color: var(--border-hover); text-decoration: none; }

@@ -426,6 +426,15 @@
     });
   })();
 
+  // Knowledge › Keep them up to date: the monthly estimate follows the schedule picked.
+  document.addEventListener('change', function (e) {
+    var select = e.target.closest && e.target.closest('select[name="every"][form="kn-auto"]');
+    var month = select && document.querySelector('[data-kn-month]');
+    if (!month) return;
+    var usd = Number(month.getAttribute('data-each')) * Number(month.getAttribute('data-apps')) * 30 / Number(select.value);
+    month.textContent = usd < 0.01 ? 'under $0.01' : 'about $' + usd.toFixed(2);
+  });
+
   // "Reset to default" puts each field's default (its placeholder) back.
   document.addEventListener('click', function (e) {
     var b = e.target.closest('[data-reset-fields]');

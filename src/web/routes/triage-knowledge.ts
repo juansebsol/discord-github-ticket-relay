@@ -29,11 +29,11 @@ import {
   type Question,
 } from '../../triage/knowledge.js';
 import { WRITE_ESTIMATE } from '../../triage/knowledge-writer.js';
-import { formatCost, getTriageSettings, parseTriageConfig, resolveApiKey, saveTriageConfig, tokenCost } from '../../triage/settings.js';
+import { formatCost, getTriageSettings, KNOWLEDGE_EVERY_DAYS, KNOWLEDGE_SOONER, parseTriageConfig, resolveApiKey, saveTriageConfig, tokenCost } from '../../triage/settings.js';
 import { renderMarkdown } from '../markdown.js';
 import { setFlash } from '../session.js';
 import type { Web, WorkspaceRequestContext } from '../server.js';
-import { avatar, badge, csrfField, empty, formatDate, icon, linkBtn, notice, pageHeader, pill, plural, postBtn, setting, submitBtn, switchInput, tag, timeAgo } from '../ui.js';
+import { avatar, badge, csrfField, empty, formatDate, icon, linkBtn, notice, pageHeader, pill, plural, postBtn, selectWrap, setting, submitBtn, switchInput, tag, timeAgo } from '../ui.js';
 import { areaHref, canOpen, canOpenIssue, knowledgeHref, pageLink, toolHeader, toolHref } from './tool.js';
 import { viewOnlyFooter } from './triage.js';
 
@@ -54,6 +54,25 @@ function costLine(model: string, count = 1): string {
 }
 
 const ago = (d: Date) => html`<time datetime="${d.toISOString()}" title="${formatDate(d)}">${timeAgo(d)}</time>`;
+
+const DAY_MS = 86_400_000;
+
+/** Keep them up to date: the choices, as the selects show them. */
+const EVERY: Record<number, string> = { 1: 'Every day', 3: 'Every 3 days', 7: 'Every week', 14: 'Every 2 weeks', 30: 'Every month' };
+const SOONER: Record<number, string> = { 1: 'After 1 new question', 3: 'After 3 new questions', 5: 'After 5 new questions', 10: 'After 10 new questions', 0: 'Never' };
+
+/** "every week, and sooner after 3 new questions" */
+function scheduleText(every: number, sooner: number): string {
+  return `${EVERY[every]!.toLowerCase()}${sooner ? `, and sooner after ${plural(sooner, 'new question')}` : ''}`;
+}
+
+/** "next update in 5 days", for an app whose TRIAGE.md is kept up to date. */
+function nextUpdate(writtenAt: Date, every: number, now = Date.now()): string {
+  const ms = writtenAt.getTime() + every * DAY_MS - now;
+  if (ms <= 0) return 'next update soon';
+  const days = Math.round(ms / DAY_MS);
+  return days <= 0 ? 'next update today' : days === 1 ? 'next update tomorrow' : `next update in ${days} days`;
+}
 
 type State = 'none' | 'queued' | 'running' | 'done' | 'failed';
 
@@ -164,10 +183,24 @@ export function registerTriageKnowledgeRoutes(app: FastifyInstance, web: Web): v
                 : updateAll()}
             </div>`;
 
+    // The switch's form also takes the schedule selects (form="kn-auto"): any change saves all three.
     const autoControl = edit
-      ? html`<form method="post" action="${listUrl(ctx)}/auto" data-async class="inline-form">${csrfField(ctx.csrf)}<input type="hidden" name="set" value="1">
+      ? html`<form method="post" action="${listUrl(ctx)}/auto" id="kn-auto" data-async class="inline-form">${csrfField(ctx.csrf)}<input type="hidden" name="set" value="1">
           ${switchInput({ name: 'auto', checked: c.knowledgeAuto, label: 'Keep every TRIAGE.md up to date', disabled: !key && !c.knowledgeAuto })}<button type="submit" class="btn sm nojs">Save</button></form>`
       : pill(c.knowledgeAuto ? 'On' : 'Off', c.knowledgeAuto ? 'ok' : 'neutral');
+    const every = c.knowledgeEveryDays;
+    const sooner = c.knowledgeSooner;
+    const schedule = edit
+      ? html`<span class="kn-cadence">
+          <label><span>How often</span>${selectWrap(html`<select name="every" form="kn-auto" aria-label="How often Claude rewrites each TRIAGE.md">${KNOWLEDGE_EVERY_DAYS.map((d) => html`<option value="${String(d)}" ${d === every ? raw('selected') : ''}>${EVERY[d]}</option>`)}</select>`, { sm: true })}</label>
+          <label title="Sooner when Claude has asked this many new questions about the app since it last wrote its TRIAGE.md (at most once a day)"><span>Sooner</span>${selectWrap(html`<select name="sooner" form="kn-auto" aria-label="When Claude rewrites an app’s TRIAGE.md sooner">${KNOWLEDGE_SOONER.map((q) => html`<option value="${String(q)}" ${q === sooner ? raw('selected') : ''}>${SOONER[q]}</option>`)}</select>`, { sm: true })}</label>
+        </span>`
+      : html`<span class="kn-cadence">${EVERY[every]}${sooner ? `, and sooner after ${plural(sooner, 'new question')}` : ''}.</span>`;
+    // What it costs: per update, and a month on this schedule (app.js updates the month when the schedule changes).
+    const perUpdate = tokenCost(c.model, WRITE_ESTIMATE.input, WRITE_ESTIMATE.output);
+    const costs = perUpdate !== null && apps.length
+      ? html`<span class="kn-cadence-cost">Each update: ${formatCost(perUpdate)} per app with ${c.model}. On this schedule, <span data-kn-month data-each="${String(perUpdate)}" data-apps="${String(apps.length)}">${formatCost((perUpdate * apps.length * 30) / every)}</span> a month for ${plural(apps.length, 'app')}.</span>`
+      : '';
 
     const body = html`
       ${await toolHeader(web, ctx, 'triage', 'triage.knowledge')}
@@ -184,7 +217,7 @@ export function registerTriageKnowledgeRoutes(app: FastifyInstance, web: Web): v
               return actions ? html`<a class="stat" href="${actions}#limits" title="Set in Actions › Model, scope and limits">${inner}</a>` : html`<div class="stat">${inner}</div>`;
             })()}
           </div>
-          <div class="kn-auto">${setting('Keep them up to date', `While AI triage is on, Claude rewrites each app’s TRIAGE.md every week from the latest issues and releases, and sooner when it has new questions about the app.${costLine(c.model) ? ` Each update: ${costLine(c.model)}.` : ''}`, autoControl, { switchRow: true })}</div>
+          <div class="kn-auto">${setting('Keep them up to date', html`While AI triage is on, Claude rewrites each app’s TRIAGE.md from the latest issues and releases.${schedule}${costs}`, autoControl, { switchRow: true })}</div>
         </div>
         ${apps.length
           ? working ? html`<div data-live="4000" data-live-src="${listUrl(ctx)}?partial=1">${grid}</div>` : grid
@@ -217,10 +250,12 @@ export function registerTriageKnowledgeRoutes(app: FastifyInstance, web: Web): v
       ? postBtn(writeUrl, label, ctx.csrf, { variant: primary ? 'primary' : undefined, size: primary ? undefined : 'sm', icon: primary ? 'sparkles' : 'refresh-cw', loading: 'Starting…', title: price || undefined })
       : '');
     const used = k?.auto_model ? tokenCost(k.auto_model, k.auto_input_tokens ?? 0, k.auto_output_tokens ?? 0) : null;
+    // With Keep them up to date on: when it's rewritten next.
+    const upcoming = !c.knowledgeAuto || !k?.auto_at ? '' : settings.enabled || settings.githubEnabled ? nextUpdate(k.auto_at, c.knowledgeEveryDays) : 'updates start when AI triage is on';
     const writtenDoc = isWritten(k)
       ? html`<div class="card-b"><div class="kn-doc">${renderMarkdown(k.auto_body, repoUrl)}</div></div>
           <details class="kn-raw"><summary>${icon('chevron-right', 14, 'chev')}Markdown<span class="muted"> · exactly what Claude reads</span></summary><pre class="prompt-pre">${k.auto_body}</pre></details>
-          <div class="card-note">${[k.auto_model, k.auto_input_tokens ? `${n((k.auto_input_tokens ?? 0) + (k.auto_output_tokens ?? 0))} tokens` : '', used !== null && k.auto_input_tokens ? formatCost(used) : ''].filter(Boolean).join(' · ')}${k.auto_at ? html` · written ${ago(k.auto_at)}` : ''}</div>`
+          <div class="card-note">${[k.auto_model, k.auto_input_tokens ? `${n((k.auto_input_tokens ?? 0) + (k.auto_output_tokens ?? 0))} tokens` : '', used !== null && k.auto_input_tokens ? formatCost(used) : ''].filter(Boolean).join(' · ')}${k.auto_at ? html` · written ${ago(k.auto_at)}` : ''}${upcoming ? ` · ${upcoming}` : ''}</div>`
       : '';
     const writtenInner = html`
       ${busy(s)
@@ -328,7 +363,7 @@ export function registerTriageKnowledgeRoutes(app: FastifyInstance, web: Web): v
         title: html`<span class="kn-title">${avatar(a.name, 28, { square: true, letters: 2 })}${a.name}</span>`,
         after: [tag('TRIAGE.md', { icon: 'file-text', cls: 'mono' })],
         description: isWritten(k) && k.auto_at
-          ? html`Written by Claude ${ago(k.auto_at)} from ${a.repo_owner}/${a.repo_name}. Claude reads it with every ${a.name} ticket${c.knowledgeAuto ? ' and rewrites it every week' : ''}.`
+          ? html`Written by Claude ${ago(k.auto_at)} from ${a.repo_owner}/${a.repo_name}. Claude reads it with every ${a.name} ticket${c.knowledgeAuto ? ` and rewrites it ${scheduleText(c.knowledgeEveryDays, c.knowledgeSooner)}` : ''}.`
           : `Claude writes it from ${a.repo_owner}/${a.repo_name}, then reads it with every ${a.name} ticket.`,
         actions: [
           prev ? linkBtn(knowledgeHref(ctx, prev.id), prev.name, { icon: 'chevron-left', variant: 'ghost', size: 'sm' }) : null,
@@ -371,21 +406,29 @@ export function registerTriageKnowledgeRoutes(app: FastifyInstance, web: Web): v
     const ctx = await web.requireWorkspace(req, reply, { permission: 'triage.knowledge.edit' });
     if (!ctx) return reply;
     const wid = ctx.workspace.id;
-    const on = (req.body as { auto?: string } | null)?.auto !== undefined;
+    const f = (req.body ?? {}) as { auto?: string; every?: string; sooner?: string };
+    const on = f.auto !== undefined;
     const respond = (ok: boolean, message: string) => {
       if (web.wantsJson(req)) return reply.code(ok ? 200 : 400).send(ok ? { ok, message } : { ok, error: message });
       setFlash(reply, ok ? 'success' : 'error', message);
       return reply.redirect(listUrl(ctx));
     };
-    if (on && !(await resolveApiKey(deps, wid))) return respond(false, 'Add a Claude API key in Settings first.');
     const settings = await getTriageSettings(deps.db, wid);
-    await saveTriageConfig(deps.db, wid, parseTriageConfig({ ...settings.config, knowledgeAuto: on }));
-    if (!on) return respond(true, 'Claude no longer updates them by itself. You can still update each one.');
-    // The ones never written start now; the others follow their weekly turn.
+    const c = settings.config;
+    // A field missing from the form keeps its value.
+    const every = f.every === undefined ? c.knowledgeEveryDays : Number(f.every);
+    const sooner = f.sooner === undefined ? c.knowledgeSooner : Number(f.sooner);
+    if (!(KNOWLEDGE_EVERY_DAYS as readonly number[]).includes(every) || !(KNOWLEDGE_SOONER as readonly number[]).includes(sooner)) return respond(false, 'Choose a schedule from the list.');
+    if (on && !(await resolveApiKey(deps, wid))) return respond(false, 'Add a Claude API key in Settings first.');
+    await saveTriageConfig(deps.db, wid, parseTriageConfig({ ...c, knowledgeAuto: on, knowledgeEveryDays: every, knowledgeSooner: sooner }));
+    const when = scheduleText(every, sooner);
+    if (!on) return respond(true, c.knowledgeAuto ? 'Claude no longer updates them by itself. You can still update each one.' : `Schedule saved: ${when}. Switch it on to start.`);
+    const later = settings.enabled || settings.githubEnabled ? '' : ' Updates start once AI triage is on.';
+    if (c.knowledgeAuto) return respond(true, `Claude rewrites each TRIAGE.md ${when}.${later}`);
+    // Just switched on: the ones never written start now; the others follow the schedule.
     const [apps, knowledge] = await Promise.all([listApps(deps.db, wid), listKnowledge(deps.db, wid)]);
     const queued = await requestWrites(deps.db, wid, apps.filter((a) => !isWritten(knowledge.get(a.id))).map((a) => a.id), ctx.user.id);
-    const later = settings.enabled || settings.githubEnabled ? '' : ' Weekly updates start once AI triage is on.';
-    return respond(true, `${queued ? `Claude is writing the ${plural(queued, 'missing TRIAGE.md', 'missing TRIAGE.md files')} now, then keeps them all up to date.` : 'Claude keeps every TRIAGE.md up to date.'}${later}`);
+    return respond(true, `${queued ? `Claude is writing the ${plural(queued, 'missing TRIAGE.md', 'missing TRIAGE.md files')} now, then rewrites them ${when}.` : `Claude rewrites each TRIAGE.md ${when}.`}${later}`);
   });
 
   app.post('/w/:wid/triage/knowledge/:appId/write', async (req, reply) => {

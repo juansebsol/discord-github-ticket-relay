@@ -36,9 +36,6 @@ export const WRITE_ESTIMATE = { input: 20_000, output: 2_500 };
 const LEASE_MS = 5 * 60_000;
 const MAX_ATTEMPTS = 3;
 const DAY_MS = 86_400_000;
-const WEEK_MS = 7 * DAY_MS;
-/** With Keep up to date on, an app's TRIAGE.md is rewritten sooner once Claude has asked this many new questions about it. */
-const QUESTIONS_FOR_UPDATE = 3;
 
 // What Claude reads, at most.
 const README_CHARS = 10_000;
@@ -339,9 +336,9 @@ export class KnowledgeWriter {
   }
 
   /**
-   * With Keep up to date on (and triage on, with a key): queues apps never written, those
-   * written over a week ago, and those Claude has asked several new questions about since a day.
-   * Failed ones are tried again a day later.
+   * With Keep up to date on (and triage on, with a key): queues apps never written, those due on
+   * the workspace's schedule (every N days), and those Claude has asked enough new questions
+   * about (at most once a day). Failed ones are tried again a day later.
    */
   async scheduleUpdates(now = Date.now()): Promise<number> {
     const { db } = this.deps;
@@ -351,7 +348,8 @@ export class KnowledgeWriter {
     let queued = 0;
     for (const { workspace_id: wid } of rows) {
       if (!(await resolveApiKey(this.deps, wid))) continue;
-      const [apps, knowledge] = await Promise.all([listApps(db, wid), listKnowledge(db, wid)]);
+      const [apps, knowledge, settings] = await Promise.all([listApps(db, wid), listKnowledge(db, wid), getTriageSettings(db, wid)]);
+      const { knowledgeEveryDays: every, knowledgeSooner: sooner } = settings.config;
       const asked = await questionsSinceWritten(db, wid, knowledge);
       const due = apps.filter((a) => {
         const k = knowledge.get(a.id);
@@ -359,7 +357,7 @@ export class KnowledgeWriter {
         if (k?.auto_status === 'failed') return !k.auto_requested_at || now - k.auto_requested_at.getTime() > DAY_MS;
         if (!k?.auto_at) return true;
         const age = now - k.auto_at.getTime();
-        return age > WEEK_MS || (age > DAY_MS && (asked.get(a.id) ?? 0) >= QUESTIONS_FOR_UPDATE);
+        return age > every * DAY_MS || (sooner > 0 && age > DAY_MS && (asked.get(a.id) ?? 0) >= sooner);
       });
       if (due.length) queued += await requestWrites(db, wid, due.map((a) => a.id), null);
     }
