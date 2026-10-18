@@ -53,9 +53,11 @@ Discord endpoint, OAuth), one or more queue workers, and an optional triage work
   second cached system block, as background facts (it comes from public text); the team's own
   notes stay separate, are never rewritten, and win. With Keep them up to date on, each app is
   looked at once the workspace's interval (`knowledgeEvery`: a number of minutes, hours or days,
-  15 minutes to 90 days) has passed since its last update, and updated only if something changed
-  since: issues opened or closed in its repository or questions Claude asked (a full rewrite),
-  or only merged changes (an update, see below).
+  15 minutes to 90 days) has passed since its last update or look, and updated only if something
+  changed since: issues opened or closed in its repository or questions Claude asked (a full
+  rewrite), or only merged changes (an update, see below). A look that finds nothing new is noted
+  (`auto_checked_at`), so the next one is an interval later; each app's card shows when it was
+  last updated (in the viewer's time zone) and when it's looked at next.
   Each "Write all", "Update now" or scheduled update is a run (`knowledge_runs`; apps join the run
   in progress). While writing, the worker streams Claude's answer and saves the app's live state
   (`app_knowledge.auto_live`: steps and their times, log lines, the text so far, answers as they
@@ -76,7 +78,8 @@ Discord endpoint, OAuth), one or more queue workers, and an optional triage work
   waiting gets an update in "changes" mode (`app_knowledge.auto_mode`): Claude gets the current
   TRIAGE.md and the changes and returns it updated, saying for each change whether it added it or
   why not (`app_changes.status` and `note`). Issues and questions count from the last full write
-  (`auto_full_at`), and a full rewrite reads the recent changes too.
+  (`auto_full_at`). A full rewrite reads the 30 newest changes too, and afterwards nothing merged
+  before it started is left waiting.
 - **No Discord gateway.** The bot is driven entirely by Discord's HTTP interactions endpoint and
   REST API. It needs no privileged intents and no slash-command registration.
 - **GitHub App auth.** Short-lived installation tokens are minted from the app's private key

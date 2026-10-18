@@ -319,6 +319,11 @@ export function formatDate(d: Date | null | undefined): string {
   return d.toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
 }
 
+/** A date and time each viewer sees in their own time zone ("today at 2:32 PM", see app.js); UTC until then. */
+export function localTime(d: Date): SafeHtml {
+  return html`<time datetime="${d.toISOString()}" data-local title="${formatDate(d)}">${formatDate(d)}</time>`;
+}
+
 export function timeAgo(d: Date, now = Date.now()): string {
   const s = Math.round((now - d.getTime()) / 1000);
   if (s < 0) {

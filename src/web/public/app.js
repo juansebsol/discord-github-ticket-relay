@@ -14,6 +14,24 @@
     return el ? el.firstElementChild.cloneNode(true) : document.createElement('span');
   }
 
+  // ---- Local times ----------------------------------------------------------------------------
+
+  // <time data-local>: in the viewer's own time zone ("today at 2:32 PM", "Oct 15 at 9:10 AM").
+  function localTimes(ctx) {
+    var now = new Date();
+    var today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    $$('time[data-local]', ctx).forEach(function (t) {
+      var d = new Date(t.getAttribute('datetime'));
+      if (isNaN(d.getTime())) return;
+      var days = Math.round((today - new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()) / 86400000);
+      var date = days === 0 ? 'today' : days === 1 ? 'yesterday'
+        : d.toLocaleDateString(undefined, d.getFullYear() === now.getFullYear() ? { month: 'short', day: 'numeric' } : { month: 'short', day: 'numeric', year: 'numeric' });
+      t.textContent = date + ' at ' + d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+      t.title = d.toLocaleString(undefined, { dateStyle: 'full', timeStyle: 'short' });
+    });
+  }
+  localTimes(document);
+
   // ---- Toasts ---------------------------------------------------------------------------------
 
   function dismiss(t) {
@@ -1182,6 +1200,7 @@
         })
         .then(function (markup) {
           box.innerHTML = markup;
+          localTimes(box);
           last = Date.now();
           failed = false;
           // Finished (a re-run): reload once for the full page and its buttons.

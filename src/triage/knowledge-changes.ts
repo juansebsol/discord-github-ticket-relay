@@ -260,6 +260,19 @@ export async function changeSync(q: Queryable, repoId: number): Promise<{ defaul
   return rows[0] ?? null;
 }
 
+/**
+ * After a full rewrite, which read the repository, issues and releases as they were: changes still
+ * waiting from before it started aren't waiting any longer. Returns how many.
+ */
+export async function settleChanges(q: Queryable, appId: string, before: Date): Promise<number> {
+  const { rows } = await q.query(
+    `UPDATE app_changes SET status = 'skipped', note = $3, decided_at = now_ms()
+      WHERE app_id = $1 AND status = 'pending' AND change_id IN (SELECT id FROM repo_changes WHERE merged_at <= $2) RETURNING change_id`,
+    [appId, before, NOT_USED],
+  );
+  return rows.length;
+}
+
 /** What Claude did with each change: worked into the TRIAGE.md, or left out (and why). */
 export async function decideChanges(q: Queryable, appId: string, decisions: { id: string; status: 'added' | 'skipped'; note: string | null }[]): Promise<void> {
   for (const d of decisions) {

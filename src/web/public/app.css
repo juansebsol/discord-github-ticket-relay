@@ -1346,9 +1346,11 @@ a.feed-row:focus-visible { outline-offset: -2px; }
 .kn-file.is-running .kn-file-state, .kn-file.is-queued .kn-file-state { color: var(--accent-text); }
 .kn-file.is-failed .kn-file-state { color: var(--warn-text); }
 .kn-file.is-failed > .ic { color: var(--warn); }
-.kn-changes { display: inline-flex; align-items: center; gap: 6px; min-width: 0; font-size: 12px; line-height: 16px; color: var(--muted); font-variant-numeric: tabular-nums; }
-.kn-changes > .ic { flex: none; }
-.kn-changes > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kn-card-lines { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; min-width: 0; }
+.kn-card-lines > * { max-width: 100%; }
+.kn-changes, .kn-check { display: inline-flex; align-items: flex-start; gap: 6px; min-width: 0; font-size: 12px; line-height: 16px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.kn-changes > .ic, .kn-check > .ic { flex: none; margin-top: 1px; }
+.kn-changes > span, .kn-check > span { min-width: 0; }
 .kn-changes.has { color: var(--text); }
 .kn-changes.has > .ic { color: var(--accent-text); }
 .kn-card-text { flex: 1; font-size: 13px; line-height: 20px; color: var(--muted); }

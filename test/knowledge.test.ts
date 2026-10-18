@@ -50,7 +50,10 @@ const syncIndex = async () => {
   await env.db.query('UPDATE issue_index_repos SET sync_requested_at = now_ms()');
   await new IssueIndexer(env.deps).tick();
 };
-const writtenDaysAgo = (days: number, appId?: string) => env.db.query(`UPDATE app_knowledge SET auto_at = $1, auto_full_at = $1${appId ? ' WHERE app_id = $2' : ''}`, [new Date(Date.now() - days * 86_400_000), ...(appId ? [appId] : [])]);
+/** Written that long ago, and not looked at by the schedule since. */
+const writtenDaysAgo = (days: number, appId?: string) => env.db.query(`UPDATE app_knowledge SET auto_at = $1, auto_full_at = $1, auto_checked_at = NULL${appId ? ' WHERE app_id = $2' : ''}`, [new Date(Date.now() - days * 86_400_000), ...(appId ? [appId] : [])]);
+/** The schedule's last look (that found nothing new) was that long ago. */
+const checkedHoursAgo = (hours: number) => env.db.query('UPDATE app_knowledge SET auto_checked_at = $1 WHERE auto_checked_at IS NOT NULL', [new Date(Date.now() - hours * 3_600_000)]);
 
 beforeEach(async () => {
   await resetDb();
@@ -180,7 +183,7 @@ describe('Knowledge: Claude writes each app’s TRIAGE.md', () => {
     expect((await page('/triage/knowledge?partial=1')).body).toContain('data-live-reload');
 
     const list = (await page('/triage/knowledge')).body;
-    expect(list).toMatch(/Written by Claude <time[^>]*>just now<\/time>/);
+    expect(list).toMatch(/TRIAGE\.md<\/span><span class="muted">·<\/span><span class="kn-file-state">Updated <time datetime="[^"]+" data-local title="[^"]+ UTC">[^<]+ UTC<\/time>/);
     expect(list).toContain('<span class="tag" >Known issues</span>');
     expect(list).toContain('Update all');
     expect(list).not.toContain('Write all');
@@ -284,10 +287,15 @@ describe('Knowledge: Claude writes each app’s TRIAGE.md', () => {
     // Two days later, nothing changed: nothing to do.
     await writtenDaysAgo(2);
     expect(await env.triage.engine.knowledge.scheduleUpdates()).toBe(0);
+    // The look is noted, on the card too: the next one is a day later.
+    expect((await knowledgeRow(photo().id)).auto_checked_at).toBeInstanceOf(Date);
+    expect((await page('/triage/knowledge')).body).toMatch(/<span class="kn-check">.*?<span>Checked <time[^>]*>just now<\/time>, nothing new · next in 24 hours<\/span><\/span>/);
 
-    // An issue opened in PhotoCraft's repository: only PhotoCraft's is rewritten.
+    // An issue opened in PhotoCraft's repository: at the next look, only PhotoCraft's is rewritten.
     repo(0).issues.push({ number: 9, title: 'Crash when printing', body: 'It crashes.', labels: ['bug'], created_at: new Date().toISOString(), user: 'someone' });
     await syncIndex();
+    expect(await env.triage.engine.knowledge.scheduleUpdates()).toBe(0);
+    await checkedHoursAgo(25);
     expect(await env.triage.engine.knowledge.scheduleUpdates()).toBe(1);
     await env.triage.drain();
     expect(writes()).toHaveLength(3);
@@ -329,7 +337,8 @@ describe('Knowledge: Claude writes each app’s TRIAGE.md', () => {
     await env.triage.drain();
     const one = (await page(`/triage/knowledge/${photo().id}`)).body;
     expect(one).toContain('Claude reads it with every PhotoCraft ticket and updates it every 3 hours when something changed.');
-    expect(one).toContain('next update in 3 hours if something changed');
+    expect(one).toContain('next check in 3 hours');
+    expect((await page('/triage/knowledge')).body).toMatch(/<span class="kn-check">.*?<span>Next check in 3 hours<\/span><\/span>/);
 
     // An issue opened two hours later isn't enough yet; after three hours it is.
     const hoursAgo = (h: number) => env.db.query('UPDATE app_knowledge SET auto_at = $1, auto_full_at = $1', [new Date(Date.now() - h * 3_600_000)]);
@@ -436,7 +445,7 @@ describe('Knowledge: what’s merged into the repositories', () => {
   )).rows.map((c) => `${c.kind} ${c.ref} ${c.status}${c.note ? ` (${c.note})` : ''}`);
   const change = async (kind: string, ref: string) => (await env.db.query('SELECT * FROM repo_changes WHERE kind = $1 AND ref = $2', [kind, ref])).rows[0];
   const live = async (appId: string) => (await env.server.inject({ method: 'GET', url: `${w()}/triage/knowledge/live?app=${appId}`, ...get(ws.owner) })).json();
-  const lastUpdate = (minutes: number) => env.db.query('UPDATE app_knowledge SET auto_at = $1 WHERE app_id = $2', [new Date(Date.now() - minutes * 60_000), photo().id]);
+  const lastUpdate = (minutes: number) => env.db.query('UPDATE app_knowledge SET auto_at = $1, auto_checked_at = NULL WHERE app_id = $2', [new Date(Date.now() - minutes * 60_000), photo().id]);
   /** m minutes ago, but never before midnight (the cards count what was merged today). */
   const minsAgo = (m: number) => {
     const midnight = new Date();
@@ -558,7 +567,7 @@ describe('Knowledge: what’s merged into the repositories', () => {
     const owner = repo(0).owner;
     const name = repo(0).name;
     expect(one).toContain('<h2 id="kn-ch-h">Changes</h2><span class="badge accent">3</span>');
-    expect(one).toContain(`Merged into ${owner}/${name} (<span class="mono">main</span>): pull requests, commits pushed without one, and releases. Checked <time`);
+    expect(one).toContain(`Merged into ${owner}/${name} (<span class="mono">main</span>): pull requests, commits pushed without one, and releases. Repository checked <time`);
     expect(one).toContain(`<a class="kn-ch-t" href="https://github.com/${owner}/${name}/pull/10" target="_blank" rel="noopener noreferrer">Fix the blank right page in PNG export</a>`);
     expect(one).toContain(`closes <a href="https://github.com/${owner}/${name}/issues/1" target="_blank" rel="noopener noreferrer">#1</a>, <a href="https://github.com/${owner}/${name}/issues/2"`);
     expect(one).toContain('<span class="mono">d1f00ba</span> · lead');
@@ -623,7 +632,8 @@ describe('Knowledge: what’s merged into the repositories', () => {
     ]);
 
     const after = (await page(`/triage/knowledge/${photo().id}`)).body;
-    expect(after).toMatch(/Written by Claude <time[^>]*>[^<]*<\/time>, updated with merged changes <time[^>]*>just now<\/time>, from/);
+    expect(after).toMatch(/Updated by Claude <time datetime="[^"]+" data-local[^>]*>[^<]+<\/time> from/);
+    expect(after).toMatch(/ · written <time datetime="[^"]+" data-local[^>]*>[^<]+<\/time> · merged changes added <time datetime="[^"]+" data-local[^>]*>[^<]+<\/time> · next check in /);
     expect(after).toContain('<span class="tag kn-ch-chip added" >Added to TRIAGE.md</span>');
     expect(after).toContain('<div class="kn-ch-note">a ruler setting, no reported issue</div>');
     expect(after).not.toContain('Add them now');
@@ -709,6 +719,21 @@ describe('Knowledge: what’s merged into the repositories', () => {
     // VectorCraft had none: nothing about changes in its request.
     const other = writes().find((r) => r.body.messages[0].content.startsWith('Write the TRIAGE.md for VectorCraft'))!;
     expect(JSON.parse(other.body.messages[0].content.slice(other.body.messages[0].content.indexOf('\n') + 1)).recent_changes).toEqual([]);
+  });
+
+  it('lets nothing wait from before a full rewrite, however many changes there were', async () => {
+    await enable({ knowledgeAuto: true });
+    // Two busy weeks: more than a rewrite reads.
+    repo(0).pulls = Array.from({ length: 35 }, (_, i) => ({ number: 100 + i, title: `Fix number ${i}`, user: 'dev', merged_at: daysAgo(1 + i * 0.2), commits: [`s${i}`] }));
+    expect(await tick()).toBe(35);
+    expect((await changes()).filter((c) => c.endsWith('pending'))).toHaveLength(35);
+    await env.triage.drain();
+    const req = writes().find((r) => r.body.messages[0].content.startsWith('Write the TRIAGE.md for PhotoCraft'))!;
+    expect(JSON.parse(req.body.messages[0].content.slice(req.body.messages[0].content.indexOf('\n') + 1)).recent_changes).toHaveLength(30);
+    // The 30 newest were Claude's to decide; the 5 older ones don't wait for an update either.
+    expect((await changes()).filter((c) => c.endsWith('pending'))).toEqual([]);
+    expect((await live(photo().id)).selected.log.map((l: { label: string; text: string }) => `${l.label}: ${l.text}`)).toContain('Change: 5 older changes no longer waiting: this rewrite read the repository as it is');
+    expect((await page('/triage/knowledge')).body).not.toMatch(/waiting<\/span><\/span>/);
   });
 
   it('gives each ticket its app’s latest changes right away, with their dates', async () => {

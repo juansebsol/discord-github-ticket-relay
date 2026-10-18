@@ -67,8 +67,10 @@ export interface AppKnowledge {
   auto_body: string;
   auto_status: WriteStatus | null;
   auto_at: Date | null;
-  /** The last full rewrite (the weekly schedule and the questions follow it). */
+  /** The last full rewrite (new issues and questions count from it). */
   auto_full_at: Date | null;
+  /** The last time the schedule looked and found nothing new (the next look is an interval later). */
+  auto_checked_at: Date | null;
   auto_requested_at: Date | null;
   auto_error: string | null;
   auto_model: string | null;
@@ -81,7 +83,7 @@ export interface AppKnowledge {
 }
 
 const SELECT = `SELECT k.app_id, k.body, k.updated_by, COALESCE(u.display_name, u.username) AS updated_by_name, k.notes_at,
-    k.auto_body, k.auto_status, k.auto_at, k.auto_full_at, k.auto_requested_at, k.auto_error, k.auto_model, k.auto_sources, k.auto_answers,
+    k.auto_body, k.auto_status, k.auto_at, k.auto_full_at, k.auto_checked_at, k.auto_requested_at, k.auto_error, k.auto_model, k.auto_sources, k.auto_answers,
     k.auto_input_tokens, k.auto_output_tokens, k.created_at, k.updated_at
   FROM app_knowledge k LEFT JOIN users u ON u.id = k.updated_by`;
 

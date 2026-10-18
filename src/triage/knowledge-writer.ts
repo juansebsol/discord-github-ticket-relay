@@ -28,7 +28,7 @@ import {
   type KnowledgeSources,
 } from './knowledge.js';
 import { closeIdleRuns, emptyLive, finishRunIfDone, requestWrites, type LiveState, type LiveStep, type LiveTag, type WriteMode } from './knowledge-runs.js';
-import { changeCounts, changeLabel, decideChanges, NOT_USED, pendingChanges, recentChanges, type AppChange } from './knowledge-changes.js';
+import { changeCounts, changeLabel, decideChanges, NOT_USED, pendingChanges, recentChanges, settleChanges, type AppChange } from './knowledge-changes.js';
 import { formatCost, getTriageSettings, intervalMs, resolveApiKey, tokenCost } from './settings.js';
 
 /**
@@ -440,6 +440,7 @@ export class KnowledgeWriter {
       };
       // Merged changes on a TRIAGE.md that exists: only the parts they touch change.
       if (job.auto_mode === 'changes' && isWritten(k)) return await this.writeChanges(job, app, k, key.key, model, live, stream);
+      const started = new Date();
       const { data, sources, asked, given } = await this.gather(conn.installation_id, app, apps, k, live);
       // Stop pressed while it read: Claude isn't asked.
       await live.flush();
@@ -457,6 +458,9 @@ export class KnowledgeWriter {
       const body = cleanWritten(written);
       if (!body) return await this.fail(job, res.cutOff ? 'Claude ran out of room before it wrote anything.' : 'Claude’s answer was empty.', live);
       if (given.length && (changes.size || !res.cutOff)) await decideChanges(deps.db, app.id, decisions(given, changes));
+      // Older changes it wasn't given still wait no longer: it read the repository as it is.
+      const settled = res.cutOff ? 0 : await settleChanges(deps.db, app.id, started);
+      if (settled) live.log('change', `${plural(settled, 'older change')} no longer waiting: this rewrite read the repository as it is`);
       const cost = tokenCost(model, res.inputTokens, res.outputTokens);
       const state = await live.end(
         'done',
@@ -685,11 +689,12 @@ export class KnowledgeWriter {
   }
 
   /**
-   * With Keep them up to date on (and triage on, with a key): once an app's interval has passed
-   * since its last update, it's updated if something changed since. Issues opened or closed, or
-   * questions Claude asked: a full rewrite (it reads them). Only merged changes: an update of the
-   * parts they touch. Nothing: it waits. Apps never written are written; failed ones are tried
-   * again after the interval (between an hour and a day).
+   * With Keep them up to date on (and triage on, with a key): each app is looked at once its
+   * interval has passed since its last update or look, and updated if something changed since.
+   * Issues opened or closed, or questions Claude asked: a full rewrite (it reads them). Only merged
+   * changes: an update of the parts they touch. Nothing: the look is noted, and the next one is an
+   * interval later. Apps never written are written; failed ones are tried again after the interval
+   * (between an hour and a day).
    */
   async scheduleUpdates(now = Date.now()): Promise<number> {
     const { db } = this.deps;
@@ -716,9 +721,10 @@ export class KnowledgeWriter {
           full.push(a.id);
           continue;
         }
-        if (now - k.auto_at.getTime() < every) continue;
+        if (now - Math.max(k.auto_at.getTime(), k.auto_checked_at?.getTime() ?? 0) < every) continue;
         if ((asked.get(a.id) ?? 0) > 0 || (await this.issuesMoved(a, apps, k.auto_full_at ?? k.auto_at))) full.push(a.id);
         else if ((counts.get(a.id)?.pending ?? 0) > 0) updates.push(a.id);
+        else await db.query('UPDATE app_knowledge SET auto_checked_at = $2 WHERE app_id = $1', [a.id, new Date(now)]);
       }
       if (full.length) queued += await requestWrites(db, wid, full, null);
       if (updates.length) queued += await requestWrites(db, wid, updates, null, 'changes');
