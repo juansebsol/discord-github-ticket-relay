@@ -11,6 +11,7 @@ import { html, raw } from '../../lib/html.js';
 import { verdictSchema } from '../../triage/ai.js';
 import { knowledgePromptFor, systemPromptFor } from '../../triage/engine.js';
 import { isWritten, listKnowledge, notesOf } from '../../triage/knowledge.js';
+import { recentChanges, type AppChange } from '../../triage/knowledge-changes.js';
 import { buildUserPrompt, DEFAULT_CHECK_RULES, DEFAULT_EXAMPLES } from '../../triage/prompt.js';
 import {
   FLAGS,
@@ -304,9 +305,10 @@ export function registerTriageConfigRoutes(app: FastifyInstance, web: Web): void
     const [settings, apps, knowledge] = await Promise.all([getTriageSettings(deps.db, ctx.workspace.id), listApps(deps.db, ctx.workspace.id), listKnowledge(deps.db, ctx.workspace.id)]);
     const c = settings.config;
     const system = systemPromptFor(c, apps);
-    // The TRIAGE.md block, for the first app that has one.
-    const shown = apps.find((a) => knowledgePromptFor(apps, knowledge, [a.id]));
-    const known = shown ? knowledgePromptFor(apps, knowledge, [shown.id]) : '';
+    // The TRIAGE.md block, for the first app that has one (with what was merged lately, when that's followed).
+    const merged = c.knowledgeAuto && c.knowledgeChanges !== 'off' ? await recentChanges(deps.db, apps.map((a) => a.id)) : new Map<string, AppChange[]>();
+    const shown = apps.find((a) => knowledgePromptFor(apps, knowledge, [a.id], merged));
+    const known = shown ? knowledgePromptFor(apps, knowledge, [shown.id], merged) : '';
     const groups = c.labelGroups.filter((g) => g.mode !== 'off');
     const sample = buildUserPrompt(
       { app: apps[0]?.name ?? 'Your app', type: 'Bug Report', title: 'Example: the app closes when I export to PNG', description: 'Every time I export a two-page spread to PNG the app closes. Version 0.9 on Windows 11.' },
@@ -323,7 +325,7 @@ export function registerTriageConfigRoutes(app: FastifyInstance, web: Web): void
         </div>
         <div class="card">
           <div class="card-h"><div><h2>Then, the app’s TRIAGE.md</h2><div class="desc">${shown
-            ? html`Each ticket gets its own app’s, cached on its own. ${shown.name}’s here: ${tokensOf(known)}.`
+            ? html`Each ticket gets its own app’s, cached on its own${merged.size ? ', with what was merged into its repository lately' : ''}. ${shown.name}’s here: ${tokensOf(known)}.`
             : 'Each ticket gets its own app’s TRIAGE.md, once Claude has written it.'}${canOpen(ctx.membership, 'triage.knowledge') ? html` ${pageLink(ctx, 'triage.knowledge', 'See every app’s in Knowledge')}.` : ''}</div></div></div>
           ${known ? html`<pre class="prompt-pre">${known}</pre>` : ''}
         </div>

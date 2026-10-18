@@ -73,7 +73,9 @@ The bot asks for these channel permissions when it is added:
    - **Metadata: Read-only**, which GitHub requires; it covers repository names, visibility
      and the Issues setting.
    - For **contributor roles**: **Pull requests: Read-only** (merged PRs) and **Contents:
-     Read-only** (direct commits). Read-only; the app never changes code.
+     Read-only** (direct commits). Read-only; the app never changes code. AI triage › Knowledge
+     uses the same two to read private repositories (README, changelog, docs, merged PRs and
+     commits).
    - Leave everything else as *No access*. No organization or account permissions are
      needed, and no event subscriptions are needed.
    - Adding permissions to an existing app: GitHub asks each installation to accept them

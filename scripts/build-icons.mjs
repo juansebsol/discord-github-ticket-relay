@@ -25,6 +25,8 @@ const NAMES = [
   'book-open', 'corner-down-left', 'image',
   // Live studio
   'chevron-up', 'square',
+  // Repository changes
+  'git-merge', 'git-commit-horizontal',
 ];
 
 const require = createRequire(import.meta.url);

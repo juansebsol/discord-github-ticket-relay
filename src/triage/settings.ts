@@ -206,6 +206,9 @@ export const LABEL_GROUP_PRESETS: Record<'type' | 'area' | 'platform', Omit<Labe
  */
 export const KNOWLEDGE_EVERY_DAYS = [1, 3, 7, 14, 30] as const;
 export const KNOWLEDGE_SOONER = [1, 3, 5, 10, 0] as const;
+/** After merged pull requests (and commits and releases): the TRIAGE.md is updated at most once an hour, once a day, or not. */
+export const KNOWLEDGE_CHANGES = ['hourly', 'daily', 'off'] as const;
+export type KnowledgeChanges = (typeof KNOWLEDGE_CHANGES)[number];
 
 export const TriageConfigSchema = z.object({
   model: z.string().trim().min(1).max(100).catch(DEFAULT_MODEL),
@@ -256,6 +259,8 @@ export const TriageConfigSchema = z.object({
   knowledgeEveryDays: z.number().int().refine((d) => (KNOWLEDGE_EVERY_DAYS as readonly number[]).includes(d)).catch(7),
   /** Sooner once Claude has asked this many new questions about the app (0: never; at most once a day). */
   knowledgeSooner: z.number().int().refine((q) => (KNOWLEDGE_SOONER as readonly number[]).includes(q)).catch(3),
+  /** Track what's merged into each app's repository, and work it into its TRIAGE.md (off: not tracked). */
+  knowledgeChanges: z.enum(KNOWLEDGE_CHANGES).catch('off'),
   /**
    * For issues opened directly on GitHub: each action's own mode, by key ('priority', a check,
    * or 'group:<id>'). Separate from the modes for Discord tickets; anything missing is Off.

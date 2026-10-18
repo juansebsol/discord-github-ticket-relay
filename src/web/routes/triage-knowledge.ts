@@ -27,9 +27,10 @@ import {
   type AppKnowledge,
   type Question,
 } from '../../triage/knowledge.js';
-import { splitAnswers, WRITE_ESTIMATE } from '../../triage/knowledge-writer.js';
-import { emptyLive, finishRunIfDone, latestRun, LIVE_STEPS, requestWrites, stopWrites, type LiveState, type LiveStep, type LiveTag } from '../../triage/knowledge-runs.js';
-import { formatCost, getTriageSettings, KNOWLEDGE_EVERY_DAYS, KNOWLEDGE_SOONER, parseTriageConfig, resolveApiKey, saveTriageConfig, tokenCost } from '../../triage/settings.js';
+import { CHANGES_ESTIMATE, splitAnswers, WRITE_ESTIMATE } from '../../triage/knowledge-writer.js';
+import { CHANGE_STEPS, emptyLive, finishRunIfDone, latestRun, LIVE_STEPS, requestWrites, stopWrites, type LiveState, type LiveStep, type LiveTag } from '../../triage/knowledge-runs.js';
+import { appChanges, changeCounts, changeLabel, changeSync, NOT_USED, recentChanges, type AppChange } from '../../triage/knowledge-changes.js';
+import { formatCost, getTriageSettings, KNOWLEDGE_CHANGES, KNOWLEDGE_EVERY_DAYS, KNOWLEDGE_SOONER, parseTriageConfig, resolveApiKey, saveTriageConfig, tokenCost, type KnowledgeChanges } from '../../triage/settings.js';
 import { renderMarkdown } from '../markdown.js';
 import { setFlash } from '../session.js';
 import type { Web, WorkspaceRequestContext } from '../server.js';
@@ -61,9 +62,26 @@ const DAY_MS = 86_400_000;
 const EVERY: Record<number, string> = { 1: 'Every day', 3: 'Every 3 days', 7: 'Every week', 14: 'Every 2 weeks', 30: 'Every month' };
 const SOONER: Record<number, string> = { 1: 'After 1 new question', 3: 'After 3 new questions', 5: 'After 5 new questions', 10: 'After 10 new questions', 0: 'Never' };
 
+const CHANGES: Record<KnowledgeChanges, string> = { hourly: 'Every hour', daily: 'Once a day', off: 'Off' };
+/** Why a change isn't sent to Claude (see noiseOf). */
+const NOISE: Record<string, string> = { Bot: 'Made by a bot, so it isn’t sent to Claude', Chore: 'Dependencies, CI, tests or refactoring, so it isn’t sent to Claude' };
+
 /** "every week, and sooner after 3 new questions" */
 function scheduleText(every: number, sooner: number): string {
   return `${EVERY[every]!.toLowerCase()}${sooner ? `, and sooner after ${plural(sooner, 'new question')}` : ''}`;
+}
+
+/** " What's merged is added at most once an hour." (empty when it's off). */
+function changesText(changes: KnowledgeChanges): string {
+  return changes === 'hourly' ? ' What’s merged into the repositories is added at most once an hour.' : changes === 'daily' ? ' What’s merged into the repositories is added at most once a day.' : '';
+}
+
+/** When the merged changes waiting go into an app's TRIAGE.md: an hour (or a day) after its last update. */
+function changesDue(lastAt: Date | null, changes: KnowledgeChanges, now = Date.now()): string {
+  const ms = (lastAt?.getTime() ?? 0) + (changes === 'daily' ? DAY_MS : 3_600_000) - now;
+  if (ms <= 10 * 60_000) return 'added in the next few minutes';
+  const min = Math.round(ms / 60_000);
+  return min < 60 ? `added in about ${min} min` : `added in about ${plural(Math.round(ms / 3_600_000), 'hour')}`;
 }
 
 /** "next update in 5 days", for an app whose TRIAGE.md is kept up to date. */
@@ -83,6 +101,9 @@ function stateOf(k: AppKnowledge | null | undefined): State {
 
 const busy = (s: State) => s === 'queued' || s === 'running';
 
+/** Merged changes were added since the last full write. */
+const updatedSince = (k: AppKnowledge | null | undefined) => Boolean(k?.auto_at && k.auto_full_at && k.auto_at.getTime() > k.auto_full_at.getTime());
+
 /** "TRIAGE.md · Written by Claude 2 days ago", with the state of the latest write. */
 function fileLine(k: AppKnowledge | null | undefined): SafeHtml {
   const s = stateOf(k);
@@ -91,7 +112,7 @@ function fileLine(k: AppKnowledge | null | undefined): SafeHtml {
     running: 'Claude is writing it…',
     queued: 'Waiting to be written…',
     failed: isWritten(k) ? 'Couldn’t update it' : 'Couldn’t write it',
-    done: k?.auto_at ? html`Written by Claude ${ago(k.auto_at)}` : '',
+    done: k?.auto_at ? (updatedSince(k) ? html`Updated by Claude ${ago(k.auto_at)}` : html`Written by Claude ${ago(k.auto_at)}`) : '',
     none: 'Not written yet',
   };
   return html`<span class="kn-file is-${s}">${lead}<span class="mono">TRIAGE.md</span><span class="muted">·</span><span class="kn-file-state">${text[s]}</span></span>`;
@@ -114,9 +135,10 @@ const STEP_LABELS: Record<LiveStep, [done: string, now: string]> = {
   thinking: ['Thought', 'Thinking'],
   writing: ['Wrote', 'Writing'],
   answers: ['Answers', 'Answering'],
+  changes: ['Changes', 'Reading changes'],
 };
-const PHASES: Record<LiveStep, string> = { repo: 'Reading the repository', issues: 'Reading the issues', thinking: 'Thinking', writing: 'Writing', answers: 'Answering its questions' };
-const TAGS: Record<LiveTag, string> = { github: 'GitHub', issues: 'Issues', tickets: 'Tickets', claude: 'Claude', answer: 'Answer', done: 'Done', error: 'Error', stop: 'Stopped' };
+const PHASES: Record<LiveStep, string> = { repo: 'Reading the repository', issues: 'Reading the issues', thinking: 'Thinking', writing: 'Writing', answers: 'Answering its questions', changes: 'Reading the changes' };
+const TAGS: Record<LiveTag, string> = { github: 'GitHub', issues: 'Issues', tickets: 'Tickets', claude: 'Claude', answer: 'Answer', change: 'Change', done: 'Done', error: 'Error', stop: 'Stopped' };
 
 /** "0:35", "4:12", "1:02:03". */
 function clock(ms: number): string {
@@ -162,7 +184,9 @@ function runAppState(r: RunAppRow): RunAppState {
 
 /** One app's steps for the studio, with how long each took (the one under way: so far). */
 function liveSteps(live: LiveState, state: RunAppState, elapsed: number) {
-  return LIVE_STEPS.filter((key) => key !== 'answers' || live.answers.length).map((key) => {
+  // An update with merged changes has steps of its own.
+  const keys: readonly LiveStep[] = live.steps.some((x) => x.key === 'changes') ? CHANGE_STEPS : LIVE_STEPS.filter((key) => key !== 'answers' || live.answers.length);
+  return keys.map((key) => {
     const step = live.steps.find((x) => x.key === key);
     const now = Boolean(step && step.to === undefined && state === 'running');
     return { label: STEP_LABELS[key][now ? 1 : 0], state: !step ? 'todo' : now ? 'active' : 'done', time: step ? took((step.to ?? elapsed) - step.from) : '' };
@@ -181,17 +205,20 @@ export function registerTriageKnowledgeRoutes(app: FastifyInstance, web: Web): v
     if (!ctx) return reply;
     const wid = ctx.workspace.id;
     const [apps, knowledge, settings, key] = await Promise.all([listApps(deps.db, wid), listKnowledge(deps.db, wid), getTriageSettings(deps.db, wid), resolveApiKey(deps, wid)]);
-    const [counts, issues] = await Promise.all([questionCounts(deps.db, wid, knowledge), issuesPerRepo(deps.db, apps.map((a) => a.repo_id))]);
+    const [counts, issues, changed] = await Promise.all([questionCounts(deps.db, wid, knowledge), issuesPerRepo(deps.db, apps.map((a) => a.repo_id)), changeCounts(deps.db, wid)]);
     const c = settings.config;
+    const anyOn = settings.enabled || settings.githubEnabled;
+    // What's merged is checked (and sent with tickets) while triage and Keep them up to date are on.
+    const tracking = anyOn && c.knowledgeAuto && c.knowledgeChanges !== 'off';
+    const merged = tracking ? await recentChanges(deps.db, apps.map((a) => a.id)) : new Map<string, AppChange[]>();
     const edit = can(ctx.membership, 'triage.knowledge.edit');
     const states = new Map(apps.map((a) => [a.id, stateOf(knowledge.get(a.id))]));
     const working = apps.filter((a) => busy(states.get(a.id)!)).length;
     const written = apps.filter((a) => isWritten(knowledge.get(a.id))).length;
     const missing = apps.filter((a) => !isWritten(knowledge.get(a.id)) && !busy(states.get(a.id)!)).length;
     const fresh = [...counts.values()].reduce((s, x) => s + x.fresh, 0);
-    const sizes = apps.map((a) => knowledgePromptFor(apps, knowledge, [a.id]).length).filter(Boolean);
+    const sizes = apps.map((a) => knowledgePromptFor(apps, knowledge, [a.id], merged).length).filter(Boolean);
     const perTicket = sizes.length ? Math.round(sizes.reduce((s, x) => s + x, 0) / sizes.length) : 0;
-    const anyOn = settings.enabled || settings.githubEnabled;
     const actions = canOpen(ctx.membership, 'triage.actions') ? areaHref(ctx, 'triage.actions') : null;
 
     const appCard = (a: AppRow) => {
@@ -205,13 +232,17 @@ export function registerTriageKnowledgeRoutes(app: FastifyInstance, web: Web): v
         <span class="kn-card-h">${avatar(a.name, 32, { square: true, letters: 2 })}<span class="kn-card-name"><span class="cell-title">${a.name}</span><span class="sub mono">${a.repo_owner}/${a.repo_name}</span></span>
           ${q?.fresh ? html`<span class="kn-new" title="Questions Claude asked and hasn’t answered, since your team last saved its notes">${icon('lightbulb', 12)}${plural(q.fresh, 'question')}</span>` : ''}</span>
         ${fileLine(k)}
+        ${tracking ? (() => {
+          const ch = changed.get(a.id);
+          return html`<span class="kn-changes${ch?.today ? ' has' : ''}">${icon('git-merge', 14)}<span>${ch?.today ? `${plural(ch.today, 'change')} merged today${ch.added ? ` · ${n(ch.added)} added to TRIAGE.md` : ''}` : 'Nothing merged today'}${ch?.pending ? ` · ${n(ch.pending)} waiting` : ''}</span></span>`;
+        })() : ''}
         <span class="kn-card-text">${sections.length
           ? html`<span class="tags">${sections.map((x) => tag(x))}</span>`
           : s === 'failed' && k?.auto_error
             ? html`<span class="warn-text">${k.auto_error}</span>`
             : `Claude reads its README, changelog and releases${repoIssues ? `, and its ${n(repoIssues)} issues,` : ''} to write it.`}</span>
         <span class="kn-card-f"><span class="kn-card-meta">${isWritten(k)
-            ? `${plural(k.auto_sources?.issues.total ?? 0, 'issue')} read · ${tokens(knowledgePromptFor(apps, knowledge, [a.id]).length)}`
+            ? `${plural(k.auto_sources?.issues.total ?? 0, 'issue')} read · ${tokens(knowledgePromptFor(apps, knowledge, [a.id], merged).length)}`
             : q?.total ? `${plural(q.total, 'question')} from Claude` : 'No questions yet'}${notes ? html` ${tag('Team notes', { cls: 'subtle' })}` : ''}</span>
           <span class="kn-open">Open${icon('arrow-right', 14)}</span></span>
       </a></li>`;
@@ -258,12 +289,14 @@ export function registerTriageKnowledgeRoutes(app: FastifyInstance, web: Web): v
       ? html`<span class="kn-cadence">
           <label><span>How often</span>${selectWrap(html`<select name="every" form="kn-auto" aria-label="How often Claude rewrites each TRIAGE.md">${KNOWLEDGE_EVERY_DAYS.map((d) => html`<option value="${String(d)}" ${d === every ? raw('selected') : ''}>${EVERY[d]}</option>`)}</select>`, { sm: true })}</label>
           <label title="Sooner when Claude has asked this many new questions about the app since it last wrote its TRIAGE.md (at most once a day)"><span>Sooner</span>${selectWrap(html`<select name="sooner" form="kn-auto" aria-label="When Claude rewrites an app’s TRIAGE.md sooner">${KNOWLEDGE_SOONER.map((q) => html`<option value="${String(q)}" ${q === sooner ? raw('selected') : ''}>${SOONER[q]}</option>`)}</select>`, { sm: true })}</label>
+          <label title="What’s merged into each app’s repository (pull requests, commits pushed without one, releases) is checked every 15 minutes, and tickets get it right away. Claude adds it to the TRIAGE.md at most this often, without rewriting the rest. Bots and chores are left out."><span>After merged PRs</span>${selectWrap(html`<select name="changes" form="kn-auto" aria-label="When Claude adds what’s merged into the repositories">${KNOWLEDGE_CHANGES.map((x) => html`<option value="${x}" ${x === c.knowledgeChanges ? raw('selected') : ''}>${CHANGES[x]}</option>`)}</select>`, { sm: true })}</label>
         </span>`
-      : html`<span class="kn-cadence">${EVERY[every]}${sooner ? `, and sooner after ${plural(sooner, 'new question')}` : ''}.</span>`;
+      : html`<span class="kn-cadence">${EVERY[every]}${sooner ? `, and sooner after ${plural(sooner, 'new question')}` : ''}.${changesText(c.knowledgeChanges)}</span>`;
     // What it costs: per update, and a month on this schedule (app.js updates the month when the schedule changes).
     const perUpdate = tokenCost(c.model, WRITE_ESTIMATE.input, WRITE_ESTIMATE.output);
+    const perChange = tokenCost(c.model, CHANGES_ESTIMATE.input, CHANGES_ESTIMATE.output);
     const costs = perUpdate !== null && apps.length
-      ? html`<span class="kn-cadence-cost">Each update: ${formatCost(perUpdate)} per app with ${c.model}. On this schedule, <span data-kn-month data-each="${String(perUpdate)}" data-apps="${String(apps.length)}">${formatCost((perUpdate * apps.length * 30) / every)}</span> a month for ${plural(apps.length, 'app')}.</span>`
+      ? html`<span class="kn-cadence-cost">Each update: ${formatCost(perUpdate)} per app with ${c.model}. On this schedule, <span data-kn-month data-each="${String(perUpdate)}" data-apps="${String(apps.length)}">${formatCost((perUpdate * apps.length * 30) / every)}</span> a month for ${plural(apps.length, 'app')}<span data-kn-changes-cost ${c.knowledgeChanges === 'off' ? raw('hidden') : ''}>, plus ${formatCost(perChange ?? perUpdate)} for each update with merged changes</span>.</span>`
       : '';
 
     const body = html`
@@ -281,7 +314,7 @@ export function registerTriageKnowledgeRoutes(app: FastifyInstance, web: Web): v
               return actions ? html`<a class="stat" href="${actions}#limits" title="Set in Actions › Model, scope and limits">${inner}</a>` : html`<div class="stat">${inner}</div>`;
             })()}
           </div>
-          <div class="kn-auto">${setting('Keep them up to date', html`While AI triage is on, Claude rewrites each app’s TRIAGE.md from the latest issues and releases.${schedule}${costs}`, autoControl, { switchRow: true })}</div>
+          <div class="kn-auto">${setting('Keep them up to date', html`While AI triage is on, Claude rewrites each app’s TRIAGE.md from the latest issues and releases, and can add what’s merged in between.${schedule}${costs}`, autoControl, { switchRow: true })}</div>
         </div>
         ${apps.length
           ? working ? html`<div data-live="4000" data-live-src="${listUrl(ctx)}?partial=1">${grid}</div>` : grid
@@ -299,7 +332,7 @@ export function registerTriageKnowledgeRoutes(app: FastifyInstance, web: Web): v
     const a = await getApp(deps.db, wid, (req.params as { appId: string }).appId);
     if (!a) throw new UserFacingError('That app was removed.', 404);
     const [k, apps, settings, key] = await Promise.all([getKnowledge(deps.db, wid, a.id), listApps(deps.db, wid), getTriageSettings(deps.db, wid), resolveApiKey(deps, wid)]);
-    const [{ questions, more }, issues] = await Promise.all([listQuestions(deps.db, wid, a.id, k), issuesPerRepo(deps.db, [a.repo_id])]);
+    const [{ questions, more }, issues, changeList, sync, changed] = await Promise.all([listQuestions(deps.db, wid, a.id, k), issuesPerRepo(deps.db, [a.repo_id]), appChanges(deps.db, a.id, 15), changeSync(deps.db, a.repo_id), changeCounts(deps.db, wid)]);
     const c = settings.config;
     const edit = can(ctx.membership, 'triage.knowledge.edit');
     const s = stateOf(k);
@@ -315,12 +348,13 @@ export function registerTriageKnowledgeRoutes(app: FastifyInstance, web: Web): v
       : '');
     const used = k?.auto_model ? tokenCost(k.auto_model, k.auto_input_tokens ?? 0, k.auto_output_tokens ?? 0) : null;
     // With Keep them up to date on: when it's rewritten next.
-    const upcoming = !c.knowledgeAuto || !k?.auto_at ? '' : settings.enabled || settings.githubEnabled ? nextUpdate(k.auto_at, c.knowledgeEveryDays) : 'updates start when AI triage is on';
+    const triageOn = settings.enabled || settings.githubEnabled;
+    const upcoming = !c.knowledgeAuto || !k?.auto_at ? '' : triageOn ? nextUpdate(k.auto_full_at ?? k.auto_at, c.knowledgeEveryDays) : 'updates start when AI triage is on';
     const writtenDoc = isWritten(k)
       ? html`${k.auto_sources?.cutOff ? html`<div class="card-b tight">${notice('warn', null, 'Claude ran out of room before the end, so the last part may be missing. Update it to try again.')}</div>` : ''}
           <div class="card-b"><div class="kn-doc">${renderMarkdown(k.auto_body, repoUrl)}</div></div>
           <details class="kn-raw"><summary>${icon('chevron-right', 14, 'chev')}Markdown<span class="muted"> · exactly what Claude reads</span></summary><pre class="prompt-pre">${k.auto_body}</pre></details>
-          <div class="card-note">${[k.auto_model, k.auto_input_tokens ? `${n((k.auto_input_tokens ?? 0) + (k.auto_output_tokens ?? 0))} tokens` : '', used !== null && k.auto_input_tokens ? formatCost(used) : ''].filter(Boolean).join(' · ')}${k.auto_at ? html` · written ${ago(k.auto_at)}` : ''}${upcoming ? ` · ${upcoming}` : ''}</div>`
+          <div class="card-note">${[k.auto_model, k.auto_input_tokens ? `${n((k.auto_input_tokens ?? 0) + (k.auto_output_tokens ?? 0))} tokens` : '', used !== null && k.auto_input_tokens ? formatCost(used) : ''].filter(Boolean).join(' · ')}${k.auto_full_at ?? k.auto_at ? html` · written ${ago((k.auto_full_at ?? k.auto_at)!)}` : ''}${updatedSince(k) ? html` · updated with merged changes ${ago(k.auto_at!)}` : ''}${upcoming ? ` · ${upcoming}` : ''}</div>`
       : '';
     const writtenInner = html`
       ${busy(s)
@@ -400,6 +434,37 @@ export function registerTriageKnowledgeRoutes(app: FastifyInstance, web: Web): v
         </section>`
       : '';
 
+    // ---- What was merged.
+    const tracking = c.knowledgeAuto && c.knowledgeChanges !== 'off';
+    const waitingN = changed.get(a.id)?.pending ?? 0;
+    const due = tracking && triageOn ? changesDue(k?.auto_at ?? null, c.knowledgeChanges) : null;
+    const kindIcon = (x: AppChange) => icon(x.kind === 'pr' ? 'git-merge' : x.kind === 'commit' ? 'git-commit-horizontal' : 'tag', 14);
+    const changeChip = (x: AppChange) => x.status === 'added'
+      ? tag('Added to TRIAGE.md', { cls: 'kn-ch-chip added' })
+      : x.status === 'pending' ? tag('Waiting', { cls: 'kn-ch-chip waiting', title: due && isWritten(k) ? cap(due) : 'Added at the next update' })
+        : x.noise ? tag(x.noise, { cls: 'kn-ch-chip skipped', title: NOISE[x.noise] ?? 'Not sent to Claude' })
+          : x.note === NOT_USED ? tag('Not used', { cls: 'kn-ch-chip skipped', title: 'Claude didn’t add it to the TRIAGE.md' })
+            : tag('Not relevant', { cls: 'kn-ch-chip skipped', title: 'Claude didn’t add it to the TRIAGE.md' });
+    const issueLink = (num: number) => html`<a href="https://github.com/${a.repo_owner}/${a.repo_name}/issues/${String(num)}" target="_blank" rel="noopener noreferrer">#${String(num)}</a>`;
+    const changesCard = tracking || changeList.length
+      ? html`<section class="card" id="changes" aria-labelledby="kn-ch-h">
+          <div class="card-h"><div><div class="title"><h2 id="kn-ch-h">Changes</h2>${waitingN ? badge(waitingN, 'accent') : ''}</div><div class="desc">${tracking
+            ? html`Merged into ${a.repo_owner}/${a.repo_name}${sync?.default_branch ? html` (<span class="mono">${sync.default_branch}</span>)` : ''}: pull requests, commits pushed without one, and releases. ${!triageOn ? 'Checked once AI triage is on.' : sync?.checked_at ? html`Checked ${ago(sync.checked_at)}.` : 'Checked every 15 minutes.'}`
+            : html`To follow what’s merged into ${a.repo_owner}/${a.repo_name}, turn on <a href="${listUrl(ctx)}">Keep them up to date</a> and choose when in “After merged PRs”.`}</div></div></div>
+          ${sync?.last_error && tracking && triageOn ? html`<div class="card-b tight">${notice('warn', null, sync.last_error)}</div>` : ''}
+          ${changeList.length
+            ? html`<ul class="kn-chs">${changeList.map((x) => html`<li class="kn-ch is-${x.status}">${kindIcon(x)}<div class="kn-ch-b">
+                <a class="kn-ch-t" href="${x.url}" target="_blank" rel="noopener noreferrer">${x.title}</a>
+                <div class="kn-ch-m"><span class="mono">${changeLabel(x)}</span>${x.author ? ` · ${x.author}` : ''} · ${ago(x.merged_at)}${x.closes.length ? html` · closes ${x.closes.map((num, j) => html`${j ? ', ' : ''}${issueLink(num)}`)}` : ''}</div>
+                ${x.status === 'skipped' && x.note && !x.noise && x.note !== NOT_USED ? html`<div class="kn-ch-note">${x.note}</div>` : ''}
+              </div>${changeChip(x)}</li>`)}</ul>`
+            : html`<div class="card-b tight"><p class="small muted">${tracking ? 'Nothing merged in the last 14 days.' : 'Nothing tracked yet.'}</p></div>`}
+          ${edit && waitingN && key && !busy(s) && isWritten(k)
+            ? html`<div class="card-f"><span class="small muted">${plural(waitingN, 'change')} waiting${due ? ` · ${due}` : ''}</span>${postBtn(writeUrl, waitingN === 1 ? 'Add it now' : 'Add them now', ctx.csrf, { size: 'sm', icon: 'git-merge', loading: 'Starting…', fields: { mode: 'changes' } })}</div>`
+            : ''}
+        </section>`
+      : '';
+
     // ---- The team's notes.
     const notes = k?.body ?? '';
     const notesCard = html`<form method="post" action="${knowledgeHref(ctx, a.id)}" class="card kn-editor" id="notes" ${edit ? raw('data-dirty data-kn-editor') : ''}>
@@ -428,7 +493,7 @@ export function registerTriageKnowledgeRoutes(app: FastifyInstance, web: Web): v
         title: html`<span class="kn-title">${avatar(a.name, 28, { square: true, letters: 2 })}${a.name}</span>`,
         after: [tag('TRIAGE.md', { icon: 'file-text', cls: 'mono' })],
         description: isWritten(k) && k.auto_at
-          ? html`Written by Claude ${ago(k.auto_at)} from ${a.repo_owner}/${a.repo_name}. Claude reads it with every ${a.name} ticket${c.knowledgeAuto ? ` and rewrites it ${scheduleText(c.knowledgeEveryDays, c.knowledgeSooner)}` : ''}.`
+          ? html`Written by Claude ${ago(k.auto_full_at ?? k.auto_at)}${updatedSince(k) ? html`, updated with merged changes ${ago(k.auto_at)},` : ''} from ${a.repo_owner}/${a.repo_name}. Claude reads it with every ${a.name} ticket${c.knowledgeAuto ? ` and rewrites it ${scheduleText(c.knowledgeEveryDays, c.knowledgeSooner)}` : ''}.${c.knowledgeAuto ? changesText(c.knowledgeChanges) : ''}`
           : `Claude writes it from ${a.repo_owner}/${a.repo_name}, then reads it with every ${a.name} ticket.`,
         actions: [
           prev ? linkBtn(knowledgeHref(ctx, prev.id), prev.name, { icon: 'chevron-left', variant: 'ghost', size: 'sm' }) : null,
@@ -443,7 +508,7 @@ export function registerTriageKnowledgeRoutes(app: FastifyInstance, web: Web): v
           </section>
           ${notesCard}
         </div>
-        <div class="stack kn-side">${questionsCard}${sourcesCard}</div>
+        <div class="stack kn-side">${questionsCard}${changesCard}${sourcesCard}</div>
       </div>`;
     return web.render(reply, ctx, `${a.name} · Knowledge · AI triage`, 'triage', pageBody, { width: 'full' });
   });
@@ -471,7 +536,7 @@ export function registerTriageKnowledgeRoutes(app: FastifyInstance, web: Web): v
     const ctx = await web.requireWorkspace(req, reply, { permission: 'triage.knowledge.edit' });
     if (!ctx) return reply;
     const wid = ctx.workspace.id;
-    const f = (req.body ?? {}) as { auto?: string; every?: string; sooner?: string };
+    const f = (req.body ?? {}) as { auto?: string; every?: string; sooner?: string; changes?: string };
     const on = f.auto !== undefined;
     const respond = (ok: boolean, message: string) => {
       if (web.wantsJson(req)) return reply.code(ok ? 200 : 400).send(ok ? { ok, message } : { ok, error: message });
@@ -483,10 +548,11 @@ export function registerTriageKnowledgeRoutes(app: FastifyInstance, web: Web): v
     // A field missing from the form keeps its value.
     const every = f.every === undefined ? c.knowledgeEveryDays : Number(f.every);
     const sooner = f.sooner === undefined ? c.knowledgeSooner : Number(f.sooner);
-    if (!(KNOWLEDGE_EVERY_DAYS as readonly number[]).includes(every) || !(KNOWLEDGE_SOONER as readonly number[]).includes(sooner)) return respond(false, 'Choose a schedule from the list.');
+    const changes = (f.changes === undefined ? c.knowledgeChanges : f.changes) as KnowledgeChanges;
+    if (!(KNOWLEDGE_EVERY_DAYS as readonly number[]).includes(every) || !(KNOWLEDGE_SOONER as readonly number[]).includes(sooner) || !KNOWLEDGE_CHANGES.includes(changes)) return respond(false, 'Choose a schedule from the list.');
     if (on && !(await resolveApiKey(deps, wid))) return respond(false, 'Add a Claude API key in Settings first.');
-    await saveTriageConfig(deps.db, wid, parseTriageConfig({ ...c, knowledgeAuto: on, knowledgeEveryDays: every, knowledgeSooner: sooner }));
-    const when = scheduleText(every, sooner);
+    await saveTriageConfig(deps.db, wid, parseTriageConfig({ ...c, knowledgeAuto: on, knowledgeEveryDays: every, knowledgeSooner: sooner, knowledgeChanges: changes }));
+    const when = `${scheduleText(every, sooner)}.${changesText(changes)}`.replace(/\.$/, '');
     if (!on) return respond(true, c.knowledgeAuto ? 'Claude no longer updates them by itself. You can still update each one.' : `Schedule saved: ${when}. Switch it on to start.`);
     const later = settings.enabled || settings.githubEnabled ? '' : ' Updates start once AI triage is on.';
     if (c.knowledgeAuto) return respond(true, `Claude rewrites each TRIAGE.md ${when}.${later}`);
@@ -506,8 +572,9 @@ export function registerTriageKnowledgeRoutes(app: FastifyInstance, web: Web): v
     if (!a) throw new UserFacingError('That app was removed.', 404);
     if (!(await resolveApiKey(deps, ctx.workspace.id))) setFlash(reply, 'error', 'Add a Claude API key in Settings first.');
     else {
-      const queued = await requestWrites(deps.db, ctx.workspace.id, [a.id], ctx.user.id);
-      setFlash(reply, queued ? 'success' : 'info', queued ? `Claude is writing the TRIAGE.md for ${a.name}, in about a minute.` : 'It’s already being written.');
+      const changes = (req.body as { mode?: string } | null)?.mode === 'changes';
+      const queued = await requestWrites(deps.db, ctx.workspace.id, [a.id], ctx.user.id, changes ? 'changes' : 'full');
+      setFlash(reply, queued ? 'success' : 'info', queued ? (changes ? `Claude is adding the merged changes to the TRIAGE.md for ${a.name}.` : `Claude is writing the TRIAGE.md for ${a.name}, in about a minute.`) : 'It’s already being written.');
       return reply.redirect(`${knowledgeHref(ctx, a.id)}?watch=1`);
     }
     return reply.redirect(knowledgeHref(ctx, a.id));

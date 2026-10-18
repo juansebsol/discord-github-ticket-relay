@@ -63,10 +63,12 @@ export interface AppKnowledge {
   updated_by: string | null;
   updated_by_name: string | null;
   notes_at: Date | null;
-  /** What Claude wrote, and when. */
+  /** What Claude wrote, and when (an update with merged changes too). */
   auto_body: string;
   auto_status: WriteStatus | null;
   auto_at: Date | null;
+  /** The last full rewrite (the weekly schedule and the questions follow it). */
+  auto_full_at: Date | null;
   auto_requested_at: Date | null;
   auto_error: string | null;
   auto_model: string | null;
@@ -79,7 +81,7 @@ export interface AppKnowledge {
 }
 
 const SELECT = `SELECT k.app_id, k.body, k.updated_by, COALESCE(u.display_name, u.username) AS updated_by_name, k.notes_at,
-    k.auto_body, k.auto_status, k.auto_at, k.auto_requested_at, k.auto_error, k.auto_model, k.auto_sources, k.auto_answers,
+    k.auto_body, k.auto_status, k.auto_at, k.auto_full_at, k.auto_requested_at, k.auto_error, k.auto_model, k.auto_sources, k.auto_answers,
     k.auto_input_tokens, k.auto_output_tokens, k.created_at, k.updated_at
   FROM app_knowledge k LEFT JOIN users u ON u.id = k.updated_by`;
 
@@ -131,12 +133,12 @@ export async function saveKnowledge(q: Queryable, workspaceId: string, appId: st
 }
 
 /** The app's TRIAGE.md as the triage prompt takes it (Claude's part and the team's notes). */
-export function knowledgeTexts(apps: AppRow[], knowledge: Map<string, AppKnowledge>, appIds: (string | null)[]): AppKnowledgeText[] {
+export function knowledgeTexts(apps: AppRow[], knowledge: Map<string, AppKnowledge>, appIds: (string | null)[], changes: Map<string, string[]> = new Map()): AppKnowledgeText[] {
   return apps
     .filter((a) => appIds.includes(a.id))
     .map((a) => {
       const k = knowledge.get(a.id);
-      return { name: a.name, written: k?.auto_body ?? '', notes: notesOf(k) };
+      return { name: a.name, written: k?.auto_body ?? '', notes: notesOf(k), changes: changes.get(a.id) ?? [] };
     });
 }
 
@@ -225,7 +227,9 @@ export async function questionCounts(q: Queryable, workspaceId: string, knowledg
     const { status } = statusOf(r.question, k);
     c.total++;
     if (isFresh(status, r.at, k)) c.fresh++;
-    if (status === 'waiting' && (!k?.auto_at || r.at > k.auto_at)) c.sinceWritten++;
+    // Questions are looked at in full rewrites (an update with merged changes doesn't).
+    const full = k?.auto_full_at ?? k?.auto_at;
+    if (status === 'waiting' && (!full || r.at > full)) c.sinceWritten++;
     out.set(r.app_id, c);
   }
   return out;

@@ -60,10 +60,26 @@ Discord endpoint, OAuth), one or more queue workers, and an optional triage work
   arrive) at most twice a second; each save also reads `auto_cancel`, so Stop aborts the request
   mid-stream and the app keeps its previous TRIAGE.md. Pages carry the Live studio while a run is on
   (and for two minutes after); app.js polls `/triage/knowledge/live`.
+  With "After merged PRs" on (`knowledgeChanges`: hourly or daily), the worker's index loop also
+  polls each app repository's default branch every 15 minutes (`src/triage/knowledge-changes.ts`,
+  no webhooks; `repo_change_sync` keeps how far each one got, the first check reads 14 days back,
+  and checks wait while the installation's hourly GitHub budget is low, keeping it for filing):
+  merged pull requests, commits pushed without one (everything after the newest commit seen last
+  time, whatever its date; not merges, squashed pull requests ending in "(#123)" or commits GitHub
+  says a merged pull request brought in, rebased ones included) and releases go to
+  `repo_changes`, and each app sharing the repository gets its own row in `app_changes`. Bots and
+  chores (dependency bumps, CI, tests, refactors) are kept but marked and never sent to Claude.
+  Each ticket's TRIAGE.md block
+  gets the app's changes from the last 14 days right away, with dates rather than "2 days ago" so
+  the cached prompt stays the same. An app with changes waiting gets an update in "changes" mode
+  (`app_knowledge.auto_mode`) at most once an hour or once a day: Claude gets the current TRIAGE.md
+  and the changes and returns it updated, saying for each change whether it added it or why not
+  (`app_changes.status` and `note`). The weekly rewrite and the questions trigger follow the last
+  full write (`auto_full_at`), and a full rewrite reads the recent changes too.
 - **No Discord gateway.** The bot is driven entirely by Discord's HTTP interactions endpoint and
   REST API. It needs no privileged intents and no slash-command registration.
 - **GitHub App auth.** Short-lived installation tokens are minted from the app's private key
-  (RS256 JWT). Required permissions: `Issues: read & write`, `Metadata: read`; contributor roles add `Pull requests: read` and `Contents: read`.
+  (RS256 JWT). Required permissions: `Issues: read & write`, `Metadata: read`; contributor roles add `Pull requests: read` and `Contents: read`, which AI triage › Knowledge also uses for private repositories (README and docs, merged pull requests, commits).
 - **SQLite-backed queue.** Submissions are the jobs. Workers in any number of processes claim
   them with one atomic `UPDATE … RETURNING` under SQLite's write lock, plus a 90s lease.
   WAL mode and a busy timeout let processes share the file on one host.

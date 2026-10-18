@@ -20,6 +20,11 @@ export interface FakeRepo {
   releases?: { tag: string; name?: string; published_at?: string; body?: string; draft?: boolean; prerelease?: boolean }[];
   description?: string | null;
   topics?: string[];
+  default_branch?: string;
+  /** Pull requests (closed ones with merged_at were merged), and the commits each one brought (merged or rebased). */
+  pulls?: { number: number; title: string; body?: string; user: string; base?: string; merged_at?: string | null; updated_at?: string; labels?: string[]; commits?: string[] }[];
+  /** Commits on the default branch, newest first. */
+  branchCommits?: { sha: string; message: string; user?: string | null; date: string; parents?: number }[];
 }
 
 /** How the next create-issue call behaves. */
@@ -93,6 +98,9 @@ export class FakeGitHub {
         releases: r.releases ?? [],
         description: r.description ?? null,
         topics: r.topics ?? [],
+        default_branch: r.default_branch ?? 'main',
+        pulls: r.pulls ?? [],
+        branchCommits: r.branchCommits ?? [],
       };
       this.repos.set(repo.id, repo);
       ids.push(repo.id);
@@ -110,6 +118,8 @@ export class FakeGitHub {
   }
 
   searchCalls = 0;
+  /** GET /repos/:o/:r/commits/:sha/pulls calls (which pull request brought a commit in). */
+  commitPullsCalls = 0;
 
   issueJson(r: FakeRepo, i: FakeRepo['issues'][number]) {
     return { number: i.number, title: i.title, body: i.body, user: { login: i.user, type: /\[bot\]$/.test(i.user) ? 'Bot' : 'User' }, state: i.state ?? 'open', state_reason: i.state_reason ?? null, closed_at: i.closed_at ?? null, created_at: i.created_at, updated_at: i.updated_at ?? i.created_at, labels: i.labels.map((name) => ({ name })), html_url: `https://github.com/${r.owner}/${r.name}/issues/${i.number}` };
@@ -200,7 +210,26 @@ export class FakeGitHub {
     if ((m = /^\/repos\/([^/]+)\/([^/]+)$/.exec(path)) && method === 'GET') {
       const r = this.repoByName(decodeURIComponent(m[1]!), decodeURIComponent(m[2]!));
       if (!accessible(r)) return json(404, { message: 'Not Found' });
-      return json(200, { ...this.repoJson(r!), description: r!.description ?? null, homepage: null, topics: r!.topics ?? [] });
+      return json(200, { ...this.repoJson(r!), description: r!.description ?? null, homepage: null, topics: r!.topics ?? [], default_branch: r!.default_branch ?? 'main' });
+    }
+    // Pull requests, and the ones that brought a commit in (Pull requests: read, needed for private repositories).
+    if ((m = /^\/repos\/([^/]+)\/([^/]+)\/(?:pulls|commits\/([^/]+)\/pulls)$/.exec(path)) && method === 'GET') {
+      const r = this.repoByName(decodeURIComponent(m[1]!), decodeURIComponent(m[2]!));
+      if (!accessible(r)) return json(404, { message: 'Not Found' });
+      if (r!.private && !this.installationPermissions.pull_requests) return json(403, { message: 'Resource not accessible by integration' });
+      const user = (login: string) => ({ login, type: /\[bot\]$/.test(login) ? 'Bot' : 'User' });
+      this.commitPullsCalls += m[3] ? 1 : 0;
+      if (m[3]) return json(200, (r!.pulls ?? []).filter((x) => x.commits?.includes(decodeURIComponent(m![3]!))).map((x) => ({ number: x.number, merged_at: x.merged_at ?? null })));
+      const p = url.searchParams;
+      const perPage = Number(p.get('per_page') ?? 30);
+      const page = Number(p.get('page') ?? 1);
+      const closed = (r!.pulls ?? [])
+        .filter((x) => (p.get('state') !== 'closed' || x.merged_at !== undefined) && (!p.get('base') || (x.base ?? r!.default_branch ?? 'main') === p.get('base')))
+        .sort((a, b) => Date.parse(b.updated_at ?? b.merged_at ?? '') - Date.parse(a.updated_at ?? a.merged_at ?? ''));
+      return json(200, closed.slice((page - 1) * perPage, page * perPage).map((x) => ({
+        number: x.number, title: x.title, body: x.body ?? '', user: user(x.user), merged_at: x.merged_at ?? null, updated_at: x.updated_at ?? x.merged_at, labels: (x.labels ?? []).map((name) => ({ name })),
+        html_url: `https://github.com/${r!.owner}/${r!.name}/pull/${x.number}`,
+      })));
     }
     if ((m = /^\/repos\/([^/]+)\/([^/]+)\/(readme|contents\/(.+)|releases)$/.exec(path)) && method === 'GET') {
       const r = this.repoByName(decodeURIComponent(m[1]!), decodeURIComponent(m[2]!));
@@ -219,6 +248,17 @@ export class FakeGitHub {
     if ((m = /^\/repos\/([^/]+)\/([^/]+)\/commits$/.exec(path))) {
       const r = this.repoByName(decodeURIComponent(m[1]!), decodeURIComponent(m[2]!));
       if (!accessible(r)) return json(404, { message: 'Not Found' });
+      // A branch's commits since a date (Contents: read, needed for private repositories).
+      if (url.searchParams.get('sha')) {
+        if (r!.private && !this.installationPermissions.contents) return json(403, { message: 'Resource not accessible by integration' });
+        const since = Date.parse(url.searchParams.get('since') ?? '1970-01-01T00:00:00Z');
+        return json(200, (r!.branchCommits ?? []).filter((c) => Date.parse(c.date) >= since).slice(0, Number(url.searchParams.get('per_page') ?? 30)).map((c) => ({
+          sha: c.sha, html_url: `https://github.com/${r!.owner}/${r!.name}/commit/${c.sha}`,
+          commit: { message: c.message, author: { name: c.user ?? 'Someone', date: c.date }, committer: { date: c.date } },
+          author: c.user ? { login: c.user, type: /\[bot\]$/.test(c.user) ? 'Bot' : 'User' } : null,
+          parents: Array.from({ length: c.parents ?? 1 }, (_, i) => ({ sha: `p${i}` })),
+        })));
+      }
       const author = url.searchParams.get('author') ?? '';
       const n = this.commits.get(r!.id)?.get(author) ?? 0;
       const link: Record<string, string> = n > 1 ? { link: `<https://api.github.com${path}?author=${author}&per_page=1&page=2>; rel="next", <https://api.github.com${path}?author=${author}&per_page=1&page=${n}>; rel="last"` } : {};
@@ -495,7 +535,7 @@ export class FakeAnthropic {
     if (url.pathname === '/v1/messages' && init.method === 'POST') {
       const body = JSON.parse(String(init.body));
       this.requests.push({ key, body });
-      const writing = String(body.system?.[0]?.text ?? '').startsWith('You write TRIAGE.md');
+      const writing = /^You (write|keep) TRIAGE\.md/.test(String(body.system?.[0]?.text ?? ''));
       const behavior = this.queue.shift() ?? (writing ? this.knowledge : this.verdict);
       if (typeof behavior === 'object' && 'status' in behavior && typeof behavior.status === 'number') {
         return this.error(behavior.status, String(behavior.type), String(behavior.message ?? 'error'));

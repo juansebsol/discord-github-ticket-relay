@@ -20,6 +20,7 @@ import { GitHubApiError, type IssueDetail } from '../github/client.js';
 import { normalizeVerdict, TriageAiError, verdictSchema, type TicketImage, type TriageAi, type Verdict } from './ai.js';
 import { knowledgeTexts, listKnowledge, type AppKnowledge } from './knowledge.js';
 import { KnowledgeWriter } from './knowledge-writer.js';
+import { ChangeTracker, recentChanges, type AppChange } from './knowledge-changes.js';
 import { actionMatcher } from './state.js';
 import { buildKnowledgeBlock, buildSystemPrompt, buildUserPrompt, extractDescription, searchTerms, type Candidate } from './prompt.js';
 import {
@@ -390,8 +391,14 @@ export function systemPromptFor(c: TriageConfig, apps: AppRow[]): string {
  * The TRIAGE.md block sent after the instructions: the ticket's app, or for an issue opened on
  * GitHub every app in its repository. Empty when none of them has one.
  */
-export function knowledgePromptFor(apps: AppRow[], knowledge: Map<string, AppKnowledge>, appIds: (string | null)[]): string {
-  return buildKnowledgeBlock(knowledgeTexts(apps, knowledge, appIds));
+export function knowledgePromptFor(apps: AppRow[], knowledge: Map<string, AppKnowledge>, appIds: (string | null)[], changes: Map<string, AppChange[]> = new Map()): string {
+  return buildKnowledgeBlock(knowledgeTexts(apps, knowledge, appIds, new Map([...changes].map(([id, list]) => [id, list.map(changeLine)]))));
+}
+
+/** "- #456, merged 2026-10-14: Fix blank right page in PNG export (closes #412)". Dates, not "2 days ago", so the cached prompt stays the same. */
+function changeLine(c: AppChange): string {
+  const what = c.kind === 'pr' ? `#${c.ref}, merged` : c.kind === 'commit' ? `commit ${c.ref.slice(0, 7)}, pushed` : `release ${c.ref}, published`;
+  return `- ${what} ${c.merged_at.toISOString().slice(0, 10)}: ${c.title.replace(/\s+/g, ' ').slice(0, 160)}${c.closes.length ? ` (closes ${c.closes.map((x) => `#${x}`).join(', ')})` : ''}`;
 }
 
 /** What one triage pass decided for a ticket. Nothing is applied yet. */
@@ -806,6 +813,8 @@ export class TriageEngine {
   readonly indexer: IssueIndexer;
   /** Writes each app's TRIAGE.md (AI triage › Knowledge). */
   readonly knowledge: KnowledgeWriter;
+  /** Tracks what's merged into the apps' repositories (AI triage › Knowledge). */
+  readonly changes: ChangeTracker;
 
   constructor(
     readonly deps: Deps,
@@ -813,6 +822,7 @@ export class TriageEngine {
   ) {
     this.indexer = new IssueIndexer(deps);
     this.knowledge = new KnowledgeWriter(deps, ai);
+    this.changes = new ChangeTracker(deps);
   }
 
   /** Queues newly filed tickets, and new issues opened on GitHub, where triage is on for them (only those after it was switched on). */
@@ -1061,7 +1071,10 @@ export class TriageEngine {
     const shots = ticket && c.screenshots ? await screenshotsFor(deps, ticket.id, MAX_SCREENSHOTS) : { images: [], skipped: 0 };
     const images: TicketImage[] = shots.images.map((i) => ({ mediaType: i.contentType, data: i.data.toString('base64') }));
     // The instructions, then this ticket's app's TRIAGE.md: each is cached on its own.
-    const known = knowledgePromptFor(apps, knowledge, ticket ? [ticket.app_id] : apps.filter((a) => a.repo_id === target.repo_id).map((a) => a.id));
+    const appIds = ticket ? [ticket.app_id] : apps.filter((a) => a.repo_id === target.repo_id).map((a) => a.id);
+    // With After merged PRs on: what was merged lately, even before the TRIAGE.md has it.
+    const merged = base.knowledgeAuto && base.knowledgeChanges !== 'off' ? await recentChanges(deps.db, appIds.filter((x): x is string => Boolean(x))) : new Map<string, AppChange[]>();
+    const known = knowledgePromptFor(apps, knowledge, appIds, merged);
     const ask = (withImages: TicketImage[]) => this.ai.classify(
       key.key,
       c.model,

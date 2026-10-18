@@ -1343,6 +1343,11 @@ a.feed-row:focus-visible { outline-offset: -2px; }
 .kn-file.is-running .kn-file-state, .kn-file.is-queued .kn-file-state { color: var(--accent-text); }
 .kn-file.is-failed .kn-file-state { color: var(--warn-text); }
 .kn-file.is-failed > .ic { color: var(--warn); }
+.kn-changes { display: inline-flex; align-items: center; gap: 6px; min-width: 0; font-size: 12px; line-height: 16px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.kn-changes > .ic { flex: none; }
+.kn-changes > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kn-changes.has { color: var(--text); }
+.kn-changes.has > .ic { color: var(--accent-text); }
 .kn-card-text { flex: 1; font-size: 13px; line-height: 20px; color: var(--muted); }
 .kn-card-f { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 12px; border-top: 1px solid var(--border); font-size: 12px; line-height: 16px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .kn-card-meta { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
@@ -1425,6 +1430,27 @@ textarea.kn-text:focus { border-color: var(--border); box-shadow: inset 0 0 0 2p
 .rv-ask a { white-space: nowrap; font-weight: 500; }
 .kn-q-add:disabled { color: var(--muted); cursor: default; }
 
+/* What was merged (the app's page): newest first, with what Claude did with each. */
+.kn-chs { list-style: none; margin: 0; padding: 0; }
+.kn-ch { display: grid; grid-template-columns: 14px minmax(0, 1fr) auto; align-items: start; gap: 10px; padding: 10px 20px; }
+.kn-ch + .kn-ch { border-top: 1px solid var(--border); }
+.kn-ch > .ic { margin-top: 3px; color: var(--muted); }
+.kn-ch.is-pending { box-shadow: inset 2px 0 0 var(--accent); }
+.kn-ch.is-pending > .ic { color: var(--accent-text); }
+.kn-ch.is-added > .ic { color: var(--ok); }
+.kn-ch-b { min-width: 0; }
+.kn-ch-t { display: block; font-size: 13px; line-height: 20px; color: var(--text); overflow-wrap: anywhere; }
+.kn-ch-t:hover { color: var(--accent-text); }
+.kn-ch.is-skipped .kn-ch-t { color: var(--muted); }
+.kn-ch-m { margin-top: 2px; font-size: 12px; line-height: 16px; color: var(--muted); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.kn-ch-m a { color: inherit; text-decoration: underline; text-decoration-color: var(--border-hover); text-underline-offset: 2px; }
+.kn-ch-m a:hover { color: var(--accent-text); }
+.kn-ch-note { margin-top: 4px; font-size: 12px; line-height: 16px; color: var(--muted); }
+.tag.kn-ch-chip { height: 20px; margin-top: 0; border: 0; font-size: 11px; white-space: nowrap; }
+.tag.kn-ch-chip.added { background: var(--ok-soft); color: var(--ok-text); }
+.tag.kn-ch-chip.waiting { background: var(--accent-soft); color: var(--accent-text); }
+.tag.kn-ch-chip.skipped { background: var(--surface-2); color: var(--muted); }
+
 /* ---- AI triage › Knowledge: the Live studio and its pill ---------------------------------------- */
 .kn-studio { width: min(1240px, calc(100vw - 48px)); height: min(800px, calc(100vh - 48px)); max-width: none; max-height: none; padding: 0; border: 1px solid var(--border-strong); border-radius: 14px; background: var(--surface); color: var(--text); box-shadow: var(--shadow-pop); overflow: hidden; }
 .kn-studio[open] { display: flex; flex-direction: column; }
@@ -1447,16 +1473,16 @@ textarea.kn-text:focus { border-color: var(--border); box-shadow: inset 0 0 0 2p
 .kn-st-queue { padding: 14px 10px; border-right: 1px solid var(--border); overflow-y: auto; }
 .kn-st-lbl { padding: 0 10px 8px; font-size: 12px; font-weight: 600; color: var(--muted); }
 .kn-st-queue ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
-.kn-q { width: 100%; height: 36px; display: flex; align-items: center; gap: 10px; padding: 0 10px; border: 0; border-radius: 7px; background: transparent; color: var(--text); font: 400 13px/1 var(--font); text-align: left; cursor: pointer; }
-.kn-q:hover { background: var(--surface-2); }
-.kn-q[aria-current="true"] { background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--info-border); font-weight: 600; }
-.kn-q .n { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.kn-q .m { font-size: 12px; font-weight: 400; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
-.kn-q.is-done > .ic { color: var(--ok); }
-.kn-q.is-failed > .ic { color: var(--warn); }
-.kn-q.is-running > .ic, .kn-q.is-running .m { color: var(--accent-text); }
-.kn-q.is-queued > .ic, .kn-q.is-stopped > .ic { color: var(--muted); }
-.kn-q.is-stopped .n { color: var(--muted); }
+.kn-sq { width: 100%; height: 36px; display: flex; align-items: center; gap: 10px; padding: 0 10px; border: 0; border-radius: 7px; background: transparent; color: var(--text); font: 400 13px/1 var(--font); text-align: left; cursor: pointer; }
+.kn-sq:hover { background: var(--surface-2); }
+.kn-sq[aria-current="true"] { background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--info-border); font-weight: 600; }
+.kn-sq .n { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kn-sq .m { font-size: 12px; font-weight: 400; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.kn-sq.is-done > .ic { color: var(--ok); }
+.kn-sq.is-failed > .ic { color: var(--warn); }
+.kn-sq.is-running > .ic, .kn-sq.is-running .m { color: var(--accent-text); }
+.kn-sq.is-queued > .ic, .kn-sq.is-stopped > .ic { color: var(--muted); }
+.kn-sq.is-stopped .n { color: var(--muted); }
 .kn-st-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .kn-st-doch { display: flex; align-items: center; gap: 10px; padding: 12px 20px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
 .kn-st-av { width: 26px; height: 26px; display: inline-grid; place-items: center; border-radius: 6px; background: var(--surface-3); font-size: 11px; font-weight: 600; }
@@ -1509,8 +1535,8 @@ textarea.kn-text:focus { border-color: var(--border); box-shadow: inset 0 0 0 2p
   .kn-st-queue { border-right: 0; border-bottom: 1px solid var(--border); padding: 8px 10px; overflow-x: auto; }
   .kn-st-lbl { display: none; }
   .kn-st-queue ul { display: flex; gap: 4px; }
-  .kn-q { width: auto; white-space: nowrap; }
-  .kn-q .n { overflow: visible; }
+  .kn-sq { width: auto; white-space: nowrap; }
+  .kn-sq .n { overflow: visible; }
   .kn-st-log { border-left: 0; border-top: 1px solid var(--border); }
   .kn-st-qs { max-height: 50%; }
 }

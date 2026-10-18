@@ -9,8 +9,12 @@ import type { Queryable } from '../db/database.js';
 
 /** The steps of one app's write, in order (answers only when it had questions). */
 export const LIVE_STEPS = ['repo', 'issues', 'thinking', 'writing', 'answers'] as const;
-export type LiveStep = (typeof LIVE_STEPS)[number];
-export type LiveTag = 'github' | 'issues' | 'tickets' | 'claude' | 'answer' | 'done' | 'error' | 'stop';
+/** The steps of an update with merged changes. */
+export const CHANGE_STEPS = ['changes', 'thinking', 'writing'] as const;
+export type LiveStep = (typeof LIVE_STEPS)[number] | 'changes';
+export type LiveTag = 'github' | 'issues' | 'tickets' | 'claude' | 'answer' | 'change' | 'done' | 'error' | 'stop';
+/** A full rewrite, or an update of the parts merged changes touch. */
+export type WriteMode = 'full' | 'changes';
 
 /** What the live view shows of one app's write (app_knowledge.auto_live). Times are ms since it started. */
 export interface LiveState {
@@ -73,7 +77,7 @@ export async function runShown(q: Queryable, workspaceId: string, now = Date.now
  * a new one. Apps already waiting or being written are left as they are. Returns how many were
  * queued.
  */
-export async function requestWrites(q: Queryable, workspaceId: string, appIds: string[], userId: string | null): Promise<number> {
+export async function requestWrites(q: Queryable, workspaceId: string, appIds: string[], userId: string | null, mode: WriteMode = 'full'): Promise<number> {
   if (!appIds.length) return 0;
   const active = await activeRun(q, workspaceId);
   const runId = active?.id ?? randomUUID();
@@ -81,16 +85,18 @@ export async function requestWrites(q: Queryable, workspaceId: string, appIds: s
   let queued = 0;
   for (const appId of appIds) {
     const { rows } = await q.query(
-      `INSERT INTO app_knowledge (app_id, workspace_id, auto_status, auto_requested_at, auto_requested_by, auto_run_id)
-       SELECT a.id, a.workspace_id, 'queued', now_ms(), $3, $4 FROM apps a WHERE a.id = $1 AND a.workspace_id = $2
+      `INSERT INTO app_knowledge (app_id, workspace_id, auto_status, auto_requested_at, auto_requested_by, auto_run_id, auto_mode)
+       SELECT a.id, a.workspace_id, 'queued', now_ms(), $3, $4, $5 FROM apps a WHERE a.id = $1 AND a.workspace_id = $2
        ON CONFLICT (app_id) DO UPDATE SET auto_status = 'queued', auto_requested_at = now_ms(), auto_requested_by = excluded.auto_requested_by,
-         auto_run_id = excluded.auto_run_id, auto_attempts = 0, auto_error = NULL, auto_live = NULL, auto_cancel = 0,
+         auto_run_id = excluded.auto_run_id, auto_mode = excluded.auto_mode, auto_attempts = 0, auto_error = NULL, auto_live = NULL, auto_cancel = 0,
          auto_started_at = NULL, auto_finished_at = NULL, updated_at = now_ms()
        WHERE app_knowledge.auto_status IS NULL OR app_knowledge.auto_status NOT IN ('queued', 'running')
        RETURNING app_id`,
-      [appId, workspaceId, userId, runId],
+      [appId, workspaceId, userId, runId, mode],
     );
     queued += rows.length;
+    // Already waiting for an update with changes: a full rewrite covers those too.
+    if (!rows.length && mode === 'full') await q.query("UPDATE app_knowledge SET auto_mode = 'full' WHERE app_id = $1 AND workspace_id = $2 AND auto_status = 'queued'", [appId, workspaceId]);
   }
   if (!active && !queued) await q.query('DELETE FROM knowledge_runs WHERE id = $1', [runId]);
   return queued;

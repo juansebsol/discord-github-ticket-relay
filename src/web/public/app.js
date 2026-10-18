@@ -429,6 +429,9 @@
 
   // Knowledge › Keep them up to date: the monthly estimate follows the schedule picked.
   document.addEventListener('change', function (e) {
+    var changes = e.target.closest && e.target.closest('select[name="changes"][form="kn-auto"]');
+    var plus = changes && document.querySelector('[data-kn-changes-cost]');
+    if (plus) plus.hidden = changes.value === 'off';
     var select = e.target.closest && e.target.closest('select[name="every"][form="kn-auto"]');
     var month = select && document.querySelector('[data-kn-month]');
     if (!month) return;
@@ -1413,7 +1416,7 @@
         list.replaceChildren();
         data.apps.forEach(function (a) {
           var li = el('li');
-          var b = el('button', 'kn-q is-' + a.state);
+          var b = el('button', 'kn-sq is-' + a.state);
           b.type = 'button';
           b.setAttribute('data-app', a.id);
           b.appendChild(knIcon(a.state));
@@ -1480,7 +1483,7 @@
         stick = true;
         return poll();
       }
-      if (t.classList.contains('kn-q')) {
+      if (t.classList.contains('kn-sq')) {
         var id = t.getAttribute('data-app');
         selected = last && id === last.current ? null : id;
         stick = true;

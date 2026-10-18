@@ -280,9 +280,69 @@ export class GitHubClient {
   // answers 403 without it, which callers catch. A file that doesn't exist is null.
 
   /** The repository's own description, website and topics. */
-  async getRepoAbout(installationId: number, owner: string, repo: string): Promise<{ description: string | null; homepage: string | null; topics: string[] }> {
+  async getRepoAbout(installationId: number, owner: string, repo: string): Promise<{ description: string | null; homepage: string | null; topics: string[]; defaultBranch: string | null }> {
     const { data } = await this.request('GET', `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`, await this.asInstallation(installationId));
-    return { description: data.description ?? null, homepage: data.homepage || null, topics: Array.isArray(data.topics) ? data.topics : [] };
+    return { description: data.description ?? null, homepage: data.homepage || null, topics: Array.isArray(data.topics) ? data.topics : [], defaultBranch: data.default_branch || null };
+  }
+
+  /**
+   * Pull requests merged into a branch after `since`, newest first (Pull requests: read for private
+   * repositories). Reads pages of recently updated closed ones until they're older than `since`.
+   */
+  async listMergedPulls(installationId: number, owner: string, repo: string, base: string, since: Date, maxPages = 3): Promise<{ number: number; title: string; body: string; author: string | null; authorIsBot: boolean; labels: string[]; url: string; mergedAt: Date }[]> {
+    const out: { number: number; title: string; body: string; author: string | null; authorIsBot: boolean; labels: string[]; url: string; mergedAt: Date }[] = [];
+    for (let page = 1; page <= maxPages; page++) {
+      const { data } = await this.request(
+        'GET',
+        `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls?state=closed&base=${encodeURIComponent(base)}&sort=updated&direction=desc&per_page=50&page=${page}`,
+        await this.asInstallation(installationId),
+      );
+      const list = Array.isArray(data) ? data : [];
+      for (const p of list) {
+        if (!p.merged_at || new Date(p.merged_at) <= since) continue;
+        out.push({
+          number: Number(p.number),
+          title: String(p.title ?? ''),
+          body: String(p.body ?? ''),
+          author: p.user?.login ?? null,
+          authorIsBot: p.user?.type === 'Bot' || /\[bot\]$/.test(String(p.user?.login ?? '')),
+          labels: Array.isArray(p.labels) ? p.labels.map((l: any) => String(typeof l === 'string' ? l : l?.name ?? '')).filter(Boolean) : [],
+          url: String(p.html_url ?? ''),
+          mergedAt: new Date(p.merged_at),
+        });
+      }
+      // Sorted by last update: once a page ends before `since`, nothing older was merged after it.
+      const lastUpdate = list.at(-1)?.updated_at;
+      if (list.length < 50 || (lastUpdate && new Date(lastUpdate) <= since)) break;
+    }
+    return out.sort((a, b) => b.mergedAt.getTime() - a.mergedAt.getTime());
+  }
+
+  /**
+   * The merged pull requests that brought a commit into the repository, however they were merged
+   * (merge, squash or rebase): none for a commit pushed straight to the branch.
+   */
+  async mergedPullsOfCommit(installationId: number, owner: string, repo: string, sha: string): Promise<number[]> {
+    const { data } = await this.request('GET', `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits/${encodeURIComponent(sha)}/pulls`, await this.asInstallation(installationId));
+    return (Array.isArray(data) ? data : []).filter((p: any) => p.merged_at).map((p: any) => Number(p.number));
+  }
+
+  /** A branch's latest commits (after `since`, when given), newest first (Contents: read for private repositories). */
+  async listBranchCommits(installationId: number, owner: string, repo: string, branch: string, since: Date | null, perPage = 50): Promise<{ sha: string; message: string; author: string | null; authorIsBot: boolean; url: string; date: Date; parents: number }[]> {
+    const { data } = await this.request(
+      'GET',
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits?sha=${encodeURIComponent(branch)}${since ? `&since=${encodeURIComponent(since.toISOString())}` : ''}&per_page=${perPage}`,
+      await this.asInstallation(installationId),
+    );
+    return (Array.isArray(data) ? data : []).map((c: any) => ({
+      sha: String(c.sha ?? ''),
+      message: String(c.commit?.message ?? ''),
+      author: c.author?.login ?? c.commit?.author?.name ?? null,
+      authorIsBot: c.author?.type === 'Bot' || /\[bot\]$/.test(String(c.author?.login ?? '')),
+      url: String(c.html_url ?? ''),
+      date: new Date(c.commit?.committer?.date ?? c.commit?.author?.date ?? Date.now()),
+      parents: Array.isArray(c.parents) ? c.parents.length : 1,
+    }));
   }
 
   /** The README, whatever its name (README.md, readme.rst…). */
