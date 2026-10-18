@@ -93,13 +93,6 @@ function checks(k: AppKnowledge, every: number, now = Date.now()): { quiet: Date
   return { quiet, next: ms <= 60_000 ? 'now' : `in ${inTime(ms)}`, soon: ms <= 60_000 };
 }
 
-/** "Checked 12 min ago, nothing new · next check in 1 h 48 min", under the TRIAGE.md line of each card. */
-function checkLine(k: AppKnowledge | null | undefined, every: number, triageOn: boolean): SafeHtml | '' {
-  if (!k?.auto_at || stateOf(k) !== 'done') return '';
-  if (!triageOn) return html`<span class="kn-check">${icon('clock', 14)}<span>Checks start once AI triage is on</span></span>`;
-  const { quiet, next, soon } = checks(k, every);
-  return html`<span class="kn-check">${icon('clock', 14)}<span>${quiet ? html`Checked ${ago(quiet)}, nothing new · next ${next}` : soon ? 'Checking now' : `Next check ${next}`}</span></span>`;
-}
 
 /** When the merged changes waiting go into an app's TRIAGE.md: at its next update. */
 function changesDue(lastAt: Date | null, every: number, now = Date.now()): string {
@@ -119,7 +112,7 @@ const busy = (s: State) => s === 'queued' || s === 'running';
 /** Merged changes were added since the last full write. */
 const updatedSince = (k: AppKnowledge | null | undefined) => Boolean(k?.auto_at && k.auto_full_at && k.auto_at.getTime() > k.auto_full_at.getTime());
 
-/** "TRIAGE.md · Updated today at 2:32 PM", with the state of the latest write. */
+/** "TRIAGE.md · Last updated Oct 17 at 9:05 PM", with the state of the latest write. */
 function fileLine(k: AppKnowledge | null | undefined): SafeHtml {
   const s = stateOf(k);
   const lead = s === 'running' ? icon('loader-circle', 14, 'kn-spin') : s === 'queued' ? icon('clock', 14) : s === 'failed' ? icon('triangle-alert', 14, 'warn') : icon('file-text', 14);
@@ -127,7 +120,7 @@ function fileLine(k: AppKnowledge | null | undefined): SafeHtml {
     running: 'Claude is writing it…',
     queued: 'Waiting to be written…',
     failed: isWritten(k) ? 'Couldn’t update it' : 'Couldn’t write it',
-    done: k?.auto_at ? html`Updated ${localTime(k.auto_at)}` : '',
+    done: k?.auto_at ? html`Last updated ${localTime(k.auto_at)}` : '',
     none: 'Not written yet',
   };
   return html`<span class="kn-file is-${s}">${lead}<span class="mono">TRIAGE.md</span><span class="muted">·</span><span class="kn-file-state">${text[s]}</span></span>`;
@@ -248,7 +241,6 @@ export function registerTriageKnowledgeRoutes(app: FastifyInstance, web: Web): v
           ${q?.fresh ? html`<span class="kn-new" title="Questions Claude asked and hasn’t answered, since your team last saved its notes">${icon('lightbulb', 12)}${plural(q.fresh, 'question')}</span>` : ''}</span>
         <span class="kn-card-lines">
           ${fileLine(k)}
-          ${c.knowledgeAuto ? checkLine(k, intervalMs(c.knowledgeEvery), anyOn) : ''}
           ${tracking ? (() => {
             const ch = changed.get(a.id);
             return html`<span class="kn-changes${ch?.today ? ' has' : ''}">${icon('git-merge', 14)}<span>${ch?.today ? `${plural(ch.today, 'change')} merged today${ch.added ? ` · ${n(ch.added)} added to TRIAGE.md` : ''}` : 'Nothing merged today'}${ch?.pending ? ` · ${n(ch.pending)} waiting` : ''}</span></span>`;

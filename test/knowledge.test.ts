@@ -183,7 +183,7 @@ describe('Knowledge: Claude writes each app’s TRIAGE.md', () => {
     expect((await page('/triage/knowledge?partial=1')).body).toContain('data-live-reload');
 
     const list = (await page('/triage/knowledge')).body;
-    expect(list).toMatch(/TRIAGE\.md<\/span><span class="muted">·<\/span><span class="kn-file-state">Updated <time datetime="[^"]+" data-local title="[^"]+ UTC">[^<]+ UTC<\/time>/);
+    expect(list).toMatch(/TRIAGE\.md<\/span><span class="muted">·<\/span><span class="kn-file-state">Last updated <time datetime="[^"]+" data-local title="[^"]+ UTC">[^<]+ UTC<\/time>/);
     expect(list).toContain('<span class="tag" >Known issues</span>');
     expect(list).toContain('Update all');
     expect(list).not.toContain('Write all');
@@ -287,9 +287,9 @@ describe('Knowledge: Claude writes each app’s TRIAGE.md', () => {
     // Two days later, nothing changed: nothing to do.
     await writtenDaysAgo(2);
     expect(await env.triage.engine.knowledge.scheduleUpdates()).toBe(0);
-    // The look is noted, on the card too: the next one is a day later.
+    // The look is noted (on the app's page): the next one is a day later.
     expect((await knowledgeRow(photo().id)).auto_checked_at).toBeInstanceOf(Date);
-    expect((await page('/triage/knowledge')).body).toMatch(/<span class="kn-check">.*?<span>Checked <time[^>]*>just now<\/time>, nothing new · next in 24 hours<\/span><\/span>/);
+    expect((await page(`/triage/knowledge/${photo().id}`)).body).toMatch(/ · checked <time[^>]*>just now<\/time>, nothing new · next check in 24 hours<\/div>/);
 
     // An issue opened in PhotoCraft's repository: at the next look, only PhotoCraft's is rewritten.
     repo(0).issues.push({ number: 9, title: 'Crash when printing', body: 'It crashes.', labels: ['bug'], created_at: new Date().toISOString(), user: 'someone' });
@@ -338,7 +338,8 @@ describe('Knowledge: Claude writes each app’s TRIAGE.md', () => {
     const one = (await page(`/triage/knowledge/${photo().id}`)).body;
     expect(one).toContain('Claude reads it with every PhotoCraft ticket and updates it every 3 hours when something changed.');
     expect(one).toContain('next check in 3 hours');
-    expect((await page('/triage/knowledge')).body).toMatch(/<span class="kn-check">.*?<span>Next check in 3 hours<\/span><\/span>/);
+    // The cards say when each was last updated, not when it's checked.
+    expect((await page('/triage/knowledge')).body).not.toContain('kn-check');
 
     // An issue opened two hours later isn't enough yet; after three hours it is.
     const hoursAgo = (h: number) => env.db.query('UPDATE app_knowledge SET auto_at = $1, auto_full_at = $1', [new Date(Date.now() - h * 3_600_000)]);
