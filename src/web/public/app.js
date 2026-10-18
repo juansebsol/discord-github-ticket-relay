@@ -427,16 +427,41 @@
     });
   })();
 
-  // Knowledge › Keep them up to date: the monthly estimate follows the schedule picked.
+  // Knowledge › Keep them up to date: "Update every [n] [unit]". The unit reads right for the
+  // number, the number stays within the unit's limits (15 minutes to 90 days), and the monthly
+  // estimate follows as it's typed. Enter saves it, like leaving the field.
+  var KN_UNIT_MS = { minutes: 60000, hours: 3600000, days: 86400000 };
+  function knEvery(clamp) {
+    var n = document.querySelector('input[name="every_n"][form="kn-auto"]');
+    var unit = document.querySelector('select[name="every_unit"][form="kn-auto"]');
+    if (!n || !unit) return;
+    var min = unit.value === 'minutes' ? 15 : 1;
+    var max = unit.value === 'days' ? 90 : 999;
+    n.min = String(min);
+    n.max = String(max);
+    var v = Math.round(Number(n.value));
+    if (clamp) {
+      v = !n.value || !isFinite(v) ? min : Math.min(max, Math.max(min, v));
+      n.value = String(v);
+    }
+    $$('option', unit).forEach(function (o) { o.textContent = v === 1 ? o.value.slice(0, -1) : o.value; });
+    var month = document.querySelector('[data-kn-month]');
+    if (!month || !(v >= 1)) return;
+    var usd = Number(month.getAttribute('data-each')) * Number(month.getAttribute('data-apps')) * 30 * 86400000 / (v * KN_UNIT_MS[unit.value]);
+    month.textContent = usd < 0.01 ? 'less than $0.01' : 'up to $' + (usd < 100 ? usd.toFixed(2) : Math.round(usd));
+    month.classList.toggle('warn-text', usd >= 20);
+  }
+  document.addEventListener('input', function (e) {
+    if (e.target.matches && e.target.matches('input[name="every_n"][form="kn-auto"]')) knEvery(false);
+  });
+  // Before the form saves it (capture), so what's saved is within the limits.
   document.addEventListener('change', function (e) {
-    var changes = e.target.closest && e.target.closest('select[name="changes"][form="kn-auto"]');
-    var plus = changes && document.querySelector('[data-kn-changes-cost]');
-    if (plus) plus.hidden = changes.value === 'off';
-    var select = e.target.closest && e.target.closest('select[name="every"][form="kn-auto"]');
-    var month = select && document.querySelector('[data-kn-month]');
-    if (!month) return;
-    var usd = Number(month.getAttribute('data-each')) * Number(month.getAttribute('data-apps')) * 30 / Number(select.value);
-    month.textContent = usd < 0.01 ? 'under $0.01' : 'about $' + usd.toFixed(2);
+    if (e.target.matches && e.target.matches('[name="every_n"][form="kn-auto"], [name="every_unit"][form="kn-auto"]')) knEvery(true);
+  }, true);
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== 'Enter' || !e.target.matches || !e.target.matches('input[name="every_n"][form="kn-auto"]')) return;
+    e.preventDefault();
+    e.target.blur();
   });
 
   // "Reset to default" puts each field's default (its placeholder) back.

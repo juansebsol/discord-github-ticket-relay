@@ -51,17 +51,19 @@ Discord endpoint, OAuth), one or more queue workers, and an optional triage work
   closed as not planned), plus recent ticket summaries and the questions triage asked
   (`missing_context`, copied to `question`). Each ticket then gets its own app's TRIAGE.md as a
   second cached system block, as background facts (it comes from public text); the team's own
-  notes stay separate, are never rewritten, and win. With Keep up to date on, the worker rewrites
-  them on the workspace's schedule (`knowledgeEveryDays`: 1 to 30 days), and sooner once Claude
-  has asked `knowledgeSooner` new questions about an app (at most once a day; 0 turns that off).
+  notes stay separate, are never rewritten, and win. With Keep them up to date on, each app is
+  looked at once the workspace's interval (`knowledgeEvery`: a number of minutes, hours or days,
+  15 minutes to 90 days) has passed since its last update, and updated only if something changed
+  since: issues opened or closed in its repository or questions Claude asked (a full rewrite),
+  or only merged changes (an update, see below).
   Each "Write all", "Update now" or scheduled update is a run (`knowledge_runs`; apps join the run
   in progress). While writing, the worker streams Claude's answer and saves the app's live state
   (`app_knowledge.auto_live`: steps and their times, log lines, the text so far, answers as they
   arrive) at most twice a second; each save also reads `auto_cancel`, so Stop aborts the request
   mid-stream and the app keeps its previous TRIAGE.md. Pages carry the Live studio while a run is on
   (and for two minutes after); app.js polls `/triage/knowledge/live`.
-  With "After merged PRs" on (`knowledgeChanges`: hourly or daily), the worker's index loop also
-  polls each app repository's default branch every 15 minutes (`src/triage/knowledge-changes.ts`,
+  While Keep them up to date is on, the worker's index loop also polls each app repository's
+  default branch every 15 minutes (`src/triage/knowledge-changes.ts`,
   no webhooks; `repo_change_sync` keeps how far each one got, the first check reads 14 days back,
   and checks wait while the installation's hourly GitHub budget is low, keeping it for filing):
   merged pull requests, commits pushed without one (everything after the newest commit seen last
@@ -69,13 +71,12 @@ Discord endpoint, OAuth), one or more queue workers, and an optional triage work
   says a merged pull request brought in, rebased ones included) and releases go to
   `repo_changes`, and each app sharing the repository gets its own row in `app_changes`. Bots and
   chores (dependency bumps, CI, tests, refactors) are kept but marked and never sent to Claude.
-  Each ticket's TRIAGE.md block
-  gets the app's changes from the last 14 days right away, with dates rather than "2 days ago" so
-  the cached prompt stays the same. An app with changes waiting gets an update in "changes" mode
-  (`app_knowledge.auto_mode`) at most once an hour or once a day: Claude gets the current TRIAGE.md
-  and the changes and returns it updated, saying for each change whether it added it or why not
-  (`app_changes.status` and `note`). The weekly rewrite and the questions trigger follow the last
-  full write (`auto_full_at`), and a full rewrite reads the recent changes too.
+  Each ticket's TRIAGE.md block gets the app's changes from the last 14 days right away, with
+  dates rather than "2 days ago" so the cached prompt stays the same. An app with only changes
+  waiting gets an update in "changes" mode (`app_knowledge.auto_mode`): Claude gets the current
+  TRIAGE.md and the changes and returns it updated, saying for each change whether it added it or
+  why not (`app_changes.status` and `note`). Issues and questions count from the last full write
+  (`auto_full_at`), and a full rewrite reads the recent changes too.
 - **No Discord gateway.** The bot is driven entirely by Discord's HTTP interactions endpoint and
   REST API. It needs no privileged intents and no slash-command registration.
 - **GitHub App auth.** Short-lived installation tokens are minted from the app's private key

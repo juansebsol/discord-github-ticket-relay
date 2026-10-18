@@ -201,14 +201,32 @@ export const LABEL_GROUP_PRESETS: Record<'type' | 'area' | 'platform', Omit<Labe
 };
 
 /**
- * AI triage › Knowledge, Keep them up to date: how often Claude rewrites each app's TRIAGE.md
- * (days), and after how many new questions about an app it does so sooner (0: never).
+ * AI triage › Knowledge, Keep them up to date: how often Claude updates each app's TRIAGE.md
+ * (when something changed), as the team typed it: "90 minutes" stays 90 minutes.
  */
-export const KNOWLEDGE_EVERY_DAYS = [1, 3, 7, 14, 30] as const;
-export const KNOWLEDGE_SOONER = [1, 3, 5, 10, 0] as const;
-/** After merged pull requests (and commits and releases): the TRIAGE.md is updated at most once an hour, once a day, or not. */
-export const KNOWLEDGE_CHANGES = ['hourly', 'daily', 'off'] as const;
-export type KnowledgeChanges = (typeof KNOWLEDGE_CHANGES)[number];
+export const KNOWLEDGE_UNITS = ['minutes', 'hours', 'days'] as const;
+export type KnowledgeUnit = (typeof KNOWLEDGE_UNITS)[number];
+export interface KnowledgeEvery {
+  n: number;
+  unit: KnowledgeUnit;
+}
+const UNIT_MS: Record<KnowledgeUnit, number> = { minutes: 60_000, hours: 3_600_000, days: 86_400_000 };
+/** What's merged is checked every 15 minutes, so updates can't be more often; and at least every 90 days. */
+export const KNOWLEDGE_MIN_MS = 15 * 60_000;
+export const KNOWLEDGE_MAX_MS = 90 * 86_400_000;
+export const DEFAULT_KNOWLEDGE_EVERY: KnowledgeEvery = { n: 1, unit: 'days' };
+
+export function intervalMs(e: KnowledgeEvery): number {
+  return e.n * UNIT_MS[e.unit];
+}
+
+/** Why an interval can't be used ("At least 15 minutes."), or null. */
+export function intervalProblem(e: KnowledgeEvery): string | null {
+  if (!Number.isInteger(e.n) || e.n < 1) return 'Enter a whole number, 1 or more.';
+  if (intervalMs(e) < KNOWLEDGE_MIN_MS) return 'At least 15 minutes: that’s how often the repositories are checked.';
+  if (intervalMs(e) > KNOWLEDGE_MAX_MS) return 'At most 90 days.';
+  return null;
+}
 
 export const TriageConfigSchema = z.object({
   model: z.string().trim().min(1).max(100).catch(DEFAULT_MODEL),
@@ -253,14 +271,13 @@ export const TriageConfigSchema = z.object({
   examples: z.string().max(6000).nullable().catch(null),
   /** Claude also sees the screenshots attached to Discord tickets (more tokens per ticket, so it starts off). */
   screenshots: z.boolean().catch(false),
-  /** AI triage › Knowledge: Claude rewrites each app's TRIAGE.md on a schedule. */
+  /**
+   * AI triage › Knowledge, Keep them up to date: Claude updates each app's TRIAGE.md when something
+   * changed (and what's merged into the repositories is followed, for tickets too).
+   */
   knowledgeAuto: z.boolean().catch(false),
-  /** How often, in days (one of KNOWLEDGE_EVERY_DAYS). */
-  knowledgeEveryDays: z.number().int().refine((d) => (KNOWLEDGE_EVERY_DAYS as readonly number[]).includes(d)).catch(7),
-  /** Sooner once Claude has asked this many new questions about the app (0: never; at most once a day). */
-  knowledgeSooner: z.number().int().refine((q) => (KNOWLEDGE_SOONER as readonly number[]).includes(q)).catch(3),
-  /** Track what's merged into each app's repository, and work it into its TRIAGE.md (off: not tracked). */
-  knowledgeChanges: z.enum(KNOWLEDGE_CHANGES).catch('off'),
+  /** How often (15 minutes to 90 days). */
+  knowledgeEvery: z.object({ n: z.number().int(), unit: z.enum(KNOWLEDGE_UNITS) }).refine((e) => !intervalProblem(e)).catch(DEFAULT_KNOWLEDGE_EVERY),
   /**
    * For issues opened directly on GitHub: each action's own mode, by key ('priority', a check,
    * or 'group:<id>'). Separate from the modes for Discord tickets; anything missing is Off.
@@ -270,7 +287,10 @@ export const TriageConfigSchema = z.object({
 export type TriageConfig = z.infer<typeof TriageConfigSchema>;
 
 export function parseTriageConfig(raw: unknown): TriageConfig {
-  return TriageConfigSchema.parse(raw && typeof raw === 'object' ? raw : {});
+  const o = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
+  // Saved before "Update every" took a unit: a number of days.
+  const legacy = o.knowledgeEvery === undefined && typeof o.knowledgeEveryDays === 'number' ? { knowledgeEvery: { n: o.knowledgeEveryDays, unit: 'days' } } : {};
+  return TriageConfigSchema.parse({ ...o, ...legacy });
 }
 
 /** Feature requests and ideas aren't support questions, so "Not a development issue" starts off for them. */

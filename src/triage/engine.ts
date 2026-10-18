@@ -1072,8 +1072,8 @@ export class TriageEngine {
     const images: TicketImage[] = shots.images.map((i) => ({ mediaType: i.contentType, data: i.data.toString('base64') }));
     // The instructions, then this ticket's app's TRIAGE.md: each is cached on its own.
     const appIds = ticket ? [ticket.app_id] : apps.filter((a) => a.repo_id === target.repo_id).map((a) => a.id);
-    // With After merged PRs on: what was merged lately, even before the TRIAGE.md has it.
-    const merged = base.knowledgeAuto && base.knowledgeChanges !== 'off' ? await recentChanges(deps.db, appIds.filter((x): x is string => Boolean(x))) : new Map<string, AppChange[]>();
+    // With Keep them up to date on: what was merged lately, even before the TRIAGE.md has it.
+    const merged = base.knowledgeAuto ? await recentChanges(deps.db, appIds.filter((x): x is string => Boolean(x))) : new Map<string, AppChange[]>();
     const known = knowledgePromptFor(apps, knowledge, appIds, merged);
     const ask = (withImages: TicketImage[]) => this.ai.classify(
       key.key,

@@ -27,10 +27,10 @@ import {
   type AppKnowledge,
   type Question,
 } from '../../triage/knowledge.js';
-import { CHANGES_ESTIMATE, splitAnswers, WRITE_ESTIMATE } from '../../triage/knowledge-writer.js';
+import { splitAnswers, WRITE_ESTIMATE } from '../../triage/knowledge-writer.js';
 import { CHANGE_STEPS, emptyLive, finishRunIfDone, latestRun, LIVE_STEPS, requestWrites, stopWrites, type LiveState, type LiveStep, type LiveTag } from '../../triage/knowledge-runs.js';
 import { appChanges, changeCounts, changeLabel, changeSync, NOT_USED, recentChanges, type AppChange } from '../../triage/knowledge-changes.js';
-import { formatCost, getTriageSettings, KNOWLEDGE_CHANGES, KNOWLEDGE_EVERY_DAYS, KNOWLEDGE_SOONER, parseTriageConfig, resolveApiKey, saveTriageConfig, tokenCost, type KnowledgeChanges } from '../../triage/settings.js';
+import { formatCost, getTriageSettings, intervalMs, intervalProblem, KNOWLEDGE_UNITS, parseTriageConfig, resolveApiKey, saveTriageConfig, tokenCost, type KnowledgeEvery, type KnowledgeUnit } from '../../triage/settings.js';
 import { renderMarkdown } from '../markdown.js';
 import { setFlash } from '../session.js';
 import type { Web, WorkspaceRequestContext } from '../server.js';
@@ -58,38 +58,40 @@ const ago = (d: Date) => html`<time datetime="${d.toISOString()}" title="${forma
 
 const DAY_MS = 86_400_000;
 
-/** Keep them up to date: the choices, as the selects show them. */
-const EVERY: Record<number, string> = { 1: 'Every day', 3: 'Every 3 days', 7: 'Every week', 14: 'Every 2 weeks', 30: 'Every month' };
-const SOONER: Record<number, string> = { 1: 'After 1 new question', 3: 'After 3 new questions', 5: 'After 5 new questions', 10: 'After 10 new questions', 0: 'Never' };
-
-const CHANGES: Record<KnowledgeChanges, string> = { hourly: 'Every hour', daily: 'Once a day', off: 'Off' };
 /** Why a change isn't sent to Claude (see noiseOf). */
 const NOISE: Record<string, string> = { Bot: 'Made by a bot, so it isn’t sent to Claude', Chore: 'Dependencies, CI, tests or refactoring, so it isn’t sent to Claude' };
 
-/** "every week, and sooner after 3 new questions" */
-function scheduleText(every: number, sooner: number): string {
-  return `${EVERY[every]!.toLowerCase()}${sooner ? `, and sooner after ${plural(sooner, 'new question')}` : ''}`;
+/** "minutes" or "minute": the unit as it reads after the number. */
+const unitWord = (unit: KnowledgeUnit, n: number) => (n === 1 ? unit.slice(0, -1) : unit);
+
+/** "every 3 days", "every hour", "every 15 minutes". */
+function everyText(e: KnowledgeEvery): string {
+  return e.n === 1 ? `every ${unitWord(e.unit, 1)}` : `every ${e.n} ${e.unit}`;
 }
 
-/** " What's merged is added at most once an hour." (empty when it's off). */
-function changesText(changes: KnowledgeChanges): string {
-  return changes === 'hourly' ? ' What’s merged into the repositories is added at most once an hour.' : changes === 'daily' ? ' What’s merged into the repositories is added at most once a day.' : '';
+/** "40 min", "5 hours", "3 days": about how long until then. */
+function inTime(ms: number): string {
+  const min = Math.max(1, Math.round(ms / 60_000));
+  if (min < 60) return `${min} min`;
+  const hours = Math.round(ms / 3_600_000);
+  return hours < 48 ? plural(hours, 'hour') : plural(Math.round(ms / DAY_MS), 'day');
 }
 
-/** When the merged changes waiting go into an app's TRIAGE.md: an hour (or a day) after its last update. */
-function changesDue(lastAt: Date | null, changes: KnowledgeChanges, now = Date.now()): string {
-  const ms = (lastAt?.getTime() ?? 0) + (changes === 'daily' ? DAY_MS : 3_600_000) - now;
-  if (ms <= 10 * 60_000) return 'added in the next few minutes';
-  const min = Math.round(ms / 60_000);
-  return min < 60 ? `added in about ${min} min` : `added in about ${plural(Math.round(ms / 3_600_000), 'hour')}`;
+/** Up to what an interval costs a month for every app, when each changes every time ("up to $0.91"). */
+function upTo(usd: number): string {
+  return usd < 0.01 ? 'less than $0.01' : `up to $${usd < 100 ? usd.toFixed(2) : Math.round(usd)}`;
 }
 
-/** "next update in 5 days", for an app whose TRIAGE.md is kept up to date. */
-function nextUpdate(writtenAt: Date, every: number, now = Date.now()): string {
-  const ms = writtenAt.getTime() + every * DAY_MS - now;
-  if (ms <= 0) return 'next update soon';
-  const days = Math.round(ms / DAY_MS);
-  return days <= 0 ? 'next update today' : days === 1 ? 'next update tomorrow' : `next update in ${days} days`;
+/** When an app kept up to date is next looked at: its last update plus the interval. */
+function nextUpdate(lastAt: Date, every: number, now = Date.now()): string {
+  const ms = lastAt.getTime() + every - now;
+  return ms <= 60_000 ? 'updated as soon as something changes' : `next update in ${inTime(ms)} if something changed`;
+}
+
+/** When the merged changes waiting go into an app's TRIAGE.md: at its next update. */
+function changesDue(lastAt: Date | null, every: number, now = Date.now()): string {
+  const ms = (lastAt?.getTime() ?? 0) + every - now;
+  return ms <= 10 * 60_000 ? 'added in the next few minutes' : `added in about ${inTime(ms)}`;
 }
 
 type State = 'none' | 'queued' | 'running' | 'done' | 'failed';
@@ -209,7 +211,7 @@ export function registerTriageKnowledgeRoutes(app: FastifyInstance, web: Web): v
     const c = settings.config;
     const anyOn = settings.enabled || settings.githubEnabled;
     // What's merged is checked (and sent with tickets) while triage and Keep them up to date are on.
-    const tracking = anyOn && c.knowledgeAuto && c.knowledgeChanges !== 'off';
+    const tracking = anyOn && c.knowledgeAuto;
     const merged = tracking ? await recentChanges(deps.db, apps.map((a) => a.id)) : new Map<string, AppChange[]>();
     const edit = can(ctx.membership, 'triage.knowledge.edit');
     const states = new Map(apps.map((a) => [a.id, stateOf(knowledge.get(a.id))]));
@@ -278,25 +280,23 @@ export function registerTriageKnowledgeRoutes(app: FastifyInstance, web: Web): v
                 : updateAll()}
             </div>`;
 
-    // The switch's form also takes the schedule selects (form="kn-auto"): any change saves all three.
+    // The switch's form also takes "Update every" (form="kn-auto"): any change saves both.
     const autoControl = edit
       ? html`<form method="post" action="${listUrl(ctx)}/auto" id="kn-auto" data-async class="inline-form">${csrfField(ctx.csrf)}<input type="hidden" name="set" value="1">
           ${switchInput({ name: 'auto', checked: c.knowledgeAuto, label: 'Keep every TRIAGE.md up to date', disabled: !key && !c.knowledgeAuto })}<button type="submit" class="btn sm nojs">Save</button></form>`
       : pill(c.knowledgeAuto ? 'On' : 'Off', c.knowledgeAuto ? 'ok' : 'neutral');
-    const every = c.knowledgeEveryDays;
-    const sooner = c.knowledgeSooner;
+    const every = c.knowledgeEvery;
     const schedule = edit
       ? html`<span class="kn-cadence">
-          <label><span>How often</span>${selectWrap(html`<select name="every" form="kn-auto" aria-label="How often Claude rewrites each TRIAGE.md">${KNOWLEDGE_EVERY_DAYS.map((d) => html`<option value="${String(d)}" ${d === every ? raw('selected') : ''}>${EVERY[d]}</option>`)}</select>`, { sm: true })}</label>
-          <label title="Sooner when Claude has asked this many new questions about the app since it last wrote its TRIAGE.md (at most once a day)"><span>Sooner</span>${selectWrap(html`<select name="sooner" form="kn-auto" aria-label="When Claude rewrites an app’s TRIAGE.md sooner">${KNOWLEDGE_SOONER.map((q) => html`<option value="${String(q)}" ${q === sooner ? raw('selected') : ''}>${SOONER[q]}</option>`)}</select>`, { sm: true })}</label>
-          <label title="What’s merged into each app’s repository (pull requests, commits pushed without one, releases) is checked every 15 minutes, and tickets get it right away. Claude adds it to the TRIAGE.md at most this often, without rewriting the rest. Bots and chores are left out."><span>After merged PRs</span>${selectWrap(html`<select name="changes" form="kn-auto" aria-label="When Claude adds what’s merged into the repositories">${KNOWLEDGE_CHANGES.map((x) => html`<option value="${x}" ${x === c.knowledgeChanges ? raw('selected') : ''}>${CHANGES[x]}</option>`)}</select>`, { sm: true })}</label>
+          <label for="kn-every-n">Update every</label>
+          <span class="kn-every"><input id="kn-every-n" type="number" name="every_n" form="kn-auto" value="${String(every.n)}" min="${every.unit === 'minutes' ? '15' : '1'}" max="${every.unit === 'days' ? '90' : '999'}" step="1" inputmode="numeric" required>${selectWrap(html`<select name="every_unit" form="kn-auto" aria-label="Unit">${KNOWLEDGE_UNITS.map((u) => html`<option value="${u}" ${u === every.unit ? raw('selected') : ''}>${unitWord(u, every.n)}</option>`)}</select>`)}</span>
         </span>`
-      : html`<span class="kn-cadence">${EVERY[every]}${sooner ? `, and sooner after ${plural(sooner, 'new question')}` : ''}.${changesText(c.knowledgeChanges)}</span>`;
-    // What it costs: per update, and a month on this schedule (app.js updates the month when the schedule changes).
+      : html`<span class="kn-cadence">${cap(everyText(every))}, when something changed.</span>`;
+    // What it costs: per update, and at most a month on this interval (app.js follows the interval as it's typed).
     const perUpdate = tokenCost(c.model, WRITE_ESTIMATE.input, WRITE_ESTIMATE.output);
-    const perChange = tokenCost(c.model, CHANGES_ESTIMATE.input, CHANGES_ESTIMATE.output);
+    const month = perUpdate === null ? 0 : (perUpdate * apps.length * 30 * DAY_MS) / intervalMs(every);
     const costs = perUpdate !== null && apps.length
-      ? html`<span class="kn-cadence-cost">Each update: ${formatCost(perUpdate)} per app with ${c.model}. On this schedule, <span data-kn-month data-each="${String(perUpdate)}" data-apps="${String(apps.length)}">${formatCost((perUpdate * apps.length * 30) / every)}</span> a month for ${plural(apps.length, 'app')}<span data-kn-changes-cost ${c.knowledgeChanges === 'off' ? raw('hidden') : ''}>, plus ${formatCost(perChange ?? perUpdate)} for each update with merged changes</span>.</span>`
+      ? html`<span class="kn-cadence-cost">Each update: ${formatCost(perUpdate)} per app with ${c.model}, so <span data-kn-month data-each="${String(perUpdate)}" data-apps="${String(apps.length)}" ${month >= 20 ? raw('class="warn-text"') : ''}>${upTo(month)}</span> a month for ${plural(apps.length, 'app')}.</span>`
       : '';
 
     const body = html`
@@ -314,7 +314,7 @@ export function registerTriageKnowledgeRoutes(app: FastifyInstance, web: Web): v
               return actions ? html`<a class="stat" href="${actions}#limits" title="Set in Actions › Model, scope and limits">${inner}</a>` : html`<div class="stat">${inner}</div>`;
             })()}
           </div>
-          <div class="kn-auto">${setting('Keep them up to date', html`While AI triage is on, Claude rewrites each app’s TRIAGE.md from the latest issues and releases, and can add what’s merged in between.${schedule}${costs}`, autoControl, { switchRow: true })}</div>
+          <div class="kn-auto">${setting('Keep them up to date', html`While AI triage is on, Claude updates each app’s TRIAGE.md with what’s new: issues opened and closed, merged pull requests, releases and its own questions. Apps with nothing new are skipped.${schedule}${costs}`, autoControl, { switchRow: true })}</div>
         </div>
         ${apps.length
           ? working ? html`<div data-live="4000" data-live-src="${listUrl(ctx)}?partial=1">${grid}</div>` : grid
@@ -349,7 +349,7 @@ export function registerTriageKnowledgeRoutes(app: FastifyInstance, web: Web): v
     const used = k?.auto_model ? tokenCost(k.auto_model, k.auto_input_tokens ?? 0, k.auto_output_tokens ?? 0) : null;
     // With Keep them up to date on: when it's rewritten next.
     const triageOn = settings.enabled || settings.githubEnabled;
-    const upcoming = !c.knowledgeAuto || !k?.auto_at ? '' : triageOn ? nextUpdate(k.auto_full_at ?? k.auto_at, c.knowledgeEveryDays) : 'updates start when AI triage is on';
+    const upcoming = !c.knowledgeAuto || !k?.auto_at ? '' : triageOn ? nextUpdate(k.auto_at, intervalMs(c.knowledgeEvery)) : 'updates start when AI triage is on';
     const writtenDoc = isWritten(k)
       ? html`${k.auto_sources?.cutOff ? html`<div class="card-b tight">${notice('warn', null, 'Claude ran out of room before the end, so the last part may be missing. Update it to try again.')}</div>` : ''}
           <div class="card-b"><div class="kn-doc">${renderMarkdown(k.auto_body, repoUrl)}</div></div>
@@ -435,9 +435,9 @@ export function registerTriageKnowledgeRoutes(app: FastifyInstance, web: Web): v
       : '';
 
     // ---- What was merged.
-    const tracking = c.knowledgeAuto && c.knowledgeChanges !== 'off';
+    const tracking = c.knowledgeAuto;
     const waitingN = changed.get(a.id)?.pending ?? 0;
-    const due = tracking && triageOn ? changesDue(k?.auto_at ?? null, c.knowledgeChanges) : null;
+    const due = tracking && triageOn ? changesDue(k?.auto_at ?? null, intervalMs(c.knowledgeEvery)) : null;
     const kindIcon = (x: AppChange) => icon(x.kind === 'pr' ? 'git-merge' : x.kind === 'commit' ? 'git-commit-horizontal' : 'tag', 14);
     const changeChip = (x: AppChange) => x.status === 'added'
       ? tag('Added to TRIAGE.md', { cls: 'kn-ch-chip added' })
@@ -450,7 +450,7 @@ export function registerTriageKnowledgeRoutes(app: FastifyInstance, web: Web): v
       ? html`<section class="card" id="changes" aria-labelledby="kn-ch-h">
           <div class="card-h"><div><div class="title"><h2 id="kn-ch-h">Changes</h2>${waitingN ? badge(waitingN, 'accent') : ''}</div><div class="desc">${tracking
             ? html`Merged into ${a.repo_owner}/${a.repo_name}${sync?.default_branch ? html` (<span class="mono">${sync.default_branch}</span>)` : ''}: pull requests, commits pushed without one, and releases. ${!triageOn ? 'Checked once AI triage is on.' : sync?.checked_at ? html`Checked ${ago(sync.checked_at)}.` : 'Checked every 15 minutes.'}`
-            : html`To follow what’s merged into ${a.repo_owner}/${a.repo_name}, turn on <a href="${listUrl(ctx)}">Keep them up to date</a> and choose when in “After merged PRs”.`}</div></div></div>
+            : html`To follow what’s merged into ${a.repo_owner}/${a.repo_name}, turn on <a href="${listUrl(ctx)}">Keep them up to date</a>.`}</div></div></div>
           ${sync?.last_error && tracking && triageOn ? html`<div class="card-b tight">${notice('warn', null, sync.last_error)}</div>` : ''}
           ${changeList.length
             ? html`<ul class="kn-chs">${changeList.map((x) => html`<li class="kn-ch is-${x.status}">${kindIcon(x)}<div class="kn-ch-b">
@@ -493,7 +493,7 @@ export function registerTriageKnowledgeRoutes(app: FastifyInstance, web: Web): v
         title: html`<span class="kn-title">${avatar(a.name, 28, { square: true, letters: 2 })}${a.name}</span>`,
         after: [tag('TRIAGE.md', { icon: 'file-text', cls: 'mono' })],
         description: isWritten(k) && k.auto_at
-          ? html`Written by Claude ${ago(k.auto_full_at ?? k.auto_at)}${updatedSince(k) ? html`, updated with merged changes ${ago(k.auto_at)},` : ''} from ${a.repo_owner}/${a.repo_name}. Claude reads it with every ${a.name} ticket${c.knowledgeAuto ? ` and rewrites it ${scheduleText(c.knowledgeEveryDays, c.knowledgeSooner)}` : ''}.${c.knowledgeAuto ? changesText(c.knowledgeChanges) : ''}`
+          ? html`Written by Claude ${ago(k.auto_full_at ?? k.auto_at)}${updatedSince(k) ? html`, updated with merged changes ${ago(k.auto_at)},` : ''} from ${a.repo_owner}/${a.repo_name}. Claude reads it with every ${a.name} ticket${c.knowledgeAuto ? ` and updates it ${everyText(c.knowledgeEvery)} when something changed` : ''}.`
           : `Claude writes it from ${a.repo_owner}/${a.repo_name}, then reads it with every ${a.name} ticket.`,
         actions: [
           prev ? linkBtn(knowledgeHref(ctx, prev.id), prev.name, { icon: 'chevron-left', variant: 'ghost', size: 'sm' }) : null,
@@ -536,7 +536,7 @@ export function registerTriageKnowledgeRoutes(app: FastifyInstance, web: Web): v
     const ctx = await web.requireWorkspace(req, reply, { permission: 'triage.knowledge.edit' });
     if (!ctx) return reply;
     const wid = ctx.workspace.id;
-    const f = (req.body ?? {}) as { auto?: string; every?: string; sooner?: string; changes?: string };
+    const f = (req.body ?? {}) as { auto?: string; every_n?: string; every_unit?: string };
     const on = f.auto !== undefined;
     const respond = (ok: boolean, message: string) => {
       if (web.wantsJson(req)) return reply.code(ok ? 200 : 400).send(ok ? { ok, message } : { ok, error: message });
@@ -546,20 +546,21 @@ export function registerTriageKnowledgeRoutes(app: FastifyInstance, web: Web): v
     const settings = await getTriageSettings(deps.db, wid);
     const c = settings.config;
     // A field missing from the form keeps its value.
-    const every = f.every === undefined ? c.knowledgeEveryDays : Number(f.every);
-    const sooner = f.sooner === undefined ? c.knowledgeSooner : Number(f.sooner);
-    const changes = (f.changes === undefined ? c.knowledgeChanges : f.changes) as KnowledgeChanges;
-    if (!(KNOWLEDGE_EVERY_DAYS as readonly number[]).includes(every) || !(KNOWLEDGE_SOONER as readonly number[]).includes(sooner) || !KNOWLEDGE_CHANGES.includes(changes)) return respond(false, 'Choose a schedule from the list.');
+    const unit = (f.every_unit ?? c.knowledgeEvery.unit) as KnowledgeUnit;
+    const every: KnowledgeEvery = { n: f.every_n === undefined ? c.knowledgeEvery.n : Number(f.every_n), unit };
+    if (!KNOWLEDGE_UNITS.includes(unit)) return respond(false, 'Choose minutes, hours or days.');
+    const problem = intervalProblem(every);
+    if (problem) return respond(false, problem);
     if (on && !(await resolveApiKey(deps, wid))) return respond(false, 'Add a Claude API key in Settings first.');
-    await saveTriageConfig(deps.db, wid, parseTriageConfig({ ...c, knowledgeAuto: on, knowledgeEveryDays: every, knowledgeSooner: sooner, knowledgeChanges: changes }));
-    const when = `${scheduleText(every, sooner)}.${changesText(changes)}`.replace(/\.$/, '');
-    if (!on) return respond(true, c.knowledgeAuto ? 'Claude no longer updates them by itself. You can still update each one.' : `Schedule saved: ${when}. Switch it on to start.`);
+    await saveTriageConfig(deps.db, wid, parseTriageConfig({ ...c, knowledgeAuto: on, knowledgeEvery: every }));
+    const when = `${everyText(every)} when something changed`;
+    if (!on) return respond(true, c.knowledgeAuto ? 'Claude no longer updates them by itself. You can still update each one.' : `Saved: ${everyText(every)}. Switch it on to start.`);
     const later = settings.enabled || settings.githubEnabled ? '' : ' Updates start once AI triage is on.';
-    if (c.knowledgeAuto) return respond(true, `Claude rewrites each TRIAGE.md ${when}.${later}`);
+    if (c.knowledgeAuto) return respond(true, `Claude updates each TRIAGE.md ${when}.${later}`);
     // Just switched on: the ones never written start now; the others follow the schedule.
     const [apps, knowledge] = await Promise.all([listApps(deps.db, wid), listKnowledge(deps.db, wid)]);
     const queued = await requestWrites(deps.db, wid, apps.filter((a) => !isWritten(knowledge.get(a.id))).map((a) => a.id), ctx.user.id);
-    const message = `${queued ? `Claude is writing the ${plural(queued, 'missing TRIAGE.md', 'missing TRIAGE.md files')} now, then rewrites them ${when}.` : `Claude rewrites each TRIAGE.md ${when}.`}${later}`;
+    const message = `${queued ? `Claude is writing the ${plural(queued, 'missing TRIAGE.md', 'missing TRIAGE.md files')} now, then updates them ${when}.` : `Claude updates each TRIAGE.md ${when}.`}${later}`;
     // Writes started: the page reloads with the Live studio open.
     if (queued && web.wantsJson(req)) return reply.send({ ok: true, message, go: `${listUrl(ctx)}?watch=1` });
     return respond(true, message);

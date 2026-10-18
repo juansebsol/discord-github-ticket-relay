@@ -306,7 +306,7 @@ export function registerTriageConfigRoutes(app: FastifyInstance, web: Web): void
     const c = settings.config;
     const system = systemPromptFor(c, apps);
     // The TRIAGE.md block, for the first app that has one (with what was merged lately, when that's followed).
-    const merged = c.knowledgeAuto && c.knowledgeChanges !== 'off' ? await recentChanges(deps.db, apps.map((a) => a.id)) : new Map<string, AppChange[]>();
+    const merged = c.knowledgeAuto ? await recentChanges(deps.db, apps.map((a) => a.id)) : new Map<string, AppChange[]>();
     const shown = apps.find((a) => knowledgePromptFor(apps, knowledge, [a.id], merged));
     const known = shown ? knowledgePromptFor(apps, knowledge, [shown.id], merged) : '';
     const groups = c.labelGroups.filter((g) => g.mode !== 'off');

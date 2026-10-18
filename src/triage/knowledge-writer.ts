@@ -29,15 +29,13 @@ import {
 } from './knowledge.js';
 import { closeIdleRuns, emptyLive, finishRunIfDone, requestWrites, type LiveState, type LiveStep, type LiveTag, type WriteMode } from './knowledge-runs.js';
 import { changeCounts, changeLabel, decideChanges, NOT_USED, pendingChanges, recentChanges, type AppChange } from './knowledge-changes.js';
-import { formatCost, getTriageSettings, resolveApiKey, tokenCost } from './settings.js';
+import { formatCost, getTriageSettings, intervalMs, resolveApiKey, tokenCost } from './settings.js';
 
 /**
  * About what one app's TRIAGE.md costs to write (input and output tokens, Claude's thinking
  * included), for the estimate shown before.
  */
 export const WRITE_ESTIMATE = { input: 25_000, output: 8_000 };
-/** The same for an update with merged changes: the TRIAGE.md and the changes in, the TRIAGE.md out. */
-export const CHANGES_ESTIMATE = { input: 8_000, output: 6_000 };
 
 const LEASE_MS = 5 * 60_000;
 const MAX_ATTEMPTS = 3;
@@ -687,9 +685,11 @@ export class KnowledgeWriter {
   }
 
   /**
-   * With Keep up to date on (and triage on, with a key): queues apps never written, those due on
-   * the workspace's schedule (every N days), and those Claude has asked enough new questions
-   * about (at most once a day). Failed ones are tried again a day later.
+   * With Keep them up to date on (and triage on, with a key): once an app's interval has passed
+   * since its last update, it's updated if something changed since. Issues opened or closed, or
+   * questions Claude asked: a full rewrite (it reads them). Only merged changes: an update of the
+   * parts they touch. Nothing: it waits. Apps never written are written; failed ones are tried
+   * again after the interval (between an hour and a day).
    */
   async scheduleUpdates(now = Date.now()): Promise<number> {
     const { db } = this.deps;
@@ -701,7 +701,7 @@ export class KnowledgeWriter {
     for (const { workspace_id: wid } of rows) {
       if (!(await resolveApiKey(this.deps, wid))) continue;
       const [apps, knowledge, settings, counts] = await Promise.all([listApps(db, wid), listKnowledge(db, wid), getTriageSettings(db, wid), changeCounts(db, wid)]);
-      const { knowledgeEveryDays: every, knowledgeSooner: sooner, knowledgeChanges: changes } = settings.config;
+      const every = intervalMs(settings.config.knowledgeEvery);
       const asked = await questionsSinceWritten(db, wid, knowledge);
       const full: string[] = [];
       const updates: string[] = [];
@@ -709,22 +709,31 @@ export class KnowledgeWriter {
         const k = knowledge.get(a.id);
         if (k?.auto_status === 'queued' || k?.auto_status === 'running') continue;
         if (k?.auto_status === 'failed') {
-          if (!k.auto_requested_at || now - k.auto_requested_at.getTime() > DAY_MS) full.push(a.id);
+          if (!k.auto_requested_at || now - k.auto_requested_at.getTime() > Math.min(Math.max(every, HOUR_MS), DAY_MS)) full.push(a.id);
           continue;
         }
         if (!k?.auto_at) {
           full.push(a.id);
           continue;
         }
-        const age = now - (k.auto_full_at ?? k.auto_at).getTime();
-        if (age > every * DAY_MS || (sooner > 0 && age > DAY_MS && (asked.get(a.id) ?? 0) >= sooner)) full.push(a.id);
-        // Merged changes waiting: an update at most once an hour, or once a day.
-        else if (changes !== 'off' && (counts.get(a.id)?.pending ?? 0) > 0 && now - k.auto_at.getTime() > (changes === 'hourly' ? HOUR_MS : DAY_MS)) updates.push(a.id);
+        if (now - k.auto_at.getTime() < every) continue;
+        if ((asked.get(a.id) ?? 0) > 0 || (await this.issuesMoved(a, apps, k.auto_full_at ?? k.auto_at))) full.push(a.id);
+        else if ((counts.get(a.id)?.pending ?? 0) > 0) updates.push(a.id);
       }
       if (full.length) queued += await requestWrites(db, wid, full, null);
       if (updates.length) queued += await requestWrites(db, wid, updates, null, 'changes');
     }
     return queued;
+  }
+
+  /** Whether issues were opened or closed in the app's repository since (its own, when the repository holds several apps). */
+  private async issuesMoved(app: AppRow, apps: AppRow[], since: Date): Promise<boolean> {
+    const shared = apps.filter((a) => a.repo_id === app.repo_id).length > 1;
+    const { rows } = await this.deps.db.query<{ n: number }>(
+      `SELECT count(*) AS n FROM issue_index WHERE repo_id = $1 AND gone = 0 AND (created_at > $2 OR closed_at > $2)${shared ? ' AND (app_name IS NULL OR app_name = $3)' : ''}`,
+      [app.repo_id, since, ...(shared ? [app.name] : [])],
+    );
+    return Number(rows[0]?.n ?? 0) > 0;
   }
 }
 

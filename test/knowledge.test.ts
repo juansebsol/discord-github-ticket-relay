@@ -45,6 +45,11 @@ const saveAuto = (fields: Record<string, string>) => env.server.inject({
   headers: { ...form(ws.owner).headers, accept: 'application/json', 'x-requested-with': 'fetch' },
   payload: new URLSearchParams({ _csrf: ws.owner.csrf, set: '1', ...fields }).toString(),
 });
+/** Syncs the issue index now (as "Sync now" does). */
+const syncIndex = async () => {
+  await env.db.query('UPDATE issue_index_repos SET sync_requested_at = now_ms()');
+  await new IssueIndexer(env.deps).tick();
+};
 const writtenDaysAgo = (days: number, appId?: string) => env.db.query(`UPDATE app_knowledge SET auto_at = $1, auto_full_at = $1${appId ? ' WHERE app_id = $2' : ''}`, [new Date(Date.now() - days * 86_400_000), ...(appId ? [appId] : [])]);
 
 beforeEach(async () => {
@@ -267,78 +272,101 @@ describe('Knowledge: Claude writes each app’s TRIAGE.md', () => {
     expect((await page('/triage/knowledge')).body).toContain('Needs a Claude API key.');
   });
 
-  it('keeps them up to date when switched on: weekly, and sooner after new questions', async () => {
+  it('keeps them up to date when switched on: every day by default, only the apps where something changed', async () => {
     await enable();
     const on = await saveAuto({ auto: '1' });
-    expect(on.json()).toEqual({ ok: true, message: 'Claude is writing the 2 missing TRIAGE.md files now, then rewrites them every week, and sooner after 3 new questions.', go: `${w()}/triage/knowledge?watch=1` });
-    expect((await getTriageSettings(env.db, wid())).config.knowledgeAuto).toBe(true);
+    expect(on.json()).toEqual({ ok: true, message: 'Claude is writing the 2 missing TRIAGE.md files now, then updates them every day when something changed.', go: `${w()}/triage/knowledge?watch=1` });
+    expect((await getTriageSettings(env.db, wid())).config).toMatchObject({ knowledgeAuto: true, knowledgeEvery: { n: 1, unit: 'days' } });
     await env.triage.drain();
     expect(writes()).toHaveLength(2);
     expect(await env.triage.engine.knowledge.scheduleUpdates()).toBe(0);
 
-    // A week later.
-    await writtenDaysAgo(8, photo().id);
+    // Two days later, nothing changed: nothing to do.
+    await writtenDaysAgo(2);
+    expect(await env.triage.engine.knowledge.scheduleUpdates()).toBe(0);
+
+    // An issue opened in PhotoCraft's repository: only PhotoCraft's is rewritten.
+    repo(0).issues.push({ number: 9, title: 'Crash when printing', body: 'It crashes.', labels: ['bug'], created_at: new Date().toISOString(), user: 'someone' });
+    await syncIndex();
     expect(await env.triage.engine.knowledge.scheduleUpdates()).toBe(1);
     await env.triage.drain();
     expect(writes()).toHaveLength(3);
+    expect(writes().at(-1)!.body.messages[0].content).toMatch(/^Write the TRIAGE\.md for PhotoCraft/);
 
-    // Two days later, after three new questions about PhotoCraft.
+    // Two days later, after questions Claude asked about PhotoCraft: rewritten to answer them.
     await writtenDaysAgo(2);
-    for (const q of ['Does it support CMYK?', 'Is the web version in beta?', 'Which Windows versions are supported?']) await ask(q);
+    for (const q of ['Does it support CMYK?', 'Is the web version in beta?']) await ask(q);
     expect(await env.triage.engine.knowledge.scheduleUpdates()).toBe(1);
     await env.triage.drain();
     const asked = JSON.parse(writes().at(-1)!.body.messages[0].content.slice(writes().at(-1)!.body.messages[0].content.indexOf('\n') + 1)).questions;
-    expect(asked.map((q: { question: string }) => q.question).sort()).toEqual(['Does it support CMYK?', 'Is the web version in beta?', 'Which Windows versions are supported?']);
+    expect(asked.map((q: { question: string }) => q.question).sort()).toEqual(['Does it support CMYK?', 'Is the web version in beta?']);
 
     // Off: nothing more.
     expect((await saveAuto({})).json()).toEqual({ ok: true, message: 'Claude no longer updates them by itself. You can still update each one.' });
     await writtenDaysAgo(30);
+    repo(0).issues.push({ number: 10, title: 'Crash when saving', body: 'It crashes.', labels: ['bug'], created_at: new Date().toISOString(), user: 'someone' });
+    await syncIndex();
     expect(await env.triage.engine.knowledge.scheduleUpdates()).toBe(0);
   });
 
-  it('rewrites on the schedule picked next to the switch', async () => {
+  it('updates on the interval picked next to the switch: minutes, hours or days', async () => {
     await enable();
     const list = (await page('/triage/knowledge')).body;
     expect(list).toContain('<form method="post" action="' + `${w()}/triage/knowledge/auto` + '" id="kn-auto" data-async');
-    expect(list).toContain('<select name="every" form="kn-auto"');
-    expect(list).toContain('<option value="7" selected>Every week</option>');
-    expect(list).toContain('<option value="3" selected>After 3 new questions</option>');
-    // 25k in and 8k out (thinking included) per update with Haiku, 2 apps, every week.
-    expect(list).toContain('On this schedule, <span data-kn-month data-each="0.0065" data-apps="2">about $0.06</span> a month for 2 apps<span data-kn-changes-cost hidden>, plus under $0.01 for each update with merged changes</span>.');
+    expect(list).toContain('<label for="kn-every-n">Update every</label>');
+    expect(list).toContain('<input id="kn-every-n" type="number" name="every_n" form="kn-auto" value="1" min="1" max="90" step="1" inputmode="numeric" required>');
+    expect(list).toContain('<option value="minutes" >minute</option><option value="hours" >hour</option><option value="days" selected>day</option>');
+    // 25k in and 8k out (thinking included) per update with Haiku, 2 apps, at most once a day.
+    expect(list).toContain('Each update: under $0.01 per app with claude-haiku-5-5, so <span data-kn-month data-each="0.0065" data-apps="2" >up to $0.39</span> a month for 2 apps.');
 
     // Picked while off: saved for later.
-    expect((await saveAuto({ every: '30', sooner: '0' })).json()).toEqual({ ok: true, message: 'Schedule saved: every month. Switch it on to start.' });
-    expect((await getTriageSettings(env.db, wid())).config).toMatchObject({ knowledgeAuto: false, knowledgeEveryDays: 30, knowledgeSooner: 0 });
-    expect((await page('/triage/knowledge')).body).toContain('<option value="30" selected>Every month</option>');
+    expect((await saveAuto({ every_n: '3', every_unit: 'hours' })).json()).toEqual({ ok: true, message: 'Saved: every 3 hours. Switch it on to start.' });
+    expect((await getTriageSettings(env.db, wid())).config).toMatchObject({ knowledgeAuto: false, knowledgeEvery: { n: 3, unit: 'hours' } });
+    expect((await page('/triage/knowledge')).body).toContain('<option value="hours" selected>hours</option>');
 
-    // On, then changed while on: the message says the schedule.
-    expect((await saveAuto({ auto: '1', every: '1', sooner: '1' })).json()).toEqual({ ok: true, message: 'Claude is writing the 2 missing TRIAGE.md files now, then rewrites them every day, and sooner after 1 new question.', go: `${w()}/triage/knowledge?watch=1` });
+    // On: the missing ones are written, then each is updated every 3 hours when something changed.
+    expect((await saveAuto({ auto: '1', every_n: '3', every_unit: 'hours' })).json()).toEqual({ ok: true, message: 'Claude is writing the 2 missing TRIAGE.md files now, then updates them every 3 hours when something changed.', go: `${w()}/triage/knowledge?watch=1` });
     await env.triage.drain();
-    expect(writes()).toHaveLength(2);
-    expect((await page(`/triage/knowledge/${photo().id}`)).body).toContain('Claude reads it with every PhotoCraft ticket and rewrites it every day, and sooner after 1 new question.');
-    expect((await page(`/triage/knowledge/${photo().id}`)).body).toContain('next update tomorrow');
+    const one = (await page(`/triage/knowledge/${photo().id}`)).body;
+    expect(one).toContain('Claude reads it with every PhotoCraft ticket and updates it every 3 hours when something changed.');
+    expect(one).toContain('next update in 3 hours if something changed');
 
-    // Every day: two days old is due.
-    await writtenDaysAgo(2, photo().id);
-    expect(await env.triage.engine.knowledge.scheduleUpdates()).toBe(1);
-    await env.triage.drain();
-
-    // Every month: eight days old isn't, and with Never, questions don't make it sooner.
-    expect((await saveAuto({ auto: '1', every: '30', sooner: '0' })).json()).toEqual({ ok: true, message: 'Claude rewrites each TRIAGE.md every month.' });
-    await writtenDaysAgo(8);
-    await ask('Does it support CMYK?');
+    // An issue opened two hours later isn't enough yet; after three hours it is.
+    const hoursAgo = (h: number) => env.db.query('UPDATE app_knowledge SET auto_at = $1, auto_full_at = $1', [new Date(Date.now() - h * 3_600_000)]);
+    await hoursAgo(2);
+    repo(0).issues.push({ number: 9, title: 'Crash when printing', body: 'It crashes.', labels: ['bug'], created_at: new Date().toISOString(), user: 'someone' });
+    await syncIndex();
     expect(await env.triage.engine.knowledge.scheduleUpdates()).toBe(0);
-    expect((await page(`/triage/knowledge/${photo().id}`)).body).toContain('next update in 22 days');
-
-    // After 1 new question: that one is enough (at most once a day).
-    await saveAuto({ auto: '1', every: '30', sooner: '1' });
+    await hoursAgo(4);
     expect(await env.triage.engine.knowledge.scheduleUpdates()).toBe(1);
+    expect((await knowledgeRow(photo().id)).auto_status).toBe('queued');
+    expect((await knowledgeRow(vector().id)).auto_status).toBe('done');
 
-    // Only the listed choices.
-    const bad = await saveAuto({ auto: '1', every: '2', sooner: '3' });
-    expect(bad.statusCode).toBe(400);
-    expect(bad.json()).toEqual({ ok: false, error: 'Choose a schedule from the list.' });
-    expect((await getTriageSettings(env.db, wid())).config.knowledgeEveryDays).toBe(30);
+    // 15 minutes at least, 90 days at most, whole numbers.
+    for (const [n, unit, error] of [
+      ['10', 'minutes', 'At least 15 minutes: that’s how often the repositories are checked.'],
+      ['91', 'days', 'At most 90 days.'],
+      ['1.5', 'hours', 'Enter a whole number, 1 or more.'],
+      ['', 'days', 'Enter a whole number, 1 or more.'],
+      ['2', 'weeks', 'Choose minutes, hours or days.'],
+    ]) {
+      const bad = await saveAuto({ auto: '1', every_n: n!, every_unit: unit! });
+      expect(bad.statusCode, `${n} ${unit}`).toBe(400);
+      expect(bad.json()).toEqual({ ok: false, error });
+    }
+    expect((await getTriageSettings(env.db, wid())).config.knowledgeEvery).toEqual({ n: 3, unit: 'hours' });
+
+    // Every 15 minutes adds up, and the estimate says so.
+    expect((await saveAuto({ auto: '1', every_n: '15', every_unit: 'minutes' })).json()).toEqual({ ok: true, message: 'Claude updates each TRIAGE.md every 15 minutes when something changed.' });
+    expect((await page('/triage/knowledge')).body).toContain('<span data-kn-month data-each="0.0065" data-apps="2" class="warn-text">up to $37.44</span>');
+    expect((await page('/triage/knowledge')).body).toContain('<input id="kn-every-n" type="number" name="every_n" form="kn-auto" value="15" min="15" max="999"');
+  });
+
+  it('keeps a schedule saved before, in days', () => {
+    expect(parseTriageConfig({ knowledgeEveryDays: 7 }).knowledgeEvery).toEqual({ n: 7, unit: 'days' });
+    expect(parseTriageConfig({ knowledgeEveryDays: 7, knowledgeEvery: { n: 2, unit: 'hours' } }).knowledgeEvery).toEqual({ n: 2, unit: 'hours' });
+    expect(parseTriageConfig({}).knowledgeEvery).toEqual({ n: 1, unit: 'days' });
+    expect(parseTriageConfig({ knowledgeEvery: { n: 5, unit: 'minutes' } }).knowledgeEvery).toEqual({ n: 1, unit: 'days' });
   });
 
   it('keeps the team’s notes as they are, and gives them to triage as trusted', async () => {
@@ -374,8 +402,8 @@ describe('Knowledge: Claude writes each app’s TRIAGE.md', () => {
     expect(view).not.toContain('Write it with Claude');
     const modList = (await page('/triage/knowledge', mod)).body;
     expect(modList).not.toContain('Write all');
-    expect(modList).not.toContain('<select name="every"');
-    expect(modList).toContain('<span class="kn-cadence">Every week, and sooner after 3 new questions.</span>');
+    expect(modList).not.toContain('name="every_n"');
+    expect(modList).toContain('<span class="kn-cadence">Every day, when something changed.</span>');
     for (const [url, fields] of [['/triage/knowledge/write', { scope: 'all' }], [`/triage/knowledge/${photo().id}/write`, {}], ['/triage/knowledge/auto', { set: '1', auto: '1' }], [`/triage/knowledge/${photo().id}`, { body: NOTES }]] as const) {
       expect((await post(url, fields, mod)).statusCode, url).toBe(403);
     }
@@ -442,17 +470,14 @@ describe('Knowledge: what’s merged into the repositories', () => {
     r.releases = [{ tag: 'v1.0.0', name: 'PhotoCraft 1.0', published_at: minsAgo(2), body: 'The export fix, and centimetres.' }, { tag: 'v0.9.0', published_at: daysAgo(40) }];
   }
 
-  it('follows each app’s repository every 15 minutes, while it’s on: pull requests, commits pushed without one, releases', async () => {
+  it('follows each app’s repository every 15 minutes while Keep them up to date is on: pull requests, commits pushed without one, releases', async () => {
     await enable();
     seedChanges();
-    // Off by default: GitHub isn't asked.
-    expect((await getTriageSettings(env.db, wid())).config.knowledgeChanges).toBe('off');
-    await saveAuto({ auto: '1' });
+    // Keep them up to date off: GitHub isn't asked.
     expect(await tick()).toBe(0);
     expect(await syncRow()).toBeUndefined();
 
-    expect((await saveAuto({ auto: '1', changes: 'hourly' })).json()).toEqual({ ok: true, message: 'Claude rewrites each TRIAGE.md every week, and sooner after 3 new questions. What’s merged into the repositories is added at most once an hour.' });
-    expect((await getTriageSettings(env.db, wid())).config.knowledgeChanges).toBe('hourly');
+    await saveAuto({ auto: '1' });
     expect(await tick()).toBe(6);
     // Bots and chores are kept, and never go to Claude.
     expect(await changes()).toEqual([
@@ -493,14 +518,14 @@ describe('Knowledge: what’s merged into the repositories', () => {
     expect((await syncRow()).head_sha).toBe('h1');
 
     // Off again: GitHub isn't asked anymore.
-    await saveAuto({ auto: '1', changes: 'off' });
+    await saveAuto({});
     const after = env.github.requests;
     expect(await tick(Date.now() + 40 * 60_000)).toBe(0);
     expect(env.github.requests).toBe(after);
   });
 
   it('says when GitHub doesn’t allow reading them, and tries again sooner when GitHub is busy', async () => {
-    await enable({ knowledgeAuto: true, knowledgeChanges: 'hourly' });
+    await enable({ knowledgeAuto: true });
     seedChanges();
     env.github.installationPermissions = { issues: 'write', metadata: 'read' };
     expect(await tick()).toBe(0);
@@ -518,7 +543,7 @@ describe('Knowledge: what’s merged into the repositories', () => {
   });
 
   it('adds them to the TRIAGE.md without rewriting the rest, and says what it did with each', async () => {
-    await enable({ knowledgeAuto: true, knowledgeChanges: 'hourly' });
+    await enable({ knowledgeAuto: true, knowledgeEvery: { n: 1, unit: 'hours' } });
     env.anthropic.knowledge = { text: WRITTEN };
     await env.triage.drain();
     const written = await knowledgeRow(photo().id);
@@ -605,16 +630,18 @@ describe('Knowledge: what’s merged into the repositories', () => {
     expect((await page('/triage/knowledge')).body).toMatch(/<span>6 changes merged today · 2 added to TRIAGE\.md<\/span>/);
   });
 
-  it('adds them on the schedule picked in “After merged PRs”: every hour, once a day, or not at all', async () => {
-    await enable({ knowledgeAuto: true, knowledgeChanges: 'hourly' });
+  it('adds them at the next update, without rewriting the rest unless issues moved too', async () => {
+    await enable({ knowledgeAuto: true, knowledgeEvery: { n: 1, unit: 'hours' } });
     await env.triage.drain();
     seedChanges();
     await tick();
-    // Written a moment ago: the changes wait for the hour.
+    // Updated a moment ago: the changes wait for the hour.
     expect(await env.triage.engine.knowledge.scheduleUpdates()).toBe(0);
     await lastUpdate(61);
     expect(await env.triage.engine.knowledge.scheduleUpdates()).toBe(1);
     expect(await knowledgeRow(photo().id)).toMatchObject({ auto_status: 'queued', auto_mode: 'changes' });
+    // VectorCraft had nothing new.
+    expect((await knowledgeRow(vector().id)).auto_status).toBe('done');
     await env.triage.drain();
     expect(updates()).toHaveLength(1);
     // Claude said nothing about them: they're left out rather than tried again every hour.
@@ -624,7 +651,7 @@ describe('Knowledge: what’s merged into the repositories', () => {
     expect(await env.triage.engine.knowledge.scheduleUpdates()).toBe(0);
 
     // Once a day.
-    await saveAuto({ auto: '1', changes: 'daily' });
+    await saveAuto({ auto: '1', every_n: '1', every_unit: 'days' });
     repo(0).pulls!.push({ number: 19, title: 'Fix the brush lag on large canvases', user: 'dev', merged_at: new Date().toISOString() });
     expect(await tick(Date.now() + 16 * 60_000)).toBe(1);
     expect(await env.triage.engine.knowledge.scheduleUpdates()).toBe(0);
@@ -633,17 +660,32 @@ describe('Knowledge: what’s merged into the repositories', () => {
     await env.triage.drain();
     expect(updates()).toHaveLength(2);
 
-    // Off: what's waiting stays waiting. (Merged after the last check, on the test's clock.)
+    // A change, and an issue opened too: a full rewrite, which reads both. (Merged after the last check, on the test's clock.)
     repo(0).pulls!.push({ number: 20, title: 'Fix the eraser size', user: 'dev', merged_at: new Date(Date.now() + 20 * 60_000).toISOString() });
     expect(await tick(Date.now() + 32 * 60_000)).toBe(1);
-    await saveAuto({ auto: '1', changes: 'off' });
+    repo(0).issues.push({ number: 9, title: 'Eraser is too small', body: 'Hard to use.', labels: ['bug'], created_at: new Date().toISOString(), user: 'someone' });
+    await syncIndex();
+    await lastUpdate(25 * 60);
+    const before = writes().length;
+    expect(await env.triage.engine.knowledge.scheduleUpdates()).toBe(1);
+    expect(await knowledgeRow(photo().id)).toMatchObject({ auto_status: 'queued', auto_mode: 'full' });
+    await env.triage.drain();
+    expect(writes()).toHaveLength(before + 1);
+    expect(updates()).toHaveLength(2);
+    const data = JSON.parse(writes().at(-1)!.body.messages[0].content.slice(writes().at(-1)!.body.messages[0].content.indexOf('\n') + 1));
+    expect(data.recent_changes[0]).toMatchObject({ id: 'C1', ref: '#20' });
+
+    // Off: what's waiting stays waiting.
+    repo(0).pulls!.push({ number: 21, title: 'Fix the lasso', user: 'dev', merged_at: new Date(Date.now() + 40 * 60_000).toISOString() });
+    expect(await tick(Date.now() + 48 * 60_000)).toBe(1);
+    await saveAuto({});
     await lastUpdate(3 * 24 * 60);
     expect(await env.triage.engine.knowledge.scheduleUpdates()).toBe(0);
-    expect((await changes())[0]).toBe('pr 20 pending');
+    expect((await changes())[0]).toBe('pr 21 pending');
   });
 
   it('works the recent ones into a full rewrite too', async () => {
-    await enable({ knowledgeAuto: true, knowledgeChanges: 'daily' });
+    await enable({ knowledgeAuto: true });
     seedChanges();
     await tick();
     env.anthropic.knowledge = { text: `${WRITTEN}\n\n## Changes used\nC1: added\nC2: not relevant: internal\nC3: added` };
@@ -670,7 +712,7 @@ describe('Knowledge: what’s merged into the repositories', () => {
   });
 
   it('gives each ticket its app’s latest changes right away, with their dates', async () => {
-    await enable({ knowledgeAuto: true, knowledgeChanges: 'hourly' });
+    await enable({ knowledgeAuto: true });
     seedChanges();
     await tick();
     await file();
@@ -690,14 +732,14 @@ describe('Knowledge: what’s merged into the repositories', () => {
     expect(full).toContain('Lately merged into PhotoCraft’s repository');
 
     // Off: tickets don't get them.
-    await saveAuto({ auto: '1', changes: 'off' });
+    await saveAuto({});
     await file();
     await env.triage.drain();
     expect(String(triages().at(-1)!.body.system[1]?.text ?? '')).not.toContain('Lately merged');
   });
 
   it('shows the Changes card to anyone who can see Knowledge, and the button to those who can edit it', async () => {
-    await enable({ knowledgeAuto: true, knowledgeChanges: 'daily' });
+    await enable({ knowledgeAuto: true });
     await env.triage.drain();
     seedChanges();
     await tick();
@@ -709,10 +751,10 @@ describe('Knowledge: what’s merged into the repositories', () => {
     expect(view).toContain('Fix the blank right page in PNG export');
     expect(view).not.toContain('Add them now');
     expect((await post(`/triage/knowledge/${photo().id}/write`, { mode: 'changes' }, mod)).statusCode).toBe(403);
-    expect((await page('/triage/knowledge', mod)).body).toContain('<span class="kn-cadence">Every week, and sooner after 3 new questions. What’s merged into the repositories is added at most once a day.</span>');
+    expect((await page('/triage/knowledge', mod)).body).toContain('<span class="kn-cadence">Every day, when something changed.</span>');
 
     // Not followed, and nothing kept from before: no card.
-    await saveAuto({ auto: '1', changes: 'off' });
+    await saveAuto({});
     await env.db.query('DELETE FROM app_changes');
     const off = (await page(`/triage/knowledge/${photo().id}`)).body;
     expect(off).not.toContain('<h2 id="kn-ch-h">Changes</h2>');

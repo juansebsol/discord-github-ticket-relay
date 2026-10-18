@@ -1,6 +1,6 @@
 /**
  * AI triage › Knowledge, changes: what gets merged into each app repository's default branch,
- * polled from GitHub every 15 minutes while "After merged PRs" is on (no webhooks): pull requests,
+ * polled from GitHub every 15 minutes while Keep them up to date is on (no webhooks): pull requests,
  * commits pushed without one, and releases. Bots, dependency bumps and chores are kept but never
  * sent to Claude. Claude works the rest into the app's TRIAGE.md (an update of the parts they
  * touch, see the writer), and each ticket's prompt gets its app's recent ones right away.
@@ -95,14 +95,13 @@ interface SyncRow {
 export class ChangeTracker {
   constructor(readonly deps: Deps) {}
 
-  /** Repositories of workspaces tracking changes: triage on, Keep them up to date on, After merged PRs not Off. */
+  /** Repositories of workspaces tracking changes: triage on, and Keep them up to date on. */
   private async tracked(): Promise<Tracked[]> {
     const { rows } = await this.deps.db.query<{ repo_id: number; owner: string; name: string; installation_id: number; app_id: string }>(
       `SELECT a.repo_id, a.repo_owner AS owner, a.repo_name AS name, g.installation_id, a.id AS app_id
          FROM apps a JOIN triage_settings t ON t.workspace_id = a.workspace_id
          JOIN github_connections g ON g.workspace_id = a.workspace_id AND g.status = 'active'
-        WHERE (t.enabled = 1 OR t.github_enabled = 1) AND json_extract(t.triage_config, '$.knowledgeAuto') = 1
-          AND COALESCE(json_extract(t.triage_config, '$.knowledgeChanges'), 'off') <> 'off'`,
+        WHERE (t.enabled = 1 OR t.github_enabled = 1) AND json_extract(t.triage_config, '$.knowledgeAuto') = 1`,
     );
     const byRepo = new Map<number, Tracked>();
     for (const r of rows) {

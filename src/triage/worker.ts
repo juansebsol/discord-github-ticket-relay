@@ -76,8 +76,8 @@ export class TriageWorker {
       this.pauseCheckedAt = Date.now();
       await this.engine.checkPaused().catch((err) => this.engine.deps.log.warn({ err: (err as Error).message }, 'pause check failed'));
     }
-    // AI triage › Knowledge with Keep up to date on: TRIAGE.md files that are due get queued.
-    if (Date.now() - this.knowledgeCheckedAt > 600_000) {
+    // AI triage › Knowledge with Keep them up to date on: TRIAGE.md files that are due get queued.
+    if (Date.now() - this.knowledgeCheckedAt > 60_000) {
       this.knowledgeCheckedAt = Date.now();
       await this.engine.knowledge.scheduleUpdates().catch((err) => this.engine.deps.log.warn({ err: (err as Error).message }, 'TRIAGE.md schedule failed'));
     }
