@@ -18,6 +18,7 @@ import { updateTicketLimits, userNames } from '../../domain/workspaces.js';
 import { html, raw, type SafeHtml } from '../../lib/html.js';
 import { setFlash } from '../session.js';
 import type { Web } from '../server.js';
+import { questionAnchor } from '../../triage/knowledge.js';
 import { knowledgeLink, toolHeader, viewOnlyText } from './tool.js';
 import { viewOnlyFooter } from './triage.js';
 import {
@@ -274,7 +275,7 @@ function duplicateNote(t: Pick<TriageResultRow, 'verdict'>, s: RepoOf): SafeHtml
 function triageQuestion(question: string, knowledge: { href: string; edit: boolean } | null | undefined): SafeHtml {
   return html`<div class="tri-ask" title="Only your team sees this">${icon('lightbulb', 14)}<div>
     <span class="k">Claude would be surer if it knew</span><p>${question}</p>
-    ${knowledge ? html`<a href="${knowledge.href}">${knowledge.edit ? 'Answer in TRIAGE.md' : 'See TRIAGE.md'}${icon('arrow-right', 12)}</a>` : ''}
+    ${knowledge ? html`<a href="${knowledge.href}#${questionAnchor(question)}">${knowledge.edit ? 'Answer it in Knowledge' : 'See it in Knowledge'}${icon('arrow-right', 12)}</a>` : ''}
   </div></div>`;
 }
 

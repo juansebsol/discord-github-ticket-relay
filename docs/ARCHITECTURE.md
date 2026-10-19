@@ -51,7 +51,8 @@ Discord endpoint, OAuth), one or more queue workers, and an optional triage work
   closed as not planned), plus recent ticket summaries and the questions triage asked
   (`missing_context`, copied to `question`). Each ticket then gets its own app's TRIAGE.md as a
   second cached system block, as background facts (it comes from public text); the team's own
-  notes stay separate, are never rewritten, and win. With Keep them up to date on, each app is
+  notes and its answers to Claude's questions (`app_knowledge.team_answers`, saved from the app
+  page's question tabs) stay separate, are never rewritten, and win. With Keep them up to date on, each app is
   looked at once the workspace's interval (`knowledgeEvery`: a number of minutes, hours or days,
   15 minutes to 90 days) has passed since its last update or look, and updated only if something
   changed since: issues opened or closed in its repository or questions Claude asked (a full

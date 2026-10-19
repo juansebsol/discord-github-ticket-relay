@@ -1389,8 +1389,8 @@ a.feed-row:focus-visible { outline-offset: -2px; }
 .kn-raw { border-top: 1px solid var(--border); }
 .kn-raw > summary { display: flex; align-items: center; gap: 4px; padding: 10px 20px; font-size: 12px; line-height: 16px; font-weight: 500; cursor: pointer; list-style: none; }
 .kn-raw > summary::-webkit-details-marker { display: none; }
-.kn-raw > summary .chev, .kn-answered > summary .chev { color: var(--muted); transition: transform var(--t) var(--ease); }
-.kn-raw[open] > summary .chev, .kn-answered[open] > summary .chev { transform: rotate(90deg); }
+.kn-raw > summary .chev { color: var(--muted); transition: transform var(--t) var(--ease); }
+.kn-raw[open] > summary .chev { transform: rotate(90deg); }
 .kn-raw .prompt-pre { border-top: 1px solid var(--border); max-height: 480px; }
 
 .kn-editor { display: flex; flex-direction: column; overflow: hidden; }
@@ -1402,23 +1402,75 @@ textarea.kn-text:hover { border-color: var(--border); }
 textarea.kn-text:focus { border-color: var(--border); box-shadow: inset 0 0 0 2px var(--ring); }
 .kn-keys kbd { font: 500 11px/1 var(--mono); padding: 2px 5px; margin-left: 2px; border-radius: 4px; border: 1px solid var(--border-strong); background: var(--surface-2); color: var(--muted); }
 
-.kn-qg + .kn-qg { border-top: 1px solid var(--border); }
-.kn-qg-h { display: grid; gap: 2px; padding: 12px 20px 4px; }
-.kn-qg-h .t { font-size: 12px; line-height: 16px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
-.kn-qg-h .d { font-size: 12px; line-height: 16px; color: var(--muted); }
-.kn-answered > summary { display: flex; align-items: center; gap: 4px; padding: 12px 20px; font-size: 12px; line-height: 16px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); cursor: pointer; list-style: none; }
-.kn-answered > summary::-webkit-details-marker { display: none; }
-.kn-qs { list-style: none; margin: 0; padding: 0; }
-.kn-q { padding: 10px 20px; }
-.kn-q + .kn-q { border-top: 1px solid var(--border); }
-.kn-q.fresh { box-shadow: inset 2px 0 0 var(--accent); }
-.kn-q-text { margin: 0; font-size: 13px; line-height: 20px; }
-.kn-q-answer { display: grid; grid-template-columns: 12px minmax(0, 1fr); gap: 6px; margin-top: 4px; font-size: 12px; line-height: 18px; color: var(--muted); }
-.kn-q-answer > .ic { margin-top: 3px; color: var(--ok); }
-.kn-q-answer p { margin: 0; }
-.kn-q-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-top: 6px; font-size: 12px; line-height: 16px; color: var(--muted); }
-.kn-q-new { color: var(--accent-text); font-weight: 600; }
-.kn-q-add { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; font-size: 12px; font-weight: 500; }
+/* The app page's tabs: its TRIAGE.md, then Claude's questions by where they stand. */
+.kn-tabs .tab .ic { color: var(--muted); }
+.kn-tabs .tab[aria-current="page"] .ic { color: var(--text); }
+
+/* Claude's questions: a feed, each under the ticket it last came from (days added by app.js). */
+.kn-feed-wrap { display: flex; flex-direction: column; gap: 16px; max-width: 940px; }
+.kn-feed-h { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 12px 24px; }
+.kn-feed-h p { margin: 0; max-width: 620px; font-size: 13px; line-height: 20px; color: var(--muted); }
+.kn-sort { display: inline-flex; flex: none; padding: 3px; border-radius: var(--r); background: var(--surface); border: 1px solid var(--border); }
+.kn-sort a { display: inline-flex; align-items: center; height: 28px; padding: 0 12px; border-radius: var(--r-sm); font-size: 12px; font-weight: 500; color: var(--muted); text-decoration: none; }
+.kn-sort a:hover { color: var(--text); text-decoration: none; }
+.kn-sort a[aria-current="true"] { background: var(--surface-3); color: var(--text); }
+.kn-feed { display: flex; flex-direction: column; gap: 12px; }
+.kn-day { display: flex; align-items: baseline; gap: 10px; margin: 14px 0 0 78px; font-size: 15px; line-height: 22px; font-weight: 600; }
+.kn-day:first-child { margin-top: 0; }
+.kn-day .n { font-size: 12px; font-weight: 400; color: var(--muted); }
+.kn-fe { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 14px; scroll-margin-top: 96px; }
+.kn-fe-when { padding-top: 16px; text-align: right; font-size: 12px; line-height: 16px; color: var(--faint); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.kn-fe-n { font-size: 13px; font-weight: 600; color: var(--warn-text); }
+.kn-fe-card { display: flex; flex-direction: column; min-width: 0; border-radius: 12px; background: var(--surface); border: 1px solid var(--border); overflow: hidden; transition: box-shadow var(--t) var(--ease); }
+.kn-fe:target .kn-fe-card { box-shadow: 0 0 0 2px var(--accent); }
+.kn-fe-ticket { display: flex; flex-direction: column; gap: 8px; padding: 14px 18px; }
+.kn-fe-who { display: flex; align-items: center; gap: 10px; min-width: 0; font-size: 13px; line-height: 20px; color: var(--muted); }
+.kn-fe-who .t { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kn-fe-who strong { color: var(--text); font-weight: 600; }
+.kn-fe-ref { flex: none; font-size: 12px; color: var(--faint); }
+.kn-fe-quote { margin: 0; padding-left: 34px; font-size: 14px; line-height: 21px; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.kn-fe-q { display: flex; flex-direction: column; gap: 10px; padding: 14px 18px 16px 52px; background: var(--surface-2); border-top: 1px solid var(--border); }
+.kn-fe-label { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; line-height: 16px; font-weight: 500; color: var(--accent-text); }
+.kn-fe-text { margin: 0; font-size: 15px; line-height: 23px; font-weight: 600; text-wrap: pretty; }
+.kn-fe-answer { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border-radius: var(--r); background: var(--ok-soft); border: 1px solid var(--ok-border); font-size: 13px; line-height: 20px; }
+.kn-fe-answer p { margin: 0; white-space: pre-line; }
+.kn-fe-answer .kn-doc p { white-space: normal; }
+.kn-fe-by { font-size: 12px; line-height: 16px; color: var(--ok-text); }
+.kn-fe-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.kn-fe-once { font-size: 12px; color: var(--faint); }
+.kn-fe-more > summary { font-size: 12px; color: var(--muted); cursor: pointer; list-style: none; }
+.kn-fe-more > summary::-webkit-details-marker { display: none; }
+.kn-fe-more > summary:hover { color: var(--text); }
+.kn-fe-more[open] { flex-basis: 100%; order: 3; }
+.kn-fe-more ul { margin: 8px 0 0; padding-left: 18px; display: grid; gap: 4px; font-size: 12px; line-height: 18px; }
+.kn-fe-reply { margin-left: auto; }
+.kn-fe-reply > summary { list-style: none; }
+.kn-fe-reply > summary::-webkit-details-marker { display: none; }
+.kn-fe-reply[open] { flex-basis: 100%; order: 4; margin-left: 0; }
+.kn-fe-reply[open] > summary { display: none; }
+.kn-fe-form { display: flex; flex-direction: column; gap: 8px; }
+.kn-fe-form textarea { width: 100%; min-height: 84px; font-size: 14px; line-height: 21px; }
+.kn-fe-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.kn-fe-actions .small { flex: 1 1 220px; }
+.kn-feed-more { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding-left: 78px; }
+.kn-chip { display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 9px; border-radius: var(--r-full); font-size: 11px; font-weight: 600; white-space: nowrap; }
+.kn-chip::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.kn-chip.is-team { background: var(--warn-soft); color: var(--warn-text); }
+.kn-chip.is-look { background: var(--accent-soft); color: var(--accent-text); }
+.kn-chip.is-done { background: var(--ok-soft); color: var(--ok-text); }
+@media (max-width: 640px) {
+  .kn-fe { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .kn-fe-when { padding-top: 0; text-align: left; }
+  .kn-day, .kn-feed-more { margin-left: 0; padding-left: 0; }
+  .kn-fe-q { padding-left: 18px; }
+  .kn-fe-quote { padding-left: 0; }
+}
+
+/* The team's answers to Claude's questions (TRIAGE.md tab). */
+.kn-ta { list-style: none; margin: 0; padding: 0; }
+.kn-ta li { display: flex; flex-direction: column; gap: 4px; padding: 12px 20px; border-top: 1px solid var(--border); }
+.kn-ta .q { margin: 0; font-size: 13px; line-height: 20px; font-weight: 600; }
+.kn-ta .kn-doc p { margin: 0; }
 .kn-props dd { flex-wrap: wrap; min-width: 0; font-size: 13px; }
 .kn-paths { display: flex; flex-wrap: wrap; gap: 4px 10px; min-width: 0; }
 @media (max-width: 1100px) { .kn-layout { grid-template-columns: minmax(0, 1fr); } }
@@ -1433,7 +1485,6 @@ textarea.kn-text:focus { border-color: var(--border); box-shadow: inset 0 0 0 2p
 .rv-ask > .ic { flex: none; margin-top: 2px; color: var(--accent-text); }
 .rv-ask q { color: var(--text); }
 .rv-ask a { white-space: nowrap; font-weight: 500; }
-.kn-q-add:disabled { color: var(--muted); cursor: default; }
 
 /* What was merged (the app's page): newest first, with what Claude did with each. */
 .kn-chs { list-style: none; margin: 0; padding: 0; }

@@ -5,7 +5,7 @@ import { imageSize } from '../src/domain/files.js';
 import { IssueIndexer, setDuplicateOf } from '../src/domain/issue-index.js';
 import { acceptSubmission } from '../src/domain/submissions.js';
 import { createInvite } from '../src/domain/workspaces.js';
-import { KNOWLEDGE_MAX } from '../src/triage/knowledge.js';
+import { KNOWLEDGE_MAX, questionAnchor } from '../src/triage/knowledge.js';
 import { cleanDoc, splitAnswers } from '../src/triage/knowledge-writer.js';
 import { getTriageSettings, parseTriageConfig, saveTriageConfig, setApiKey, setTriageEnabled } from '../src/triage/settings.js';
 import { renderMarkdown } from '../src/web/markdown.js';
@@ -195,9 +195,12 @@ describe('Knowledge: Claude writes each app’s TRIAGE.md', () => {
     expect(one).toContain('>README.md</a>');
     expect(one).toContain('4<span class="muted"> · 2 open, 1 fixed, 1 not planned</span>');
     // Its question, answered from the issues: no longer for the team.
-    expect(one).toContain('Answered by Claude');
-    expect(one).toContain('Yes: <a');
-    expect(one).not.toContain(`data-kn-add="${QUESTION}"`);
+    const answered = (await page(`/triage/knowledge/${photo().id}?tab=answered`)).body;
+    expect(answered).toContain(`<p class="kn-fe-text">${QUESTION}</p>`);
+    expect(answered).toContain('Found by Claude in the repository and the issues');
+    expect(answered).toContain('Yes: <a');
+    expect(answered).not.toContain('data-kn-reply');
+    expect((await page(`/triage/knowledge/${photo().id}?tab=team`)).body).toContain('Nothing needs your team');
     expect((await page('/triage/knowledge')).body).not.toMatch(/Knowledge<span class="badge/);
 
     // The next PhotoCraft ticket gets PhotoCraft's TRIAGE.md, after the instructions, each cached.
@@ -945,32 +948,95 @@ describe('What would have made Claude surer', () => {
     const ticket = (await page(`/tickets/${t.id}`)).body;
     expect(ticket).toContain('Claude would be surer if it knew');
     expect(ticket).toContain(QUESTION);
-    expect(ticket).toContain(`href="${w()}/triage/knowledge/${photo().id}#questions">Answer in TRIAGE.md`);
+    expect(ticket).toContain(`href="${w()}/triage/knowledge/${photo().id}?tab=all#${questionAnchor(QUESTION)}">Answer it in Knowledge`);
     expect((await page('/triage')).body).toContain(`Claude would be surer if it knew: <q>${QUESTION}</q>`);
 
     const list = (await page('/triage/knowledge')).body;
     expect(list).toContain('1 question');
     expect(list).toMatch(/class="tab" href="[^"]*\/triage\/knowledge" aria-current="page">Knowledge<span class="badge accent">1<\/span>/);
-    const editor = (await page(`/triage/knowledge/${photo().id}`)).body;
-    expect(editor).toContain('Claude will look');
-    expect(editor).toContain(`<p class="kn-q-text">${QUESTION}</p>`);
-    expect(editor).toContain('<span class="kn-q-new">New</span>');
-    expect(editor).toContain(`data-kn-add="${QUESTION}"`);
-    expect(editor).toContain(`href="${w()}/tickets/${t.id}"`);
+
+    // The app's page opens on its TRIAGE.md; the questions are in the tabs after it.
+    const app = (await page(`/triage/knowledge/${photo().id}`)).body;
+    expect(app).toMatch(new RegExp(`<a class="tab" href="${w()}/triage/knowledge/${photo().id}" aria-current="page"><span class="ic[^]*?<span class="mono">TRIAGE\\.md</span></a>`));
+    expect(app).toContain(`<a class="tab" href="${w()}/triage/knowledge/${photo().id}?tab=all" >All<span class="badge" data-kn-count="all">1</span></a>`);
+    expect(app).toContain('Claude will look<span class="badge" data-kn-count="look">1</span>');
+    expect(app).not.toContain('kn-fe-text');
+    const look = (await page(`/triage/knowledge/${photo().id}?tab=look`)).body;
+    expect(look).toContain('data-kn-feed data-days');
+    expect(look).toContain(`<p class="kn-fe-text">${QUESTION}</p>`);
+    expect(look).toMatch(new RegExp(`<strong>Member \\d+</strong> opened <a href="${w()}/tickets/${t.id}" >`));
+    expect(look).toContain('<span class="kn-chip is-look">Claude will look</span>');
+    expect(look).toContain('<summary class="btn sm primary">Answer</summary>');
+    expect(look).toContain(`id="${questionAnchor(QUESTION)}"`);
 
     // Claude looks and can't find it: the team's.
     env.anthropic.knowledge = { text: `${WRITTEN}\n\n${ANSWERS}\nQ1: unknown` };
     await post(`/triage/knowledge/${photo().id}/write`);
     await env.triage.drain();
-    expect((await page(`/triage/knowledge/${photo().id}`)).body).toContain('Needs your team');
+    const team = (await page(`/triage/knowledge/${photo().id}?tab=team`)).body;
+    expect(team).toContain(`<p class="kn-fe-text">${QUESTION}</p>`);
+    expect(team).toContain('<span class="kn-chip is-team">Needs your team</span>');
+    expect(team).toContain('Needs your team<span class="badge accent" data-kn-count="team">1</span>');
 
-    // Saving the team's notes marks it as seen; it stays listed.
-    await new Promise((r) => setTimeout(r, 5));
-    await post(`/triage/knowledge/${photo().id}`, { body: `## Answers to Claude’s questions\n- ${QUESTION} Yes: #412.` });
+    // The team answers it, right there.
+    const answer = (fields: Record<string, string>) => env.server.inject({
+      method: 'POST', url: `${w()}/triage/knowledge/${photo().id}/answer`,
+      headers: { ...form(ws.owner).headers, accept: 'application/json', 'x-requested-with': 'fetch' },
+      payload: new URLSearchParams({ _csrf: ws.owner.csrf, question: QUESTION, tab: 'team', ...fields }).toString(),
+    });
+    expect((await answer({ answer: '   ' })).json()).toEqual({ ok: false, error: 'Write the answer first.' });
+    expect((await answer({ answer: 'x'.repeat(601) })).json()).toEqual({ ok: false, error: 'An answer can be up to 600 characters.' });
+    expect((await answer({ answer: 'Yes, it’s #412: fixed in v1.0.0.' })).json()).toEqual({ ok: true, message: 'Saved. Claude uses it from the next PhotoCraft ticket.' });
+    expect((await page(`/triage/knowledge/${photo().id}?tab=team`)).body).toContain('Nothing needs your team');
+    const done = (await page(`/triage/knowledge/${photo().id}?tab=answered`)).body;
+    expect(done).toContain(`<p class="kn-fe-text">${QUESTION}</p>`);
+    expect(done).toMatch(/From your team · [^<]+ · <time datetime="[^"]+" data-local/);
+    expect(done).toContain('<summary class="btn sm">Edit answer</summary>');
+    expect(done).toContain('name="remove" value="1"');
     expect((await page('/triage/knowledge')).body).not.toMatch(/kn-new/);
-    const after = (await page(`/triage/knowledge/${photo().id}`)).body;
-    expect(after).toContain(`<p class="kn-q-text">${QUESTION}</p>`);
-    expect(after).not.toContain('<span class="kn-q-new">New</span>');
+    const triageTab = (await page(`/triage/knowledge/${photo().id}`)).body;
+    expect(triageTab).toContain('Your team’s answers');
+    expect(triageTab).toContain(`<p class="q">${QUESTION}</p>`);
+
+    // Claude gets it with every PhotoCraft ticket, as trusted, and isn't asked it again when it rewrites.
+    await file();
+    await env.triage.drain();
+    expect(triages().at(-1)!.body.system[1].text).toContain(`PhotoCraft’s team answered questions Claude asked before (trusted, like their notes):\n- ${QUESTION}\n  Yes, it’s #412: fixed in v1.0.0.`);
+    await post(`/triage/knowledge/${photo().id}/write`);
+    await env.triage.drain();
+    const data = JSON.parse(writes().at(-1)!.body.messages[0].content.slice(writes().at(-1)!.body.messages[0].content.indexOf('\n') + 1));
+    expect(data.team_answers).toEqual([{ question: QUESTION, answer: 'Yes, it’s #412: fixed in v1.0.0.' }]);
+    expect(data.questions).toEqual([]);
+
+    // Taken out: Claude looks for it again at its next update.
+    expect((await answer({ remove: '1' })).json()).toEqual({ ok: true, message: 'Answer taken out. Claude no longer gets it with tickets.' });
+    expect((await page(`/triage/knowledge/${photo().id}?tab=look`)).body).toContain(`<p class="kn-fe-text">${QUESTION}</p>`);
+    expect((await page(`/triage/knowledge/${photo().id}`)).body).not.toContain('Your team’s answers');
+  });
+
+  it('lists the questions newest first by day, or most asked first, a page at a time', async () => {
+    await enable();
+    for (let i = 0; i < 3; i++) await ask('Does it support CMYK?');
+    await ask(QUESTION);
+    const newest = (await page(`/triage/knowledge/${photo().id}?tab=all`)).body;
+    expect(newest.indexOf(QUESTION)).toBeLessThan(newest.indexOf('Does it support CMYK?'));
+    expect(newest).toContain('Also asked in 2 other tickets');
+    expect(newest).toContain('Asked once');
+    expect(newest).toContain('<time datetime="');
+    const asked = (await page(`/triage/knowledge/${photo().id}?tab=all&sort=asked`)).body;
+    expect(asked.indexOf('Does it support CMYK?')).toBeLessThan(asked.indexOf(QUESTION));
+    expect(asked).toContain('<span class="kn-fe-n" title="Tickets that asked it">3×</span>');
+    expect(asked).not.toContain('data-days');
+    expect(asked).toContain(`<a href="${w()}/triage/knowledge/${photo().id}?tab=all&amp;sort=asked" aria-current="true">Most asked</a>`);
+
+    // Someone who can only view sees the questions, not the answer boxes.
+    const mod = await makeAdmin(env, 'lea');
+    await env.server.inject({ method: 'POST', url: `/invite/${await createInvite(env.db, wid(), ws.owner.user.id, 'moderator')}`, ...form(mod) });
+    await grant(env, wid(), mod.user.id, { 'triage.knowledge': 'view' });
+    const view = (await page(`/triage/knowledge/${photo().id}?tab=all`, mod)).body;
+    expect(view).toContain(`<p class="kn-fe-text">${QUESTION}</p>`);
+    expect(view).not.toContain('data-kn-reply');
+    expect((await env.server.inject({ method: 'POST', url: `${w()}/triage/knowledge/${photo().id}/answer`, ...form(mod, { question: QUESTION, answer: 'No.' }) })).statusCode).toBe(403);
   });
 
   it('shows the question without the link to someone who can’t open Knowledge', async () => {

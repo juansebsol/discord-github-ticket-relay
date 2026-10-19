@@ -16,6 +16,7 @@ import { actionEffectsShort, actionTitle } from '../triage-view.js';
 import { empty, formatDate, icon, linkBtn, notice, postBtn, selectWrap, tag, timeAgo, type IconName } from '../ui.js';
 import { bulkBanner, bulkBar } from './triage-bulk.js';
 import { pausedText } from './alerts.js';
+import { questionAnchor } from '../../triage/knowledge.js';
 import { areaHref, canOpen, canOpenIssue, IN_WORKSPACE_REPOS, knowledgeLink, landOn, pageLink, toolHeader } from './tool.js';
 
 const PAGE = 50;
@@ -304,7 +305,7 @@ export function registerTriageReviewRoutes(app: FastifyInstance, web: Web): void
           </div>
           <div class="rv-suggs">${v.suggestions.map((a) => card(v, a))}</div>
           ${v.question
-            ? html`<p class="rv-ask" title="Only your team sees this">${icon('lightbulb', 14)}<span>Claude would be surer if it knew: <q>${v.question}</q>${v.knowledge ? html` · <a href="${v.knowledge.href}">${v.knowledge.edit ? 'Answer in TRIAGE.md' : 'See TRIAGE.md'}</a>` : ''}</span></p>`
+            ? html`<p class="rv-ask" title="Only your team sees this">${icon('lightbulb', 14)}<span>Claude would be surer if it knew: <q>${v.question}</q>${v.knowledge ? html` · <a href="${v.knowledge.href}#${questionAnchor(v.question)}">${v.knowledge.edit ? 'Answer it' : 'See it in Knowledge'}</a>` : ''}</span></p>`
             : ''}
         </div>
       </li>`)}</ul>`;

@@ -3,7 +3,7 @@
  * issues, open and closed (see knowledge-writer.ts), and reads it with every ticket for that app.
  * The team can add notes that Claude never changes. Also the questions Claude asks while
  * triaging, when a fact about the product would have made it surer (its missing_context answer),
- * and the answers it later finds. All of it stays in the console: members never see it, and
+ * the answers it later finds, and the team's own answers to them. All of it stays in the console: members never see it, and
  * nothing is written to the repositories.
  */
 import type { Queryable } from '../db/database.js';
@@ -15,8 +15,9 @@ export const KNOWLEDGE_MAX = 10_000;
 /** Characters Claude's part may have. */
 export const WRITTEN_MAX = 12_000;
 
-/** Questions shown per app on its page. */
-const QUESTIONS_SHOWN = 30;
+/** The team's answers to Claude's questions, per app: each, and all together (about 3,000 tokens). */
+export const ANSWER_MAX = 600;
+export const TEAM_ANSWERS_MAX = 12_000;
 
 /** What Claude writes, section by section (also shown before it has written anything). */
 export const KNOWLEDGE_SECTIONS: { title: string; text: string }[] = [
@@ -78,13 +79,24 @@ export interface AppKnowledge {
   auto_answers: KnowledgeAnswer[] | null;
   auto_input_tokens: number | null;
   auto_output_tokens: number | null;
+  /** The team's answers to Claude's questions. */
+  team_answers: TeamAnswer[];
   created_at: Date;
   updated_at: Date;
 }
 
+/** One of the team's answers: who wrote it and when (an ISO date). */
+export interface TeamAnswer {
+  question: string;
+  answer: string;
+  by: string | null;
+  byName: string | null;
+  at: string;
+}
+
 const SELECT = `SELECT k.app_id, k.body, k.updated_by, COALESCE(u.display_name, u.username) AS updated_by_name, k.notes_at,
     k.auto_body, k.auto_status, k.auto_at, k.auto_full_at, k.auto_checked_at, k.auto_requested_at, k.auto_error, k.auto_model, k.auto_sources, k.auto_answers,
-    k.auto_input_tokens, k.auto_output_tokens, k.created_at, k.updated_at
+    k.auto_input_tokens, k.auto_output_tokens, k.team_answers, k.created_at, k.updated_at
   FROM app_knowledge k LEFT JOIN users u ON u.id = k.updated_by`;
 
 /** Every app's TRIAGE.md in the workspace, by app id (apps that never had one are missing). */
@@ -134,13 +146,36 @@ export async function saveKnowledge(q: Queryable, workspaceId: string, appId: st
   return true;
 }
 
-/** The app's TRIAGE.md as the triage prompt takes it (Claude's part and the team's notes). */
+/**
+ * The team's answer to a question: saved (it replaces an earlier one), or taken out when empty.
+ * Returns an error to show, or null.
+ */
+export async function saveTeamAnswer(q: Queryable, workspaceId: string, appId: string, question: string, answer: string, user: { id: string; name: string | null }): Promise<string | null> {
+  const text = question.trim().slice(0, 400);
+  const said = answer.replace(/\r\n?/g, '\n').trim();
+  if (!text) return 'That question is gone.';
+  if (said.length > ANSWER_MAX) return `An answer can be up to ${ANSWER_MAX} characters.`;
+  const current = await getKnowledge(q, workspaceId, appId);
+  const others = (current?.team_answers ?? []).filter((a) => keyOf(a.question) !== keyOf(text));
+  const next = said ? [{ question: text, answer: said, by: user.id, byName: user.name, at: new Date().toISOString() }, ...others] : others;
+  if (next.reduce((n, a) => n + a.question.length + a.answer.length, 0) > TEAM_ANSWERS_MAX) {
+    return `Your team’s answers for this app are full (${TEAM_ANSWERS_MAX.toLocaleString('en-US')} characters). Shorten or remove some first.`;
+  }
+  await q.query(
+    `INSERT INTO app_knowledge (app_id, workspace_id, team_answers) VALUES ($1, $2, $3)
+     ON CONFLICT (app_id) DO UPDATE SET team_answers = excluded.team_answers, updated_at = now_ms()`,
+    [appId, workspaceId, next],
+  );
+  return null;
+}
+
+/** The app's TRIAGE.md as the triage prompt takes it (Claude's part, the team's notes and answers). */
 export function knowledgeTexts(apps: AppRow[], knowledge: Map<string, AppKnowledge>, appIds: (string | null)[], changes: Map<string, string[]> = new Map()): AppKnowledgeText[] {
   return apps
     .filter((a) => appIds.includes(a.id))
     .map((a) => {
       const k = knowledge.get(a.id);
-      return { name: a.name, written: k?.auto_body ?? '', notes: notesOf(k), changes: changes.get(a.id) ?? [] };
+      return { name: a.name, written: k?.auto_body ?? '', notes: notesOf(k), answers: (k?.team_answers ?? []).map(({ question, answer }) => ({ question, answer })), changes: changes.get(a.id) ?? [] };
     });
 }
 
@@ -167,12 +202,13 @@ export function sectionsOf(body: string): string[] {
  */
 function questionsSql(where = ''): string {
   return `SELECT 'ticket' AS kind, s.app_id AS app_id, t.question AS question, t.completed_at AS at,
-        t.submission_id AS submission_id, s.repo_id AS repo_id, s.issue_number AS number, s.repo_name AS repo_name, x.title AS title
+        t.submission_id AS submission_id, s.repo_id AS repo_id, s.issue_number AS number, s.repo_name AS repo_name, x.title AS title,
+        s.reporter_display_name AS who, x.excerpt AS excerpt
       FROM triage_results t JOIN submissions s ON s.id = t.submission_id
       LEFT JOIN issue_index x ON x.repo_id = s.repo_id AND x.number = s.issue_number
       WHERE t.workspace_id = $1 AND t.question IS NOT NULL AND t.status = 'done'${where}
     UNION ALL
-    SELECT 'issue', a.id, t.question, t.completed_at, NULL, t.repo_id, t.number, a.repo_name, x.title
+    SELECT 'issue', a.id, t.question, t.completed_at, NULL, t.repo_id, t.number, a.repo_name, x.title, x.author, x.excerpt
       FROM issue_triage t JOIN apps a ON a.workspace_id = t.workspace_id AND a.repo_id = t.repo_id
       LEFT JOIN issue_index x ON x.repo_id = t.repo_id AND x.number = t.number
       WHERE t.workspace_id = $1 AND t.question IS NOT NULL AND t.status = 'done'${where.replace('s.app_id', 'a.id')}`;
@@ -180,18 +216,35 @@ function questionsSql(where = ''): string {
 
 const keyOf = (question: string) => question.trim().toLowerCase();
 
+/** A short, stable id for a question: its anchor on the app's page ("q-1x2y3z"). */
+export function questionAnchor(question: string): string {
+  let h = 5381;
+  for (const ch of keyOf(question)) h = ((h * 33) ^ ch.charCodeAt(0)) >>> 0;
+  return `q-${h.toString(36)}`;
+}
+
 /**
  * Where a question stands:
- * - answered: Claude found the answer when it last wrote the TRIAGE.md;
+ * - answered: by the team, or by Claude when it last wrote the TRIAGE.md;
  * - team: Claude looked in the repository and the issues and didn't find it;
  * - waiting: asked since Claude last wrote it, so it hasn't looked yet.
  */
 export type QuestionStatus = 'answered' | 'team' | 'waiting';
 
-function statusOf(question: string, k: AppKnowledge | null | undefined): { status: QuestionStatus; answer: string | null } {
+interface StatusOf {
+  status: QuestionStatus;
+  answer: string | null;
+  /** Who answered it (the team's answer wins over Claude's). */
+  by: 'team' | 'claude' | null;
+  team: TeamAnswer | null;
+}
+
+function statusOf(question: string, k: AppKnowledge | null | undefined): StatusOf {
+  const team = (k?.team_answers ?? []).find((a) => keyOf(a.question) === keyOf(question)) ?? null;
+  if (team) return { status: 'answered', answer: team.answer, by: 'team', team };
   const found = (k?.auto_answers ?? []).find((a) => keyOf(a.question) === keyOf(question));
-  if (found?.answer) return { status: 'answered', answer: found.answer };
-  return { status: found ? 'team' : 'waiting', answer: null };
+  if (found?.answer) return { status: 'answered', answer: found.answer, by: 'claude', team: null };
+  return { status: found ? 'team' : 'waiting', answer: null, by: null, team: null };
 }
 
 /** New to the team: not answered by Claude, and asked since the team last saved its notes. */
@@ -237,7 +290,7 @@ export async function questionCounts(q: Queryable, workspaceId: string, knowledg
   return out;
 }
 
-/** Where a question came from. */
+/** Where a question came from: the ticket or issue, who opened it and how it starts. */
 export interface QuestionSource {
   kind: 'ticket' | 'issue';
   submissionId: string | null;
@@ -245,6 +298,8 @@ export interface QuestionSource {
   number: number | null;
   repoName: string;
   title: string | null;
+  who: string | null;
+  excerpt: string | null;
   at: Date;
 }
 
@@ -255,29 +310,34 @@ export interface Question {
   at: Date;
   status: QuestionStatus;
   answer: string | null;
+  /** Who answered it, and the team's answer (who, when). */
+  by: 'team' | 'claude' | null;
+  team: TeamAnswer | null;
   /** Not answered, and asked since the team last saved its notes. */
   fresh: boolean;
+  /** Newest first. */
   sources: QuestionSource[];
 }
 
-/** The questions about one app: new ones first, then newest first. */
-export async function listQuestions(q: Queryable, workspaceId: string, appId: string, k: AppKnowledge | null): Promise<{ questions: Question[]; more: number }> {
-  const { rows } = await q.query<{ kind: 'ticket' | 'issue'; question: string; at: Date; submission_id: string | null; repo_id: number; number: number | null; repo_name: string; title: string | null }>(
-    `SELECT * FROM (${questionsSql(' AND s.app_id = $2')}) ORDER BY at DESC LIMIT 500`,
+/** Every question about one app, last asked first. */
+export async function listQuestions(q: Queryable, workspaceId: string, appId: string, k: AppKnowledge | null): Promise<Question[]> {
+  const { rows } = await q.query<{ kind: 'ticket' | 'issue'; question: string; at: Date; submission_id: string | null; repo_id: number; number: number | null; repo_name: string; title: string | null; who: string | null; excerpt: string | null }>(
+    `SELECT * FROM (${questionsSql(' AND s.app_id = $2')}) ORDER BY at DESC LIMIT 5000`,
     [workspaceId, appId],
   );
   const byText = new Map<string, Question>();
   for (const r of rows) {
-    const source: QuestionSource = { kind: r.kind, submissionId: r.submission_id, repoId: r.repo_id, number: r.number, repoName: r.repo_name, title: r.title, at: r.at };
+    // A ticket's issue title starts with its [Type] [App]: the ticket's own title is what's after.
+    const title = r.kind === 'ticket' && r.title ? r.title.replace(/^(\s*\[[^\]]*\])+\s*/, '') || r.title : r.title;
+    const source: QuestionSource = { kind: r.kind, submissionId: r.submission_id, repoId: r.repo_id, number: r.number, repoName: r.repo_name, title, who: r.who, excerpt: r.excerpt || null, at: r.at };
     const seen = byText.get(keyOf(r.question));
     if (seen) seen.sources.push(source);
     else {
-      const { status, answer } = statusOf(r.question, k);
-      byText.set(keyOf(r.question), { text: r.question.trim(), at: r.at, status, answer, fresh: isFresh(status, r.at, k), sources: [source] });
+      const s = statusOf(r.question, k);
+      byText.set(keyOf(r.question), { text: r.question.trim(), at: r.at, ...s, fresh: isFresh(s.status, r.at, k), sources: [source] });
     }
   }
-  const all = [...byText.values()].sort((a, b) => Number(b.fresh) - Number(a.fresh) || b.at.getTime() - a.at.getTime());
-  return { questions: all.slice(0, QUESTIONS_SHOWN), more: Math.max(0, all.length - QUESTIONS_SHOWN) };
+  return [...byText.values()];
 }
 
 /** Questions about one app that Claude hasn't answered yet (for the next time it writes), newest first. */

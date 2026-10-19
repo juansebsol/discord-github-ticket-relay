@@ -29,6 +29,119 @@
   }
   localTimes(document);
 
+  // Knowledge › questions: the feed's day headings and times, in the viewer's own time zone.
+  function knFeed(ctx) {
+    $$('time[data-local-time]', ctx).forEach(function (t) {
+      var d = new Date(t.getAttribute('datetime'));
+      if (!isNaN(d.getTime())) t.textContent = d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+    });
+    var now = new Date();
+    var today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    $$('[data-kn-feed][data-days]', ctx).forEach(function (feed) {
+      $$('.kn-day', feed).forEach(function (h) { h.remove(); });
+      var days = [];
+      $$('.kn-fe[data-at]', feed).forEach(function (a) {
+        var d = new Date(a.getAttribute('data-at'));
+        var day = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+        var last = days[days.length - 1];
+        if (last && last.day === day) last.n++;
+        else days.push({ day: day, n: 1, first: a, d: d });
+      });
+      days.forEach(function (g) {
+        var ago = Math.round((today - g.day) / 86400000);
+        var h = document.createElement('h3');
+        h.className = 'kn-day';
+        var t = document.createElement('span');
+        t.className = 't';
+        t.textContent = ago === 0 ? 'Today' : ago === 1 ? 'Yesterday'
+          : g.d.toLocaleDateString(undefined, g.d.getFullYear() === now.getFullYear() ? { weekday: 'long', month: 'short', day: 'numeric' } : { month: 'short', day: 'numeric', year: 'numeric' });
+        var c = document.createElement('span');
+        c.className = 'n';
+        c.textContent = g.n === 1 ? '1 question' : g.n + ' questions';
+        h.appendChild(t);
+        h.appendChild(c);
+        feed.insertBefore(h, g.first);
+      });
+    });
+  }
+  knFeed(document);
+
+  // Knowledge › questions: Answer opens a box under the question (⌘↵ saves), and saving shows the
+  // answer in place, without leaving the list.
+  document.addEventListener('click', function (e) {
+    var c = e.target.closest('[data-kn-cancel]');
+    var d = c && c.closest('details');
+    if (!d) return;
+    d.open = false;
+    var f = d.querySelector('form');
+    if (f) f.reset();
+  });
+  document.addEventListener('toggle', function (e) {
+    var d = e.target;
+    if (!d.matches || !d.matches('details[data-kn-reply]') || !d.open) return;
+    var t = d.querySelector('textarea');
+    if (t) { t.focus(); t.setSelectionRange(t.value.length, t.value.length); }
+  }, true);
+  document.addEventListener('keydown', function (e) {
+    if (!(e.metaKey || e.ctrlKey) || e.key !== 'Enter') return;
+    var form = e.target.closest && e.target.closest('form[data-kn-answer]');
+    if (form && form.requestSubmit) { e.preventDefault(); form.requestSubmit(); }
+  });
+  function knCount(which, by) {
+    $$('[data-kn-count="' + which + '"]').forEach(function (b) { b.textContent = String(Math.max(0, Number(b.textContent) + by)); });
+  }
+  function knAnswered(entry, text) {
+    if (!entry) return;
+    var box = entry.querySelector('[data-kn-answer-box]');
+    if (!box) {
+      box = document.createElement('div');
+      box.className = 'kn-fe-answer';
+      box.setAttribute('data-kn-answer-box', '');
+      var foot = entry.querySelector('.kn-fe-foot');
+      foot.parentNode.insertBefore(box, foot);
+    }
+    var p = document.createElement('p');
+    p.textContent = text.trim();
+    var by = document.createElement('span');
+    by.className = 'kn-fe-by';
+    by.textContent = 'From your team · just now';
+    box.replaceChildren(p, by);
+    var chip = entry.querySelector('.kn-chip');
+    if (chip) { chip.className = 'kn-chip is-done'; chip.textContent = 'Answered'; }
+    var d = entry.querySelector('details[data-kn-reply]');
+    var sum = d && d.querySelector('summary');
+    if (d) d.open = false;
+    if (sum) { sum.textContent = 'Edit answer'; sum.classList.remove('primary'); }
+    var was = entry.getAttribute('data-status');
+    if (was !== 'answered') {
+      entry.setAttribute('data-status', 'answered');
+      entry.className = entry.className.replace(/\bis-(team|waiting)\b/, 'is-answered');
+      knCount(was, -1);
+      knCount('answered', 1);
+    }
+  }
+  document.addEventListener('submit', function (e) {
+    var form = e.target;
+    if (!form.hasAttribute || !form.hasAttribute('data-kn-answer')) return;
+    e.preventDefault();
+    var data = new URLSearchParams(new FormData(form));
+    var removing = Boolean(e.submitter && e.submitter.name === 'remove');
+    if (removing) data.set('remove', '1');
+    var buttons = $$('button', form);
+    buttons.forEach(function (b) { b.disabled = true; });
+    fetch(form.action, { method: 'POST', body: data, credentials: 'same-origin', headers: { accept: 'application/json' } })
+      .then(function (res) {
+        return res.json().catch(function () { return {}; }).then(function (body) {
+          if (!res.ok || !body.ok) throw { shown: body.error || (res.status === 403 ? 'You don’t have permission to change this.' : 'Not saved. Reload the page and try again.') };
+          toast(body.message || 'Saved');
+          if (removing) location.reload();
+          else knAnswered(form.closest('.kn-fe'), data.get('answer') || '');
+        });
+      })
+      .catch(function (err) { toast(err && err.shown ? err.shown : 'Not saved. Check your connection and try again.', 'danger'); })
+      .then(function () { buttons.forEach(function (b) { b.disabled = false; }); });
+  });
+
   // ---- Toasts ---------------------------------------------------------------------------------
 
   function dismiss(t) {
@@ -188,7 +301,7 @@
       return;
     }
     form.removeAttribute('data-confirmed');
-    if (form.hasAttribute('data-async')) return;
+    if (form.hasAttribute('data-async') || form.hasAttribute('data-kn-answer')) return;
     var button = e.submitter || form.querySelector('button[type="submit"]');
     if (button && button.classList.contains('btn')) {
       setTimeout(function () {
@@ -396,41 +509,9 @@
       meter.textContent = fmt(text.value.length) + ' / ' + fmt(max) + ' · ' + tokens(text.value.length);
       meter.classList.toggle('near', text.value.length > max * 0.9);
     }
-    // Puts text at the end, leaves the cursor there and tells the dirty check.
-    function append(add) {
-      var v = text.value.replace(/\s+$/, '');
-      text.value = (v ? v + '\n\n' : '') + add;
-      text.focus();
-      text.setSelectionRange(text.value.length, text.value.length);
-      text.scrollTop = text.scrollHeight;
-      text.dispatchEvent(new Event('input', { bubbles: true }));
-    }
     text.addEventListener('input', measure);
-    // Cancel puts everything back: the text and the Answer buttons.
-    editor.addEventListener('reset', function () {
-      setTimeout(function () {
-        measure();
-        $$('[data-kn-add]').forEach(function (b) { b.disabled = false; b.lastChild.textContent = 'Answer'; });
-      }, 0);
-    });
-
-    // "Answer" on one of Claude's questions: adds it to the notes, ready for the answer.
-    var HEADING = '## Answers to Claude’s questions';
-    document.addEventListener('click', function (e) {
-      var b = e.target.closest('[data-kn-add]');
-      if (!b || text.disabled) return;
-      var line = '- ' + b.getAttribute('data-kn-add') + ' ';
-      if (text.value.indexOf(HEADING) === -1) append(HEADING + '\n' + line);
-      else {
-        text.value = text.value.replace(/\s+$/, '') + '\n' + line;
-        text.focus();
-        text.setSelectionRange(text.value.length, text.value.length);
-        text.scrollTop = text.scrollHeight;
-        text.dispatchEvent(new Event('input', { bubbles: true }));
-      }
-      b.disabled = true;
-      b.lastChild.textContent = 'Added';
-    });
+    // Cancel puts the text back.
+    editor.addEventListener('reset', function () { setTimeout(measure, 0); });
 
     // ⌘S / Ctrl+S saves (when there's something to save).
     editor.addEventListener('keydown', function (e) {

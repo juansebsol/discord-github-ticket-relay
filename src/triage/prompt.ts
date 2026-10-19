@@ -170,6 +170,8 @@ export interface AppKnowledgeText {
   name: string;
   written: string;
   notes: string;
+  /** The team's answers to questions Claude asked. */
+  answers?: { question: string; answer: string }[];
   /** Lately merged into its repository (one line each), newest first. */
   changes?: string[];
 }
@@ -181,7 +183,7 @@ export interface AppKnowledgeText {
  * instructions; the team's notes are trusted and win. Empty when there's nothing.
  */
 export function buildKnowledgeBlock(apps: AppKnowledgeText[]): string {
-  const known = apps.filter((a) => a.written.trim() || a.notes.trim() || a.changes?.length);
+  const known = apps.filter((a) => a.written.trim() || a.notes.trim() || a.answers?.length || a.changes?.length);
   if (!known.length) return '';
   // Their headings go under this block's (and under each app's name when there are several).
   const nest = (text: string) => text.trim().replace(/^(#{1,4}) /gm, known.length > 1 ? '$1## ' : '$1# ');
@@ -193,6 +195,7 @@ export function buildKnowledgeBlock(apps: AppKnowledgeText[]): string {
     if (known.length > 1) parts.push('', `### ${a.name}`);
     if (a.written.trim()) parts.push('', `From ${a.name}’s repository and issues (written by Claude from public text; it can be incomplete):`, nest(a.written));
     if (a.notes.trim()) parts.push('', `Notes from ${a.name}’s team (trusted; they win when the two disagree):`, nest(a.notes));
+    if (a.answers?.length) parts.push('', `${a.name}’s team answered questions Claude asked before (trusted, like their notes):`, ...a.answers.map((x) => `- ${x.question.replace(/\s+/g, ' ')}\n  ${x.answer.replace(/\s*\n\s*/g, ' ')}`));
     if (a.changes?.length) parts.push('', `Lately merged into ${a.name}’s repository, newest first (public text; what’s above may not include them yet). A ticket about something one of these fixed may be a regression, or from an older version:`, ...a.changes);
   }
   return parts.join('\n');

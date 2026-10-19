@@ -60,7 +60,7 @@ export function knowledgeHref(ctx: Pick<WorkspaceRequestContext, 'base'>, appId:
  * can open Knowledge (null otherwise).
  */
 export function knowledgeLink(ctx: Pick<WorkspaceRequestContext, 'base' | 'membership'>, appId: string | null | undefined): { href: string; edit: boolean } | null {
-  return appId && canOpen(ctx.membership, 'triage.knowledge') ? { href: `${knowledgeHref(ctx, appId)}#questions`, edit: can(ctx.membership, 'triage.knowledge.edit') } : null;
+  return appId && canOpen(ctx.membership, 'triage.knowledge') ? { href: `${knowledgeHref(ctx, appId)}?tab=all`, edit: can(ctx.membership, 'triage.knowledge.edit') } : null;
 }
 
 /** Whether this person can open a page (its route checks the same). */

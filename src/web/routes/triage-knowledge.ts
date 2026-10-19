@@ -12,6 +12,7 @@ import { UserFacingError, type AppRow } from '../../domain/types.js';
 import { html, raw, type SafeHtml } from '../../lib/html.js';
 import { knowledgePromptFor } from '../../triage/engine.js';
 import {
+  ANSWER_MAX,
   cleanKnowledge,
   getKnowledge,
   isBlank,
@@ -21,11 +22,14 @@ import {
   listKnowledge,
   listQuestions,
   notesOf,
+  questionAnchor,
   questionCounts,
   saveKnowledge,
+  saveTeamAnswer,
   sectionsOf,
   type AppKnowledge,
   type Question,
+  type QuestionSource,
 } from '../../triage/knowledge.js';
 import { splitAnswers, WRITE_ESTIMATE } from '../../triage/knowledge-writer.js';
 import { CHANGE_STEPS, emptyLive, finishRunIfDone, latestRun, LIVE_STEPS, requestWrites, stopWrites, type LiveState, type LiveStep, type LiveTag } from '../../triage/knowledge-runs.js';
@@ -34,7 +38,7 @@ import { formatCost, getTriageSettings, intervalMs, intervalProblem, KNOWLEDGE_U
 import { renderMarkdown } from '../markdown.js';
 import { setFlash } from '../session.js';
 import type { Web, WorkspaceRequestContext } from '../server.js';
-import { avatar, badge, csrfField, empty, formatDate, icon, initials, linkBtn, localTime, notice, pageHeader, pill, plural, postBtn, selectWrap, setting, submitBtn, switchInput, tag, timeAgo } from '../ui.js';
+import { avatar, badge, type BadgeTone, csrfField, empty, formatDate, icon, initials, linkBtn, localTime, notice, pageHeader, pill, plural, postBtn, selectWrap, setting, submitBtn, switchInput, tag, timeAgo } from '../ui.js';
 import { areaHref, canOpen, canOpenIssue, knowledgeHref, pageLink, toolHeader, toolHref } from './tool.js';
 import { viewOnlyFooter } from './triage.js';
 
@@ -57,6 +61,12 @@ function costLine(model: string, count = 1): string {
 const ago = (d: Date) => html`<time datetime="${d.toISOString()}" title="${formatDate(d)}">${timeAgo(d)}</time>`;
 
 const DAY_MS = 86_400_000;
+
+/** The app page's tabs: its TRIAGE.md, then Claude's questions by where they stand. */
+const QUESTION_TABS = ['all', 'team', 'look', 'answered'] as const;
+type Tab = 'triage' | (typeof QUESTION_TABS)[number];
+/** Questions shown at a time in a tab. */
+const FEED_PAGE = 40;
 
 /** Why a change isn't sent to Claude (see noiseOf). */
 const NOISE: Record<string, string> = { Bot: 'Made by a bot, so it isn’t sent to Claude', Chore: 'Dependencies, CI, tests or refactoring, so it isn’t sent to Claude' };
@@ -340,7 +350,9 @@ export function registerTriageKnowledgeRoutes(app: FastifyInstance, web: Web): v
     const a = await getApp(deps.db, wid, (req.params as { appId: string }).appId);
     if (!a) throw new UserFacingError('That app was removed.', 404);
     const [k, apps, settings, key] = await Promise.all([getKnowledge(deps.db, wid, a.id), listApps(deps.db, wid), getTriageSettings(deps.db, wid), resolveApiKey(deps, wid)]);
-    const [{ questions, more }, issues, changeList, sync, changed] = await Promise.all([listQuestions(deps.db, wid, a.id, k), issuesPerRepo(deps.db, [a.repo_id]), appChanges(deps.db, a.id, 15), changeSync(deps.db, a.repo_id), changeCounts(deps.db, wid)]);
+    const [questions, issues, changeList, sync, changed] = await Promise.all([listQuestions(deps.db, wid, a.id, k), issuesPerRepo(deps.db, [a.repo_id]), appChanges(deps.db, a.id, 15), changeSync(deps.db, a.repo_id), changeCounts(deps.db, wid)]);
+    const query = req.query as { tab?: string; sort?: string; show?: string; partial?: string };
+    const tab: Tab = (QUESTION_TABS as readonly string[]).includes(query.tab ?? '') ? (query.tab as Tab) : 'triage';
     const c = settings.config;
     const edit = can(ctx.membership, 'triage.knowledge.edit');
     const s = stateOf(k);
@@ -386,44 +398,117 @@ export function registerTriageKnowledgeRoutes(app: FastifyInstance, web: Web): v
                 : html`<p class="small muted">Someone with Edit on Knowledge can ask Claude to write it.</p>`}
             </div>`}
       ${busy(s) ? '' : raw('<span data-live-reload hidden></span>')}`;
-    if ((req.query as { partial?: string }).partial === '1') {
+    if (query.partial === '1') {
       return reply.header('x-live-partial', '1').header('Cache-Control', 'no-store').type('text/html').send(writtenInner.toString());
     }
 
-    // ---- Claude's questions.
+    // ---- Claude's questions: a feed per tab, each under the ticket it last came from.
     const issuePages = canOpenIssue(ctx.membership);
-    const sourceLink = (x: Question['sources'][number]) => {
-      const label = x.number ? `${x.repoName}#${String(x.number)}` : 'ticket';
-      const title = `${x.kind === 'ticket' ? 'Discord ticket' : 'Opened on GitHub'}${x.title ? `: ${x.title}` : ''}`;
-      if (x.kind === 'ticket') return html`<a href="${ctx.base}/tickets/${x.submissionId!}" title="${title}">${label}</a>`;
-      return issuePages
-        ? html`<a href="${ctx.base}/issues/${String(x.repoId)}/${String(x.number)}" title="${title}">${label}</a>`
-        : html`<a href="https://github.com/${a.repo_owner}/${x.repoName}/issues/${String(x.number)}" target="_blank" rel="noopener noreferrer" title="${title}">${label}</a>`;
+    const ticketHref = (x: QuestionSource) => x.kind === 'ticket'
+      ? `${ctx.base}/tickets/${x.submissionId!}`
+      : issuePages ? `${ctx.base}/issues/${String(x.repoId)}/${String(x.number)}` : `https://github.com/${a.repo_owner}/${x.repoName}/issues/${String(x.number)}`;
+    const external = (x: QuestionSource) => (x.kind === 'issue' && !issuePages ? raw('target="_blank" rel="noopener noreferrer"') : '');
+    const refOf = (x: QuestionSource) => (x.number ? `${x.repoName}#${String(x.number)}` : 'Discord ticket');
+    const byStatus = { all: questions, team: questions.filter((q) => q.status === 'team'), look: questions.filter((q) => q.status === 'waiting'), answered: questions.filter((q) => q.status === 'answered') };
+    const sort = query.sort === 'asked' ? 'asked' : 'new';
+    const tabUrl = (t: Tab, o: { sort?: string; show?: number } = {}) => `${knowledgeHref(ctx, a.id)}${t === 'triage' ? '' : `?tab=${t}${o.sort === 'asked' ? '&sort=asked' : ''}${o.show ? `&show=${String(o.show)}` : ''}`}`;
+    const tabLink = (t: Tab, label: SafeHtml | string, count?: number, tone: BadgeTone = '') =>
+      html`<a class="tab" href="${tabUrl(t, { sort })}" ${t === tab ? raw('aria-current="page"') : ''}>${label}${count === undefined ? '' : html`<span class="badge${tone ? ` ${tone}` : ''}" data-kn-count="${t}">${String(count)}</span>`}</a>`;
+    const tabs = html`<nav class="tabs kn-tabs" aria-label="${a.name}">
+      ${tabLink('triage', html`${icon('file-text', 14)}<span class="mono">TRIAGE.md</span>`)}
+      ${tabLink('all', 'All', byStatus.all.length)}
+      ${tabLink('team', 'Needs your team', byStatus.team.length, byStatus.team.length ? 'accent' : '')}
+      ${tabLink('look', 'Claude will look', byStatus.look.length)}
+      ${tabLink('answered', 'Answered', byStatus.answered.length)}
+    </nav>`;
+
+    const chip = (q: Question) => q.status === 'answered'
+      ? html`<span class="kn-chip is-done">Answered</span>`
+      : q.status === 'team' ? html`<span class="kn-chip is-team">Needs your team</span>` : html`<span class="kn-chip is-look">Claude will look</span>`;
+    const answerBox = (q: Question, id: string) => {
+      if (!edit || (q.status === 'answered' && q.by !== 'team')) return '';
+      const mine = q.by === 'team';
+      return html`<details class="kn-fe-reply" data-kn-reply>
+        <summary class="btn sm${mine ? '' : ' primary'}">${mine ? 'Edit answer' : 'Answer'}</summary>
+        <form method="post" action="${knowledgeHref(ctx, a.id)}/answer" class="kn-fe-form" data-kn-answer>
+          ${csrfField(ctx.csrf)}<input type="hidden" name="question" value="${q.text}"><input type="hidden" name="tab" value="${tab}"><input type="hidden" name="sort" value="${sort}">
+          <label class="sr-only" for="a-${id}">Your answer</label>
+          <textarea id="a-${id}" name="answer" rows="3" maxlength="${String(ANSWER_MAX)}" required placeholder="Write it as a fact about ${a.name}. Members never see it.">${mine ? q.answer ?? '' : ''}</textarea>
+          <div class="kn-fe-actions">
+            <span class="small muted">Claude reads it with every ${a.name} ticket from the next one on.</span>
+            ${mine ? raw('<button type="submit" class="btn sm ghost" name="remove" value="1" formnovalidate>Remove</button>') : ''}
+            <button type="button" class="btn sm js-only" data-kn-cancel>Cancel</button>
+            ${submitBtn('Save answer', { variant: 'primary', size: 'sm', loading: 'Saving…' })}
+          </div>
+        </form>
+      </details>`;
     };
-    const question = (q: Question) => html`<li class="kn-q${q.fresh ? ' fresh' : ''}">
-      <p class="kn-q-text">${q.text}</p>
-      ${q.answer ? html`<div class="kn-q-answer">${icon('check', 12)}<div>${renderMarkdown(q.answer, repoUrl)}</div></div>` : ''}
-      <div class="kn-q-meta">
-        ${q.fresh ? html`<span class="kn-q-new">New</span>` : ''}
-        <span>${q.sources.length > 1 ? `Asked ${String(q.sources.length)} times · ` : ''}${ago(q.at)}</span>
-        <span class="kn-q-src">${q.sources.slice(0, 3).map((x, j) => html`${j ? ', ' : ''}${sourceLink(x)}`)}${q.sources.length > 3 ? html` <span class="muted">+${String(q.sources.length - 3)}</span>` : ''}</span>
-        ${edit && !q.answer ? html`<button type="button" class="link-btn kn-q-add js-only" data-kn-add="${q.text}" title="Add this question to your team’s notes, ready for the answer">${icon('corner-down-left', 12)}Answer</button>` : ''}
-      </div>
-    </li>`;
-    const team = questions.filter((q) => q.status === 'team');
-    const waiting = questions.filter((q) => q.status === 'waiting');
-    const answered = questions.filter((q) => q.status === 'answered');
-    const fresh = questions.filter((q) => q.fresh).length;
-    const group = (title: string, desc: string, list: Question[]) => html`<div class="kn-qg"><div class="kn-qg-h"><span class="t">${title}<span class="muted"> · ${String(list.length)}</span></span><span class="d">${desc}</span></div><ul class="kn-qs">${list.map(question)}</ul></div>`;
-    const questionsCard = html`<section class="card" id="questions" aria-labelledby="kn-q-h">
-      <div class="card-h"><div><div class="title"><h2 id="kn-q-h">Questions from Claude</h2>${fresh ? badge(fresh, 'accent') : ''}</div><div class="desc">Asked while triaging ${a.name} tickets, when a fact about the app would have made Claude surer.</div></div></div>
-      ${team.length ? group('Needs your team', 'Not in the repository or the issues. Answer in your notes and later tickets use it.', team) : ''}
-      ${waiting.length ? group('Claude will look', isWritten(k) ? 'Asked since it last wrote the TRIAGE.md: it looks for the answers next time.' : 'It looks for the answers when it writes the TRIAGE.md.', waiting) : ''}
-      ${answered.length ? html`<details class="kn-qg kn-answered"><summary>${icon('chevron-right', 14, 'chev')}Answered by Claude<span class="muted"> · ${String(answered.length)}</span></summary><ul class="kn-qs">${answered.map(question)}</ul></details>` : ''}
-      ${questions.length
-        ? more ? html`<div class="card-note">${plural(more, 'older question')} not shown.</div>` : ''
-        : html`<div class="card-b tight"><p class="small muted">No questions yet. When Claude isn’t sure about something it can’t find in a ticket, its question shows up here with the tickets it came from.</p></div>`}
-    </section>`;
+    const entry = (q: Question) => {
+      const src = q.sources[0]!;
+      const others = q.sources.slice(1);
+      const id = questionAnchor(q.text);
+      const who = src.who?.trim() || (src.kind === 'ticket' ? 'A member' : 'Someone');
+      return html`<article class="kn-fe is-${q.status}" id="${id}" data-at="${q.at.toISOString()}" data-status="${q.status === 'waiting' ? 'look' : q.status === 'team' ? 'team' : 'answered'}">
+        <div class="kn-fe-when">${sort === 'asked'
+          ? html`<span class="kn-fe-n" title="Tickets that asked it">${String(q.sources.length)}×</span>`
+          : html`<time datetime="${q.at.toISOString()}" data-local-time title="${formatDate(q.at)}">${formatDate(q.at).slice(11, 16)}</time>`}</div>
+        <div class="kn-fe-card">
+          <div class="kn-fe-ticket">
+            <div class="kn-fe-who">${avatar(who, 24)}<span class="t"><strong>${who}</strong> ${src.kind === 'ticket' ? 'opened' : 'opened on GitHub'} <a href="${ticketHref(src)}" ${external(src)}>${src.title || refOf(src)}</a></span><span class="kn-fe-ref mono">${refOf(src)}</span></div>
+            ${src.excerpt ? html`<p class="kn-fe-quote">${src.excerpt}</p>` : ''}
+          </div>
+          <div class="kn-fe-q">
+            <span class="kn-fe-label">${icon('sparkles', 14)}Claude wasn’t sure</span>
+            <p class="kn-fe-text">${q.text}</p>
+            ${q.answer ? html`<div class="kn-fe-answer" data-kn-answer-box><div class="kn-doc">${renderMarkdown(q.answer, repoUrl)}</div><span class="kn-fe-by">${q.by === 'team' && q.team ? html`From your team${q.team.byName ? ` · ${q.team.byName}` : ''} · ${localTime(new Date(q.team.at))}` : 'Found by Claude in the repository and the issues'}</span></div>` : ''}
+            <div class="kn-fe-foot">
+              ${chip(q)}
+              ${others.length
+                ? html`<details class="kn-fe-more"><summary>Also asked in ${plural(others.length, 'other ticket')}</summary><ul>${others.slice(0, 30).map((x) => html`<li><a href="${ticketHref(x)}" ${external(x)}>${x.title || refOf(x)}</a><span class="muted"> · ${refOf(x)}${x.who ? ` · ${x.who}` : ''} · ${ago(x.at)}</span></li>`)}${others.length > 30 ? html`<li class="muted">and ${plural(others.length - 30, 'more')}</li>` : ''}</ul></details>`
+                : html`<span class="kn-fe-once">Asked once</span>`}
+              ${answerBox(q, id)}
+            </div>
+          </div>
+        </div>
+      </article>`;
+    };
+    const lookWhen = look && !look.soon ? ` ${look.next}` : look ? ' now' : '';
+    const FEED: Record<Exclude<Tab, 'triage'>, { desc: string; emptyTitle: string; emptyText: string }> = {
+      all: { desc: `Every question Claude asked while triaging ${a.name} tickets, under the ticket it last came from.`, emptyTitle: 'No questions yet', emptyText: 'When Claude isn’t sure about something it can’t find in a ticket, its question shows up here with the ticket it came from.' },
+      team: { desc: `Claude looked in the repository and the issues and didn’t find these, so only your team knows. Your answer goes to Claude with every ${a.name} ticket.`, emptyTitle: 'Nothing needs your team', emptyText: 'Claude found what it looked for, or your team answered it.' },
+      look: { desc: `Asked since Claude last rewrote the TRIAGE.md. It looks for the answers in the repository at its next update${lookWhen}. You can answer them now too.`, emptyTitle: 'Nothing waiting', emptyText: 'Claude has looked for every question so far.' },
+      answered: { desc: 'Answered by your team, or found by Claude in the repository and the issues. Claude uses these with every ticket.', emptyTitle: 'Nothing answered yet', emptyText: 'Answers from your team and from the repository show up here.' },
+    };
+    let feed: SafeHtml | '' = '';
+    if (tab !== 'triage') {
+      const list = [...byStatus[tab]].sort(sort === 'asked'
+        ? (x, y) => y.sources.length - x.sources.length || y.at.getTime() - x.at.getTime()
+        : (x, y) => y.at.getTime() - x.at.getTime());
+      const show = Math.min(Math.max(Number(query.show) || FEED_PAGE, FEED_PAGE), 5000);
+      const shown = list.slice(0, show);
+      feed = html`<section class="kn-feed-wrap" aria-label="Questions">
+        <div class="kn-feed-h">
+          <p>${FEED[tab].desc}</p>
+          ${list.length > 1 ? html`<div class="kn-sort" role="group" aria-label="Order">
+            <a href="${tabUrl(tab)}" ${sort === 'new' ? raw('aria-current="true"') : ''}>Newest</a>
+            <a href="${tabUrl(tab, { sort: 'asked' })}" ${sort === 'asked' ? raw('aria-current="true"') : ''}>Most asked</a>
+          </div>` : ''}
+        </div>
+        ${list.length
+          ? html`<div class="kn-feed" data-kn-feed ${sort === 'new' ? raw('data-days') : ''}>${shown.map(entry)}</div>
+            ${list.length > shown.length ? html`<div class="kn-feed-more"><a class="btn" href="${tabUrl(tab, { sort, show: show + FEED_PAGE })}">Show ${plural(Math.min(FEED_PAGE, list.length - shown.length), 'more question')}</a><span class="small muted">${n(shown.length)} of ${n(list.length)}</span></div>` : ''}`
+          : html`<div class="card">${empty('lightbulb', FEED[tab].emptyTitle, FEED[tab].emptyText)}</div>`}
+      </section>`;
+    }
+
+    // ---- The team's answers, on the TRIAGE.md tab (Claude reads them like the notes).
+    const teamAnswers = k?.team_answers ?? [];
+    const answersCard = teamAnswers.length
+      ? html`<section class="card" id="team-answers" aria-labelledby="kn-ta-h">
+          <div class="card-h"><div><div class="title"><h2 id="kn-ta-h">Your team’s answers</h2>${badge(teamAnswers.length)}</div><div class="desc">To questions Claude asked. Claude reads them with every ticket, like your notes.</div></div>${linkBtn(tabUrl('answered'), 'See them in Answered', { size: 'sm' })}</div>
+          <ul class="kn-ta">${teamAnswers.map((x) => html`<li><p class="q">${x.question}</p><div class="kn-doc">${renderMarkdown(x.answer, repoUrl)}</div><span class="small muted">${x.byName ? `${x.byName} · ` : ''}${localTime(new Date(x.at))}</span></li>`)}</ul>
+        </section>`
+      : '';
 
     // ---- What Claude read.
     const src = k?.auto_sources;
@@ -509,16 +594,20 @@ export function registerTriageKnowledgeRoutes(app: FastifyInstance, web: Web): v
           next ? linkBtn(knowledgeHref(ctx, next.id), next.name, { trail: 'chevron-right', variant: 'ghost', size: 'sm' }) : null,
         ],
       })}
-      <div class="panel-grid kn-layout">
-        <div class="stack">
-          <section class="card kn-written" id="written" aria-labelledby="kn-w-h">
-            <div class="card-h"><div><div class="title">${icon('sparkles', 16)}<h2 id="kn-w-h">Written by Claude</h2>${statePill}</div><div class="desc">From the repository and its issues, open and closed. Corrections go in your notes below: Claude rewrites this part each time.</div></div>${isWritten(k) && !busy(s) && s !== 'failed' ? writeBtn('Update now', false) : ''}</div>
-            ${busy(s) ? html`<div data-live="4000" data-live-src="${knowledgeHref(ctx, a.id)}?partial=1">${writtenInner}</div>` : writtenInner}
-          </section>
-          ${notesCard}
-        </div>
-        <div class="stack kn-side">${questionsCard}${changesCard}${sourcesCard}</div>
-      </div>`;
+      ${tabs}
+      ${tab === 'triage'
+        ? html`<div class="panel-grid kn-layout">
+            <div class="stack">
+              <section class="card kn-written" id="written" aria-labelledby="kn-w-h">
+                <div class="card-h"><div><div class="title">${icon('sparkles', 16)}<h2 id="kn-w-h">Written by Claude</h2>${statePill}</div><div class="desc">From the repository and its issues, open and closed. Corrections go in your notes below: Claude rewrites this part each time.</div></div>${isWritten(k) && !busy(s) && s !== 'failed' ? writeBtn('Update now', false) : ''}</div>
+                ${busy(s) ? html`<div data-live="4000" data-live-src="${knowledgeHref(ctx, a.id)}?partial=1">${writtenInner}</div>` : writtenInner}
+              </section>
+              ${notesCard}
+              ${answersCard}
+            </div>
+            <div class="stack kn-side">${changesCard}${sourcesCard}</div>
+          </div>`
+        : feed}`;
     return web.render(reply, ctx, `${a.name} · Knowledge · AI triage`, 'triage', pageBody, { width: 'full' });
   });
 
@@ -755,5 +844,24 @@ export function registerTriageKnowledgeRoutes(app: FastifyInstance, web: Web): v
       setFlash(reply, 'error', err.message);
     }
     return reply.redirect(`${knowledgeHref(ctx, a.id)}#notes`);
+  });
+
+  // The team's answer to one of Claude's questions (or taking it out).
+  app.post('/w/:wid/triage/knowledge/:appId/answer', async (req, reply) => {
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'triage.knowledge.edit' });
+    if (!ctx) return reply;
+    const a = await getApp(deps.db, ctx.workspace.id, (req.params as { appId: string }).appId);
+    if (!a) throw new UserFacingError('That app was removed.', 404);
+    const f = (req.body ?? {}) as { question?: string; answer?: string; remove?: string; tab?: string; sort?: string };
+    const remove = Boolean(f.remove);
+    const answer = remove ? '' : String(f.answer ?? '');
+    const error = !remove && !answer.trim()
+      ? 'Write the answer first.'
+      : await saveTeamAnswer(deps.db, ctx.workspace.id, a.id, String(f.question ?? ''), answer, { id: ctx.user.id, name: ctx.user.display_name ?? ctx.user.username });
+    const message = error ?? (remove ? 'Answer taken out. Claude no longer gets it with tickets.' : `Saved. Claude uses it from the next ${a.name} ticket.`);
+    if (web.wantsJson(req)) return reply.code(error ? 400 : 200).send(error ? { ok: false, error } : { ok: true, message });
+    setFlash(reply, error ? 'error' : 'success', message);
+    const tab = (QUESTION_TABS as readonly string[]).includes(f.tab ?? '') ? f.tab! : 'team';
+    return reply.redirect(`${knowledgeHref(ctx, a.id)}?tab=${tab}${f.sort === 'asked' ? '&sort=asked' : ''}`);
   });
 }
