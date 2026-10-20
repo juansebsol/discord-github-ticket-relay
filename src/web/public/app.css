@@ -1710,6 +1710,33 @@ a.rs-score:hover { box-shadow: 0 0 0 1px var(--border-hover); text-decoration: n
 .rs-why { padding: 0 6px; border-radius: var(--r-xs); font-size: 11px; line-height: 18px; color: var(--muted); background: var(--surface-2); border: 1px solid var(--border); }
 .rs-fx.critical .rs-why:first-child { color: var(--danger-text); background: var(--danger-soft); border-color: var(--danger-border); }
 .rs-fix-note { margin: 12px 2px 0; max-width: 900px; }
+/* Most reported */
+.rs-rp-filters { display: flex; align-items: center; justify-content: space-between; gap: 8px 12px; flex-wrap: wrap; }
+.rs-rp-filters .seg:last-child { margin-left: auto; }
+.rs-count { display: flex; flex-direction: column; align-items: center; min-width: 44px; padding-top: 1px; font: 500 10px/14px var(--font); letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+.rs-count b { font: 600 18px/22px var(--font); letter-spacing: 0; text-transform: none; color: var(--text); font-variant-numeric: tabular-nums; }
+.rs-rp-h { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.rs-rp-h .pill { flex: none; }
+.rs-why.sug { color: var(--accent-text); background: var(--accent-soft); border-color: var(--info-border); }
+.rs-why.warn { color: var(--warn-text); background: var(--warn-soft); border-color: var(--warn-border); }
+a.rs-why { text-decoration: none; }
+a.rs-why:hover { border-color: currentColor; }
+.rs-rp-d { margin-top: 6px; }
+.rs-rp-d > summary { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--accent-text); cursor: pointer; list-style: none; border-radius: var(--r-xs); }
+.rs-rp-d > summary::-webkit-details-marker { display: none; }
+.rs-rp-d > summary::before { content: ""; width: 0; height: 0; border-left: 4px solid currentColor; border-top: 4px solid transparent; border-bottom: 4px solid transparent; transition: transform var(--t-fast) var(--ease); }
+.rs-rp-d[open] > summary::before { transform: rotate(90deg); }
+.rs-rp-d > summary:hover { text-decoration: underline; }
+.rs-rp-d > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.rs-rp-list { list-style: none; margin: 8px 0 0; padding: 0; border-left: 2px solid var(--border); }
+.rs-rp-list li { display: flex; align-items: baseline; gap: 4px 10px; flex-wrap: wrap; padding: 4px 0 4px 12px; font-size: 13px; }
+.rs-rp-list li a { color: var(--text); }
+.rs-rp-list li a:hover { text-decoration: underline; }
+.rs-rp-list li .muted { font-size: 12px; }
+.rs-once { margin-top: 16px; }
+.rs-once > summary { display: inline-flex; align-items: center; gap: 6px; margin-bottom: 8px; font-weight: 500; font-size: 13px; color: var(--muted); cursor: pointer; }
+.rs-once > summary:hover { color: var(--text); }
+.rs-once > summary .n { padding: 0 6px; border-radius: var(--r-full); background: var(--surface-2); font-size: 12px; font-variant-numeric: tabular-nums; }
 /* Settings: the repository list */
 .rs-pick { list-style: none; margin: 0; padding: 4px 0; max-height: 440px; overflow-y: auto; }
 .rs-pick li { padding: 6px 20px; border-top: 1px solid var(--border); }
@@ -1719,6 +1746,7 @@ a.rs-score:hover { box-shadow: 0 0 0 1px var(--border-hover); text-decoration: n
 .rs-pick .tag + .tag { margin-left: 0; }
 @media (max-width: 720px) {
   .rs-fresh { margin-left: 0; width: 100%; }
+  .rs-rp-filters .seg:last-child { margin-left: 0; }
   .rs-table .rs-repo { min-width: 140px; }
 }
 .rs-err-text { color: var(--warn-text); }

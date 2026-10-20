@@ -97,6 +97,11 @@ Discord endpoint, OAuth), one or more queue workers, and an optional triage work
   from storytold/craft-repo-status-app): critical phrases +40, broken +15, a bug label +15, a
   user's report +10, reactions and comments up to +40, naming the latest build +10, fresh +8/+4, a
   request or docs −25, untouched for 30 days −5; a repository's urgency is its top five summed.
+  Most reported (`src/repo-status/reports.ts`) reads only the database: each Discord ticket of the
+  workspace that filed an issue counts for that issue, or for the original it copies (a duplicate
+  triage applied, or `issue_index.duplicate_of`, followed up to five hops); a duplicate Claude
+  suggested and nobody reviewed counts too, marked as suggested; spam doesn't count. Issues opened
+  directly on GitHub as duplicates are counted apart.
 - **No Discord gateway.** The bot is driven entirely by Discord's HTTP interactions endpoint and
   REST API. It needs no privileged intents and no slash-command registration.
 - **GitHub App auth.** Short-lived installation tokens are minted from the app's private key

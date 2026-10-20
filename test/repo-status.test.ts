@@ -3,6 +3,9 @@ import { majorMinor, mentionsVersion, rankIssues, scoreIssue, summarizeReleases,
 import { getStatusSettings, statusRepos, statusRows } from '../src/repo-status/tracker.js';
 import { form, get, grant, makeAdmin, makeApp, makeWorkspace, resetDb, testDb, type Admin, type ConfiguredWorkspace, type TestEnv } from './helpers.js';
 import { createInvite } from '../src/domain/workspaces.js';
+import { IssueIndexer, setDuplicateOf } from '../src/domain/issue-index.js';
+import { acceptSubmission } from '../src/domain/submissions.js';
+import { mostReported, periodStart } from '../src/repo-status/reports.js';
 
 const NOW = new Date('2026-10-20T12:00:00Z');
 const hoursAgo = (h: number, from = Date.now()) => new Date(from - h * 3_600_000).toISOString();
@@ -293,5 +296,101 @@ describe('Repo status: the page', () => {
     expect((await post('/repos/refresh', {}, mod)).statusCode).toBe(403);
     await grant(env, wid(), mod.user.id, { 'repo-status': 'edit' });
     expect((await page('/repos/settings', mod)).statusCode).toBe(200);
+  });
+});
+
+describe('Repo status: Most reported', () => {
+  let k = 0;
+  /** A Discord ticket for the first app, filed as an issue. */
+  async function ticket(title: string, o: { reporter?: string; daysAgo?: number } = {}) {
+    k++;
+    const who = o.reporter ?? `m${k}`;
+    const r = await acceptSubmission(env.deps, {
+      workspace: ws.workspace, app: ws.apps[0]!, installationId: ws.installationId, source: 'discord', interactionId: `int-rp${k}`, interactionToken: null,
+      guildId: ws.guildId, guildName: 'G', channelId: ws.channelId, reporter: { id: who, displayName: `Member ${who}`, username: who },
+      title, description: `It happens every time (${k}).`, ticketType: null,
+    });
+    if (r.kind !== 'accepted') throw new Error(r.kind);
+    await env.worker.drain();
+    const row = (await env.db.query('SELECT id, issue_number FROM submissions WHERE id = $1', [r.submission.id])).rows[0] as { id: string; issue_number: number };
+    if (o.daysAgo) await env.db.query('UPDATE submissions SET created_at = $2 WHERE id = $1', [row.id, new Date(Date.now() - o.daysAgo * 86_400_000)]);
+    return row;
+  }
+  const sync = async () => {
+    await env.db.query('UPDATE issue_index_repos SET sync_requested_at = now_ms()');
+    await new IssueIndexer(env.deps).tick();
+  };
+  const triaged = (id: string, o: { applied?: unknown[]; suggestions?: unknown[] }) => env.db.query(
+    `INSERT INTO triage_results (submission_id, workspace_id, status, applied_actions, suggestions, suggestion_count) VALUES ($1, $2, 'done', $3, $4, $5)
+     ON CONFLICT (submission_id) DO UPDATE SET applied_actions = excluded.applied_actions, suggestions = excluded.suggestions, suggestion_count = excluded.suggestion_count`,
+    [id, wid(), o.applied ?? [], o.suggestions ?? [], (o.suggestions ?? []).length],
+  );
+  const dup = (duplicateOf: number) => ({ kind: 'duplicate', label: 'duplicate', close: false, confidence: 90, duplicateOf });
+  const list = async (days: number | null = 30) => mostReported(env.db, env.deps.box, wid(), [{ id: repo(0).id, owner: repo(0).owner, name: repo(0).name }], days === null ? null : periodStart(days === 7 ? '7d' : days === 90 ? '90d' : '30d'));
+
+  it('ranks issues by the tickets about them, duplicates counted for their original', async () => {
+    const a = await ticket('Export crashes the app', { reporter: 'ana' });
+    const b = await ticket('Crash when exporting');
+    const c = await ticket('App closes on export');
+    const f = await ticket('Export still crashes for me', { reporter: 'ana' });
+    const d = await ticket('Ruler shows the wrong units');
+    const spam = await ticket('Cheap followers here');
+    repo(0).issues.push({ number: 900, title: 'Export crash on Windows', body: '', labels: [], created_at: new Date().toISOString(), user: 'someone' });
+    await sync();
+    // b is marked as a duplicate of a on GitHub; c was applied by triage as a duplicate of b (so of a);
+    // f is only a suggestion so far; #900 was opened on GitHub as a duplicate; the spam doesn't count.
+    await setDuplicateOf(env.db, repo(0).id, b.issue_number, a.issue_number);
+    await triaged(c.id, { applied: [dup(b.issue_number)] });
+    await triaged(f.id, { suggestions: [dup(a.issue_number)] });
+    await setDuplicateOf(env.db, repo(0).id, 900, a.issue_number);
+    await triaged(spam.id, { applied: [{ kind: 'spam', label: 'spam', close: true, confidence: 95 }, dup(a.issue_number)] });
+
+    const got = await list();
+    expect(got[0]).toMatchObject({ number: a.issue_number, title: expect.stringContaining('Export crashes the app'), state: 'open', confirmed: 3, suggested: 1, people: 3, github: 1 });
+    expect(got[0]!.reports.map((r) => r.id).sort()).toEqual([a.id, b.id, c.id, f.id].sort());
+    expect(got.find((x) => x.number === d.issue_number)!.reports).toHaveLength(1);
+    expect(got.some((x) => x.number === spam.issue_number)).toBe(false);
+
+    await turnOn();
+    const body = (await page('/repos?view=reported')).body;
+    expect(body).toMatch(/aria-current="true"[^>]*>Most reported<span class="n">1<\/span>/);
+    expect(body).toContain('See the 4 tickets');
+    expect(body).toContain('1 waiting for review');
+    expect(body).toContain('1 issue opened on GitHub');
+    expect(body).toContain(`via #${b.issue_number}`);
+    expect(body).toContain('Suggested, not reviewed');
+    expect(body).toContain(`href="${w()}/tickets/${f.id}"`);
+    expect(body).toContain('Reported once <span class="n">1</span>');
+    // The other tabs count it too, and the live refresh keeps the tab.
+    expect((await page('/repos')).body).toMatch(/Most reported<span class="n">1<\/span>/);
+    expect((await page('/repos?view=reported')).body).toContain('data-live-src="' + `${w()}/repos?partial=1&amp;view=reported"`);
+  });
+
+  it('counts the period picked, and says when it was reported again after being fixed', async () => {
+    const a = await ticket('Brush lags on large canvases', { daysAgo: 40 });
+    const b = await ticket('Brushes are slow on big files');
+    await sync();
+    await setDuplicateOf(env.db, repo(0).id, b.issue_number, a.issue_number);
+    const original = repo(0).issues.find((i) => i.number === a.issue_number)!;
+    Object.assign(original, { state: 'closed', state_reason: 'completed', closed_at: new Date(Date.now() - 10 * 86_400_000).toISOString(), updated_at: new Date().toISOString() });
+    await sync();
+
+    expect((await list(30))[0]).toMatchObject({ number: a.issue_number, confirmed: 1, afterClosed: 1, state: 'closed' });
+    expect((await list(null))[0]).toMatchObject({ number: a.issue_number, confirmed: 2, afterClosed: 1 });
+    await turnOn();
+    const recent = (await page('/repos?view=reported')).body;
+    expect(recent).toContain('No issue was reported more than once');
+    expect(recent).toContain('1 report since it was closed');
+    const all = (await page('/repos?view=reported&period=all')).body;
+    expect(all).toContain('See the 2 tickets');
+    expect(all).toContain('>Closed</span>');
+  });
+
+  it('shows only this workspace’s tickets, and nothing when no ticket came in', async () => {
+    await turnOn();
+    expect((await page('/repos?view=reported')).body).toContain('No reports yet');
+    await ticket('Export crashes the app');
+    const other = await makeWorkspace(env);
+    expect(await mostReported(env.db, env.deps.box, other.workspace.id, [{ id: repo(0).id, owner: repo(0).owner, name: repo(0).name }], null)).toEqual([]);
   });
 });

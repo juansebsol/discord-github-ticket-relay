@@ -1277,7 +1277,10 @@
           return res.text();
         })
         .then(function (markup) {
+          // Sections someone opened stay open.
+          var open = $$('details[open][id]', box).map(function (d) { return d.id; });
           box.innerHTML = markup;
+          open.forEach(function (id) { var d = document.getElementById(id); if (d && box.contains(d)) d.open = true; });
           localTimes(box);
           document.dispatchEvent(new CustomEvent('tr:live-updated', { detail: box }));
           last = Date.now();
