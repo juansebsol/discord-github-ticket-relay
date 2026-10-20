@@ -1623,3 +1623,102 @@ textarea.kn-text:focus { border-color: var(--border); box-shadow: inset 0 0 0 2p
 @media (max-width: 720px) {
   .kn-pill-wrap { right: 16px; bottom: calc(16px + env(safe-area-inset-bottom, 0px) + var(--dock-space, 0px)); }
 }
+
+/* ---- Repo status --------------------------------------------------------------------------- */
+.rs-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+.rs-fresh { display: inline-flex; align-items: center; gap: 8px; margin-left: auto; }
+.rs-err { margin-bottom: 12px; }
+.rs-card { overflow: hidden; }
+.rs-scroll { overflow-x: auto; }
+.rs-table { font-size: 13px; }
+.rs-table th, .rs-table td { padding: 0 8px; height: 40px; }
+.rs-table th:first-child, .rs-table td:first-child { padding-left: 16px; padding-right: 20px; }
+.rs-table th:last-child, .rs-table td:last-child { padding-right: 16px; }
+.rs-table td { border-top: 1px solid var(--border); }
+.rs-table .rs-l { border-left: 1px solid var(--border); }
+/* Group labels: Fix first, Open, Latest, the activity window, Builds */
+.rs-groups th { height: 32px; font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--faint); border-bottom: 0; }
+.rs-groups .rs-window { padding-top: 2px; padding-bottom: 2px; }
+.rs-window-pick .select select { height: 24px; font: 600 11px/16px var(--font); letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); background: transparent; border-color: transparent; padding-left: 6px; margin-left: -6px; }
+.rs-window-pick .select select:hover { border-color: var(--border-strong); background: var(--input-bg); }
+.rs-cols th { height: 32px; }
+.rs-cols th.num { padding-left: 16px; }
+.rs-cols th button { all: unset; position: relative; display: inline-block; cursor: pointer; color: inherit; border-radius: var(--r-xs); }
+.rs-cols th button:hover { color: var(--text); }
+.rs-cols th button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* The arrow floats beside the label (before it in number columns), so it takes no room. */
+.rs-arrow { position: absolute; top: 50%; margin-top: -6px; left: calc(100% + 2px); opacity: 0; transition: transform var(--t-fast) var(--ease); }
+.rs-cols th.num .rs-arrow { left: auto; right: calc(100% + 2px); }
+.rs-cols th[aria-sort="descending"], .rs-cols th[aria-sort="ascending"] { color: var(--text); }
+.rs-cols th[aria-sort="descending"] .rs-arrow, .rs-cols th[aria-sort="ascending"] .rs-arrow { opacity: 1; }
+.rs-cols th[aria-sort="ascending"] .rs-arrow { transform: rotate(180deg); }
+.rs-cols th button:hover .rs-arrow { opacity: 0.5; }
+.rs-cols th[aria-sort="descending"] button:hover .rs-arrow, .rs-cols th[aria-sort="ascending"] button:hover .rs-arrow { opacity: 1; }
+/* The repository column stays put while the rest scrolls sideways. */
+.rs-table .rs-repo { position: sticky; left: 0; z-index: 1; min-width: 148px; background: var(--surface); border-right: 1px solid var(--border); text-align: left; }
+.rs-table thead .rs-repo { background: var(--surface-2); }
+.rs-table tbody th.rs-repo { font: 500 13px/20px var(--font); color: var(--text); border-top: 1px solid var(--border); white-space: nowrap; }
+.rs-table tbody tr:first-child th.rs-repo, .rs-table tbody tr:first-child td { border-top: 0; }
+.rs-table tbody th.rs-repo > * { vertical-align: middle; }
+.rs-table tbody th.rs-repo a { color: var(--text); margin-left: 8px; }
+.rs-table tbody th.rs-repo a:hover { text-decoration: underline; }
+.rs-table tbody tr:hover td, .rs-table tbody tr:hover th.rs-repo { background: var(--surface-2); }
+.rs-icon { width: 20px; height: 20px; border-radius: var(--r-xs); object-fit: cover; }
+.rs-dot { display: inline-block; width: 6px; height: 6px; margin-right: 8px; border-radius: var(--r-full); background: var(--border-strong); }
+.rs-dot.ok { background: var(--ok); }
+.rs-dot.stale { background: var(--warn); }
+.rs-dot.failed { background: var(--danger); }
+.rs-table td.num { color: var(--text); font-size: 13px; }
+.rs-table td.zero, .rs-table td.muted { color: var(--faint); }
+.rs-table tr.is-stale td { opacity: 0.72; }
+a.rs-n { color: inherit; text-decoration: none; border-radius: var(--r-xs); padding: 2px 4px; margin: -2px -4px; }
+a.rs-n:hover { background: var(--accent-soft); color: var(--accent-text); }
+.rs-crit.has { color: var(--danger-text) !important; font-weight: 600; }
+.rs-build { white-space: nowrap; }
+.rs-build a { font-family: var(--mono); font-size: 12px; color: var(--text); }
+.rs-build a:hover { text-decoration: underline; }
+.rs-pre { display: inline-block; padding: 0 4px; border-radius: var(--r-xs); font: 600 10px/16px var(--font); letter-spacing: 0.04em; color: var(--warn-text); background: var(--warn-soft); }
+.rs-wait { color: var(--muted); font-size: 13px; }
+/* Urgency: how it compares with the most urgent repository (u4) */
+.rs-score { display: inline-block; min-width: 32px; padding: 1px 6px; border-radius: var(--r-full); font: 600 12px/18px var(--font); font-variant-numeric: tabular-nums; text-align: center; color: var(--muted); background: var(--surface-2); text-decoration: none; }
+a.rs-score:hover { box-shadow: 0 0 0 1px var(--border-hover); text-decoration: none; }
+.rs-score.u1 { color: var(--text); background: var(--surface-3); }
+.rs-score.u2 { color: var(--warn-text); background: var(--warn-soft); }
+.rs-score.u3 { color: var(--danger-text); background: var(--danger-soft); }
+.rs-score.u4 { color: var(--on-accent); background: var(--danger-fill); }
+.rs-table tfoot th, .rs-table tfoot td { height: 40px; background: var(--surface-2); border-top: 1px solid var(--border-strong); font-weight: 600; color: var(--text); }
+.rs-table tfoot th.rs-repo { background: var(--surface-2); font: 600 12px/16px var(--font); color: var(--muted); }
+.rs-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 10px 16px; border-top: 1px solid var(--border); font-size: 12px; color: var(--muted); }
+/* Off */
+.rs-off .card-b { max-width: 680px; display: flex; flex-direction: column; gap: 10px; padding: 24px; }
+.rs-off h2 { margin: 0; font-size: 16px; }
+.rs-off p { margin: 0; }
+.rs-off .row { margin-top: 6px; }
+/* Fix first */
+.rs-fix-h { margin-bottom: 12px; }
+.rs-fxs { list-style: none; margin: 0; padding: 0; background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); overflow: hidden; }
+.rs-fx { display: grid; grid-template-columns: 44px minmax(0, 1fr); gap: 12px; align-items: start; padding: 12px 16px; border-top: 1px solid var(--border); }
+.rs-fx:first-child { border-top: 0; }
+.rs-fx:hover { background: var(--surface-2); }
+.rs-fx .rs-score { margin-top: 1px; }
+.rs-fx-t { display: inline-flex; align-items: baseline; gap: 6px; font-weight: 500; color: var(--text); line-height: 20px; }
+.rs-fx-t:hover { text-decoration: underline; }
+.rs-flame { color: var(--danger); align-self: center; flex: none; }
+.rs-fx-m { margin-top: 2px; font-size: 12px; color: var(--muted); }
+.rs-fx-why { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.rs-fx-why:empty { display: none; }
+.rs-why { padding: 0 6px; border-radius: var(--r-xs); font-size: 11px; line-height: 18px; color: var(--muted); background: var(--surface-2); border: 1px solid var(--border); }
+.rs-fx.critical .rs-why:first-child { color: var(--danger-text); background: var(--danger-soft); border-color: var(--danger-border); }
+.rs-fix-note { margin: 12px 2px 0; max-width: 900px; }
+/* Settings: the repository list */
+.rs-pick { list-style: none; margin: 0; padding: 4px 0; max-height: 440px; overflow-y: auto; }
+.rs-pick li { padding: 6px 20px; border-top: 1px solid var(--border); }
+.rs-pick li:first-child { border-top: 0; }
+.rs-pick .check { width: 100%; }
+.rs-pick .tag { margin-left: auto; }
+.rs-pick .tag + .tag { margin-left: 0; }
+@media (max-width: 720px) {
+  .rs-fresh { margin-left: 0; width: 100%; }
+  .rs-table .rs-repo { min-width: 140px; }
+}
+.rs-err-text { color: var(--warn-text); }

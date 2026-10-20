@@ -21,6 +21,7 @@ import { normalizeVerdict, TriageAiError, verdictSchema, type TicketImage, type 
 import { knowledgeTexts, listKnowledge, type AppKnowledge } from './knowledge.js';
 import { KnowledgeWriter } from './knowledge-writer.js';
 import { ChangeTracker, recentChanges, type AppChange } from './knowledge-changes.js';
+import { RepoStatusTracker } from '../repo-status/tracker.js';
 import { actionMatcher } from './state.js';
 import { buildKnowledgeBlock, buildSystemPrompt, buildUserPrompt, extractDescription, searchTerms, type Candidate } from './prompt.js';
 import {
@@ -815,6 +816,8 @@ export class TriageEngine {
   readonly knowledge: KnowledgeWriter;
   /** Tracks what's merged into the apps' repositories (AI triage › Knowledge). */
   readonly changes: ChangeTracker;
+  /** Reads the watched repositories for Repo status (not triage, but the same polling loop). */
+  readonly repoStatus: RepoStatusTracker;
 
   constructor(
     readonly deps: Deps,
@@ -823,6 +826,7 @@ export class TriageEngine {
     this.indexer = new IssueIndexer(deps);
     this.knowledge = new KnowledgeWriter(deps, ai);
     this.changes = new ChangeTracker(deps);
+    this.repoStatus = new RepoStatusTracker(deps);
   }
 
   /** Queues newly filed tickets, and new issues opened on GitHub, where triage is on for them (only those after it was switched on). */

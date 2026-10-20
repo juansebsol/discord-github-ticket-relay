@@ -11,6 +11,7 @@ import { updateWorkspaceGeneral, userNames } from '../../domain/workspaces.js';
 import { html, raw, type SafeHtml } from '../../lib/html.js';
 import type { LogDetail, TriageAction } from '../../triage/engine.js';
 import { getTriageSettings, monthlyUsage } from '../../triage/settings.js';
+import { getStatusSettings, statusRepos, statusRows } from '../../repo-status/tracker.js';
 import type { StepState } from '../layout.js';
 import { setFlash } from '../session.js';
 import type { Web, WorkspaceRequestContext } from '../server.js';
@@ -29,6 +30,7 @@ import {
   setting,
   submitBtn,
   tag,
+  timeAgo,
   when,
   type IconName,
 } from '../ui.js';
@@ -38,7 +40,7 @@ import { areaHref, canOpen, canOpenIssue, firstPage, panelPill, repoSyncState, T
 // ---- Overview -----------------------------------------------------------------------------------
 
 /** The tools with a card on the overview, in sidebar order. */
-const OVERVIEW_TOOLS: readonly ToolName[] = ['tickets', 'issues', 'triage', 'contributors'];
+const OVERVIEW_TOOLS: readonly ToolName[] = ['tickets', 'issues', 'repos', 'triage', 'contributors'];
 
 const DAY_MS = 86_400_000;
 /** Latest goes back this far for issues opened on GitHub (the others are newest first by index). */
@@ -248,7 +250,31 @@ async function contributorsCard({ web, ctx, dc, apps }: Shared): Promise<ToolCar
   };
 }
 
-const CARDS: Record<ToolName, (s: Shared) => Promise<ToolCard>> = { tickets: ticketsCard, issues: issuesCard, triage: triageCard, contributors: contributorsCard };
+async function reposCard({ web, ctx }: Shared): Promise<ToolCard> {
+  const { db } = web.deps;
+  const b = ctx.base;
+  const s = await getStatusSettings(db, ctx.workspace.id);
+  const repos = await statusRepos(db, ctx.workspace.id, s);
+  const rows = [...(await statusRows(db, repos.map((r) => r.id))).values()];
+  const read = rows.flatMap((r) => (r.stats ? [r.stats] : []));
+  const oldest = rows.length === repos.length && rows.every((r) => r.fetched_at) ? new Date(Math.min(...rows.map((r) => r.fetched_at!.getTime()))) : null;
+  const stale = oldest !== null && Date.now() - oldest.getTime() > Math.max(2 * s.everyMinutes, 15) * 60_000;
+  const sum = (f: (x: (typeof read)[number]) => number) => read.reduce((n, x) => n + f(x), 0);
+  const critical = sum((x) => x.critical);
+  return {
+    tool: 'repos',
+    meta: s.enabled ? `${repos.length} ${repos.length === 1 ? 'repository' : 'repositories'}${oldest ? ` · read ${timeAgo(oldest)}` : ''}` : 'Off',
+    status: !s.enabled ? pill('Off', 'neutral') : rows.some((r) => r.error) ? pill('Problem', 'warn') : stale ? pill('Stale', 'warn') : read.length ? pill('Fresh', 'ok') : pill('Reading…', 'neutral'),
+    stats: [
+      { label: 'Critical issues', value: critical, area: 'repo-status', href: `${b}/repos?view=fix`, tone: critical ? 'warn' : undefined, title: 'Open issues naming a crash, hang, freeze, data loss, launch failure or security problem' },
+      { label: 'Open PRs', value: sum((x) => x.openPrs), area: 'repo-status', href: `${b}/repos` },
+      { label: 'Unreleased commits', value: sum((x) => x.build?.unreleased ?? 0), area: 'repo-status', href: `${b}/repos`, title: 'Commits on each default branch since its latest build' },
+    ],
+    go: [{ area: 'repo-status', label: s.enabled ? 'Open Repo status' : 'Set up Repo status', primary: !s.enabled && can(ctx.membership, 'repo-status.edit') }],
+  };
+}
+
+const CARDS: Record<ToolName, (s: Shared) => Promise<ToolCard>> = { tickets: ticketsCard, issues: issuesCard, repos: reposCard, triage: triageCard, contributors: contributorsCard };
 
 // ---- Latest: what just happened, across the tools ------------------------------------------------
 

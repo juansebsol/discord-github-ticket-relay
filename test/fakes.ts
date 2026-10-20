@@ -14,17 +14,19 @@ export interface FakeRepo {
   has_issues: boolean;
   archived: boolean;
   labels: string[];
-  issues: { number: number; title: string; body: string; labels: string[]; created_at: string; updated_at?: string; user: string; state?: 'open' | 'closed'; state_reason?: string | null; closed_at?: string | null; comments?: string[]; bodyEdits?: number }[];
+  issues: { number: number; title: string; body: string; labels: string[]; created_at: string; updated_at?: string; user: string; state?: 'open' | 'closed'; state_reason?: string | null; closed_at?: string | null; comments?: string[]; bodyEdits?: number; reactions?: number; association?: string }[];
   /** Files on the default branch, by path (README.md, docs/FAQ.md…). */
   files?: Record<string, string>;
-  releases?: { tag: string; name?: string; published_at?: string; body?: string; draft?: boolean; prerelease?: boolean }[];
+  releases?: { tag: string; name?: string; published_at?: string; body?: string; draft?: boolean; prerelease?: boolean; assets?: { name: string; downloads: number }[] }[];
   description?: string | null;
   topics?: string[];
   default_branch?: string;
   /** Pull requests (closed ones with merged_at were merged), and the commits each one brought (merged or rebased). */
-  pulls?: { number: number; title: string; body?: string; user: string; base?: string; merged_at?: string | null; updated_at?: string; labels?: string[]; commits?: string[] }[];
+  pulls?: { number: number; title: string; body?: string; user: string; base?: string; merged_at?: string | null; updated_at?: string; created_at?: string; labels?: string[]; commits?: string[] }[];
   /** Commits on the default branch, newest first. */
   branchCommits?: { sha: string; message: string; user?: string | null; date: string; parents?: number }[];
+  /** The app icon (a PNG under assets/app-icon/…), for Repo status. */
+  icon?: Buffer;
 }
 
 /** How the next create-issue call behaves. */
@@ -80,6 +82,10 @@ export class FakeGitHub {
   mergedPrs = new Map<number, Map<string, number>>();
   commits = new Map<number, Map<string, number>>();
   installationPermissions: Record<string, string> = { issues: 'write', metadata: 'read', pull_requests: 'read', contents: 'read' };
+  /** POST /graphql calls, the points GitHub says are left, and whether the next calls are rate limited. */
+  graphqlCalls = 0;
+  graphqlBudget = 4800;
+  graphqlLimited = false;
   appSlug = 'ticket-relay';
 
   addInstallation(id: number, login: string, repos: Partial<FakeRepo>[], type = 'Organization') {
@@ -101,6 +107,7 @@ export class FakeGitHub {
         default_branch: r.default_branch ?? 'main',
         pulls: r.pulls ?? [],
         branchCommits: r.branchCommits ?? [],
+        icon: r.icon,
       };
       this.repos.set(repo.id, repo);
       ids.push(repo.id);
@@ -123,6 +130,75 @@ export class FakeGitHub {
 
   issueJson(r: FakeRepo, i: FakeRepo['issues'][number]) {
     return { number: i.number, title: i.title, body: i.body, user: { login: i.user, type: /\[bot\]$/.test(i.user) ? 'Bot' : 'User' }, state: i.state ?? 'open', state_reason: i.state_reason ?? null, closed_at: i.closed_at ?? null, created_at: i.created_at, updated_at: i.updated_at ?? i.created_at, labels: i.labels.map((name) => ({ name })), html_url: `https://github.com/${r.owner}/${r.name}/issues/${i.number}` };
+  }
+
+  /** What GitHub's GraphQL API would answer for the Repo status queries. */
+  private graphqlData(query: string, v: Json, accessible: (r: FakeRepo | undefined) => unknown): Json {
+    const repo = this.repoByName(String(v.owner), String(v.name));
+    if (!accessible(repo)) return { repository: null };
+    const r = repo!;
+    const at = (s: string | null | undefined) => (s ? Date.parse(s) : 0);
+    const page = <T>(list: T[], after: unknown, n = 100) => {
+      const start = after ? Number(after) : 0;
+      return { nodes: list.slice(start, start + n), pageInfo: { hasNextPage: start + n < list.length, endCursor: String(start + n) } };
+    };
+    const commits = r.branchCommits ?? [];
+    const pulls = r.pulls ?? [];
+    const created = (p: NonNullable<FakeRepo['pulls']>[number]) => p.created_at ?? p.updated_at ?? p.merged_at ?? '2020-01-01T00:00:00Z';
+    const open = pulls.filter((p) => p.merged_at === undefined);
+    const merged = pulls.filter((p) => p.merged_at);
+    const openIssues = r.issues.filter((i) => (i.state ?? 'open') === 'open');
+    const newestFirst = <T>(list: T[], when: (x: T) => string | null | undefined) => [...list].sort((a, b) => at(when(b)) - at(when(a)));
+    const issueNode = (i: FakeRepo['issues'][number]) => ({
+      number: i.number, title: i.title, url: `https://github.com/${r.owner}/${r.name}/issues/${i.number}`, createdAt: i.created_at, updatedAt: i.updated_at ?? i.created_at,
+      authorAssociation: i.association ?? 'NONE', comments: { totalCount: i.comments?.length ?? 0 }, reactions: { totalCount: i.reactions ?? 0 }, labels: { nodes: i.labels.map((name) => ({ name })) },
+    });
+    if (query.includes('releases(')) {
+      const p = page(newestFirst(r.releases ?? [], (x) => x.published_at), v.after, 50);
+      return { repository: { releases: { pageInfo: p.pageInfo, nodes: p.nodes.map((x) => ({
+        tagName: x.tag, url: `https://github.com/${r.owner}/${r.name}/releases/tag/${x.tag}`, isDraft: Boolean(x.draft), isPrerelease: Boolean(x.prerelease),
+        publishedAt: x.draft ? null : x.published_at ?? null, createdAt: x.published_at ?? null, tagCommit: { oid: `tag-${x.tag}`, committedDate: x.published_at ?? null },
+        releaseAssets: { nodes: (x.assets ?? []).map((a) => ({ name: a.name, downloadCount: a.downloads })) },
+      })) } } };
+    }
+    if (query.includes('compare(')) {
+      const rel = (r.releases ?? []).find((x) => `refs/tags/${x.tag}` === v.tag);
+      const ahead = commits.filter((c) => at(c.date) > at(rel?.published_at)).length;
+      return { repository: { ref: rel ? { compare: { status: ahead ? 'AHEAD' : 'IDENTICAL', aheadBy: ahead } } : null, defaultBranchRef: { target: { since: { totalCount: commits.filter((c) => at(c.date) >= at(String(v.at))).length } } } } };
+    }
+    if (query.includes('history(since: $since')) {
+      const p = page(commits.filter((c) => at(c.date) >= at(String(v.since))), v.after);
+      return { repository: { defaultBranchRef: { target: { history: { pageInfo: p.pageInfo, nodes: p.nodes.map((c) => ({
+        oid: c.sha, committedDate: c.date, author: { email: `${c.user ?? 'someone'}@example.com`, name: c.user ?? 'Someone', user: c.user ? { login: c.user } : null },
+      })) } } } } };
+    }
+    if (query.includes('opened: pullRequests')) {
+      const out: Json = {};
+      if (v.opened) out.opened = page(newestFirst(pulls, created).map((p) => ({ number: p.number, createdAt: created(p) })), v.openedAfter);
+      if (v.merged) out.merged = page(newestFirst(merged, (p) => p.updated_at ?? p.merged_at).map((p) => ({ number: p.number, updatedAt: p.updated_at ?? p.merged_at, mergedAt: p.merged_at })), v.mergedAfter);
+      if (v.issues) out.issues = page(newestFirst(r.issues, (i) => i.created_at).map((i) => ({ number: i.number, createdAt: i.created_at })), v.issuesAfter);
+      return { repository: out };
+    }
+    // The main query: counts, dates, each window's commits (aliases c0…, cb) and the open issues.
+    const head: Json = { all: { totalCount: commits.length, nodes: commits.slice(0, 1).map((c) => ({ committedDate: c.date })) } };
+    for (const m of query.matchAll(/(c\d+|cb): history\(since: "([^"]+)"\)/g)) head[m[1]!] = { totalCount: commits.filter((c) => at(c.date) >= Date.parse(m[2]!)).length };
+    const oldestOpen = newestFirst(open, created).at(-1);
+    const newestPr = newestFirst(pulls, created)[0];
+    const newestIssue = newestFirst(r.issues, (i) => i.created_at)[0];
+    return {
+      repository: {
+        openPrs: { totalCount: open.length }, allPrs: { totalCount: pulls.length }, mergedPrs: { totalCount: merged.length },
+        oldestOpenPr: { nodes: oldestOpen ? [{ createdAt: created(oldestOpen) }] : [] },
+        newestPr: { nodes: newestPr ? [{ createdAt: created(newestPr) }] : [] },
+        openIssues: { totalCount: openIssues.length }, allIssues: { totalCount: r.issues.length },
+        newestIssue: { nodes: newestIssue ? [{ createdAt: newestIssue.created_at }] : [] },
+        icon: r.icon ? { entries: [{ name: 'app.png', oid: `icon-${r.id}` }] } : null,
+        recentOpen: { nodes: newestFirst(openIssues, (i) => i.created_at).slice(0, 100).map(issueNode) },
+        hotOpen: { nodes: [...openIssues].sort((a, b) => (b.comments?.length ?? 0) - (a.comments?.length ?? 0)).slice(0, 30).map(issueNode) },
+        defaultBranchRef: { name: r.default_branch ?? 'main', target: head },
+      },
+      rateLimit: { remaining: this.graphqlBudget, resetAt: new Date(Date.now() + 3600_000).toISOString() },
+    };
   }
 
   private repoJson(r: FakeRepo) {
@@ -195,6 +271,23 @@ export class FakeGitHub {
     if ((m = /^\/repositories\/(\d+)$/.exec(path))) {
       const r = this.repos.get(Number(m[1]));
       return accessible(r) ? json(200, this.repoJson(r!)) : json(404, { message: 'Not Found' });
+    }
+    // GraphQL (Repo status): answered from the same repositories, by what the query asks for.
+    if (path === '/graphql' && method === 'POST') {
+      this.graphqlCalls++;
+      if (this.graphqlLimited) return json(200, { errors: [{ type: 'RATE_LIMITED', message: 'API rate limit exceeded for installation.' }] });
+      return json(200, { data: this.graphqlData(String(body.query), body.variables ?? {}, accessible) });
+    }
+    if ((m = /^\/repos\/([^/]+)\/([^/]+)\/contributors$/.exec(path)) && method === 'GET') {
+      const r = this.repoByName(decodeURIComponent(m[1]!), decodeURIComponent(m[2]!));
+      if (!accessible(r)) return json(404, { message: 'Not Found' });
+      const people = new Set((r!.branchCommits ?? []).map((c) => c.user ?? 'someone')).size;
+      return json(200, people ? [{ login: 'someone', contributions: 1 }] : [], people > 1 ? { link: `<https://api.github.com/repos/${r!.owner}/${r!.name}/contributors?per_page=1&anon=1&page=2>; rel="next", <https://api.github.com/repos/${r!.owner}/${r!.name}/contributors?per_page=1&anon=1&page=${people}>; rel="last"` } : {});
+    }
+    if ((m = /^\/repos\/([^/]+)\/([^/]+)\/git\/blobs\/([^/]+)$/.exec(path)) && method === 'GET') {
+      const r = this.repoByName(decodeURIComponent(m[1]!), decodeURIComponent(m[2]!));
+      if (!accessible(r) || !r!.icon || m[3] !== `icon-${r!.id}`) return json(404, { message: 'Not Found' });
+      return json(200, { sha: m[3], encoding: 'base64', content: r!.icon.toString('base64'), size: r!.icon.length });
     }
     if ((m = /^\/repos\/([^/]+)\/([^/]+)\/labels$/.exec(path))) {
       const r = this.repoByName(decodeURIComponent(m[1]!), decodeURIComponent(m[2]!));

@@ -27,6 +27,8 @@ const NAMES = [
   'chevron-up', 'square',
   // Repository changes
   'git-merge', 'git-commit-horizontal',
+  // Repo status
+  'chart-no-axes-column-increasing', 'flame', 'git-pull-request', 'package', 'download',
 ];
 
 const require = createRequire(import.meta.url);

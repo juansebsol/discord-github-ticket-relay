@@ -345,6 +345,35 @@ export class GitHubClient {
     }));
   }
 
+  // ---- Repo status (read-only: Metadata, Issues, Pull requests and Contents read) ---------------
+
+  /**
+   * A GraphQL query as the installation. GraphQL has its own hourly budget, apart from the REST
+   * one that filing uses. Missing objects come back as null; errors with no data throw.
+   */
+  async graphql(installationId: number, query: string, variables: Record<string, unknown> = {}): Promise<any> {
+    const { data } = await this.request('POST', '/graphql', await this.asInstallation(installationId), { query, variables });
+    const errors = Array.isArray(data?.errors) ? data.errors : [];
+    if (errors.length && !data?.data) {
+      const limited = errors.some((e: any) => e?.type === 'RATE_LIMITED');
+      throw new GitHubApiError(limited ? 403 : 502, String(errors[0]?.message ?? 'GraphQL error'), limited ? 300 : null, limited, errors);
+    }
+    return data?.data ?? null;
+  }
+
+  /** People who have committed to a repository, all time (anonymous emails count): its contributor list's length. */
+  async contributorCount(installationId: number, owner: string, repo: string): Promise<number> {
+    const { data, headers } = await this.request('GET', `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contributors?per_page=1&anon=1`, await this.asInstallation(installationId));
+    const last = /[?&]page=(\d+)>; rel="last"/.exec(headers.get('link') ?? '');
+    return last ? Number(last[1]) : Array.isArray(data) ? data.length : 0;
+  }
+
+  /** A file's bytes by its blob id (a repository's app icon). */
+  async blob(installationId: number, owner: string, repo: string, sha: string): Promise<Buffer> {
+    const { data } = await this.request('GET', `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/blobs/${encodeURIComponent(sha)}`, await this.asInstallation(installationId));
+    return Buffer.from(String(data?.content ?? ''), data?.encoding === 'base64' ? 'base64' : 'utf8');
+  }
+
   /** The README, whatever its name (README.md, readme.rst…). */
   async getReadme(installationId: number, owner: string, repo: string): Promise<{ path: string; text: string } | null> {
     return this.fileAt(installationId, `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/readme`);

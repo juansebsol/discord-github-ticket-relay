@@ -81,6 +81,22 @@ Discord endpoint, OAuth), one or more queue workers, and an optional triage work
   why not (`app_changes.status` and `note`). Issues and questions count from the last full write
   (`auto_full_at`). A full rewrite reads the 30 newest changes too, and afterwards nothing merged
   before it started is left waiting.
+- **Repo status** (`src/repo-status/`, off by default per workspace in `repo_status_settings`):
+  the worker's index loop reads at most one due repository per tick, stalest first, with GitHub's
+  GraphQL API (its own hourly budget, separate from the REST one filing uses; reads wait while
+  fewer than 300 points are left). A read is a handful of queries: releases with their asset
+  downloads (checksums, signatures and updater files left out), the main one (counts, dates, each
+  window's commit count as `history(since:)` aliases, the 100 newest and 30 most discussed open
+  issues, the app icon's tree), the latest build's tag compared with the default branch
+  (unreleased commits; an estimate when the tag isn't on it), commit authors, and PRs opened and
+  merged and issues opened. Those last three lists are kept in `repo_status.raw` back to a horizon
+  (the last week, or back to the latest build, at most 30 days) and only what's new since the last
+  read is asked for, with a full read every 6 hours. Rows are per repository, shared by every
+  workspace watching it (each watching workspace's shortest interval wins; Refresh makes everything
+  read before it due again). Fix first scores open issues in `src/repo-status/score.ts` (ported
+  from storytold/craft-repo-status-app): critical phrases +40, broken +15, a bug label +15, a
+  user's report +10, reactions and comments up to +40, naming the latest build +10, fresh +8/+4, a
+  request or docs −25, untouched for 30 days −5; a repository's urgency is its top five summed.
 - **No Discord gateway.** The bot is driven entirely by Discord's HTTP interactions endpoint and
   REST API. It needs no privileged intents and no slash-command registration.
 - **GitHub App auth.** Short-lived installation tokens are minted from the app's private key
@@ -182,6 +198,7 @@ stable user ID are recorded in the body.
 | `submissions` | Tickets, routing snapshot, queue state, lease, reconcile counters, encrypted payload |
 | `submission_events` | Append-only timeline for investigation |
 | `contributor_settings`, `contributor_panels`, `contributor_tiers` | On/off, panel channel, published panel, and role tiers (role + minimum contributions) per workspace |
+| `repo_status_settings`, `repo_status` | Repo status: on/off, the repositories and how often per workspace; what was last read per repository (stats, the kept activity, the icon, the error and the GraphQL budget left) |
 | `contributor_links`, `contributor_verifications` | One GitHub account ↔ one Discord member per workspace; audit trail of every verification |
 
 Migrations live in [`src/db/migrations`](../src/db/migrations) and are applied inside one write

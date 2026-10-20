@@ -62,7 +62,7 @@ const CAPABILITIES: [string, string, string, string][] = [
 ];
 
 /** Short tool names for the access tags in the members table. */
-const TOOL_TAGS: Record<Tool, string> = { tickets: 'Tickets', issues: 'Issues', triage: 'Triage', contributors: 'Roles', setup: 'Apps', workspace: 'Health' };
+const TOOL_TAGS: Record<Tool, string> = { tickets: 'Tickets', issues: 'Issues', repos: 'Repos', triage: 'Triage', contributors: 'Roles', setup: 'Apps', workspace: 'Health' };
 const LEVEL_NAMES: Record<AccessLevel, string> = { none: 'No access', view: 'View', edit: 'Edit' };
 const SET_NAMES: Record<AccessLevel, string> = { none: 'No access', view: 'View all', edit: 'Edit all' };
 

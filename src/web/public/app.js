@@ -1279,6 +1279,7 @@
         .then(function (markup) {
           box.innerHTML = markup;
           localTimes(box);
+          document.dispatchEvent(new CustomEvent('tr:live-updated', { detail: box }));
           last = Date.now();
           failed = false;
           // Finished (a re-run): reload once for the full page and its buttons.
@@ -1803,5 +1804,128 @@
           refresh();
         });
     });
+  })();
+
+  // ---- Repo status: sort the table, pick the activity window --------------------------------
+  //
+  // Rows carry their sort values (data-sort) and every window's activity (data-act: commits, PRs,
+  // merged, issues, people). The sort and the window are remembered in this browser and put back
+  // after each live refresh.
+
+  (function () {
+    var KEY = 'tr.rs';
+    // First click: biggest, newest or A→Z first; the oldest open PR shows the oldest first.
+    var ASC = { name: 1, build: 1, oldest: 1 };
+    function load() { try { return JSON.parse(localStorage.getItem(KEY) || '{}') || {}; } catch (e) { return {}; } }
+    function save(v) { try { localStorage.setItem(KEY, JSON.stringify(v)); } catch (e) { /* storage off */ } }
+    var state = load();
+
+    function fmt(v) { return v.toLocaleString('en-US'); }
+    function links(row, k, since) {
+      var gh = row.getAttribute('data-gh');
+      var from = since ? '>=' + since : '';
+      return [
+        gh + '/commits/' + row.getAttribute('data-branch') + (since ? '?since=' + since : ''),
+        gh + '/pulls?q=' + encodeURIComponent('is:pr' + (since ? ' created:' + from : '')),
+        gh + '/pulls?q=' + encodeURIComponent('is:pr is:merged' + (since ? ' merged:' + from : '')),
+        gh + '/issues?q=' + encodeURIComponent('is:issue' + (since ? ' created:' + from : '')),
+      ][k];
+    }
+    function sortValue(row, key) {
+      var m = /^a(\d)$/.exec(key);
+      if (m) {
+        var act = JSON.parse(row.getAttribute('data-act') || '{}')[state.window || '4h'];
+        return act && act[+m[1]] !== null ? act[+m[1]] : undefined;
+      }
+      var v = JSON.parse(row.getAttribute('data-sort') || '{}')[key];
+      return v === null ? undefined : v;
+    }
+
+    function applyWindow(table) {
+      var sel = $('[data-rs-window]', table);
+      if (!sel) return;
+      if (state.window && $('option[value="' + state.window + '"]', sel)) sel.value = state.window;
+      var win = sel.value;
+      var starts = JSON.parse(table.getAttribute('data-starts') || '{}');
+      var totals = [0, 0, 0, 0, 0];
+      $$('tbody tr', table).forEach(function (row) {
+        var act = JSON.parse(row.getAttribute('data-act') || '{}')[win];
+        var since = win === 'all' ? '' : win === 'build' ? row.getAttribute('data-built') : starts[win];
+        $$('td[data-k]', row).forEach(function (td) {
+          var k = +td.getAttribute('data-k');
+          var v = act ? act[k] : null;
+          td.classList.remove('muted', 'zero');
+          td.textContent = '';
+          if (v === null || v === undefined) {
+            td.classList.add('muted');
+            td.textContent = '—';
+            td.title = act ? '' : win === 'build' ? 'No build yet' : 'Further back than this page keeps';
+            return;
+          }
+          td.title = '';
+          totals[k] += v;
+          if (v === 0) { td.classList.add('zero'); td.textContent = '0'; return; }
+          if (k === 4) { td.textContent = fmt(v); return; }
+          var a = document.createElement('a');
+          a.className = 'rs-n';
+          a.href = links(row, k, since);
+          a.target = '_blank';
+          a.rel = 'noopener noreferrer';
+          a.textContent = fmt(v);
+          td.appendChild(a);
+        });
+      });
+      $$('tfoot [data-t]', table).forEach(function (td) { td.textContent = fmt(totals[+td.getAttribute('data-t')]); });
+    }
+
+    function applySort(table) {
+      var key = state.key || 'urgency';
+      var dir = state.dir || (ASC[key] ? 'asc' : 'desc');
+      var body = $('tbody', table);
+      var rows = $$('tr', body);
+      rows.sort(function (x, y) {
+        var a = sortValue(x, key), b = sortValue(y, key);
+        if (a === undefined && b === undefined) return 0;
+        if (a === undefined) return 1; // nothing to sort by: always last
+        if (b === undefined) return -1;
+        var c = typeof a === 'string' ? a.localeCompare(b) : a - b;
+        return dir === 'asc' ? c : -c;
+      });
+      rows.forEach(function (r) { body.appendChild(r); });
+      $$('thead [data-sort-key]', table).forEach(function (b) {
+        var th = b.closest('th');
+        var on = b.getAttribute('data-sort-key') === key;
+        th.setAttribute('aria-sort', on ? (dir === 'asc' ? 'ascending' : 'descending') : 'none');
+      });
+    }
+
+    function setup(ctx) {
+      $$('[data-rs-table]', ctx).forEach(function (table) {
+        applyWindow(table);
+        applySort(table);
+      });
+    }
+
+    document.addEventListener('click', function (e) {
+      var b = e.target.closest && e.target.closest('[data-rs-table] [data-sort-key]');
+      if (!b) return;
+      var key = b.getAttribute('data-sort-key');
+      var first = ASC[key] ? 'asc' : 'desc';
+      var cur = (state.key || 'urgency') === key ? state.dir || (ASC[key] ? 'asc' : 'desc') : null;
+      state.key = key;
+      state.dir = cur ? (cur === 'asc' ? 'desc' : 'asc') : first;
+      save(state);
+      applySort(b.closest('[data-rs-table]'));
+    });
+    document.addEventListener('change', function (e) {
+      if (!e.target.matches || !e.target.matches('[data-rs-window]')) return;
+      state.window = e.target.value;
+      save(state);
+      var table = e.target.closest('[data-rs-table]');
+      applyWindow(table);
+      if (/^a\d$/.test(state.key || '')) applySort(table);
+    });
+    document.addEventListener('tr:live-updated', function (e) { setup(e.detail); });
+    setup(document);
   })();
 })();
