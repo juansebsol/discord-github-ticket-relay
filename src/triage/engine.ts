@@ -22,6 +22,7 @@ import { knowledgeTexts, listKnowledge, type AppKnowledge } from './knowledge.js
 import { KnowledgeWriter } from './knowledge-writer.js';
 import { ChangeTracker, recentChanges, type AppChange } from './knowledge-changes.js';
 import { RepoStatusTracker } from '../repo-status/tracker.js';
+import { AnalyticsRecorder } from '../analytics/recorder.js';
 import { actionMatcher } from './state.js';
 import { buildKnowledgeBlock, buildSystemPrompt, buildUserPrompt, extractDescription, searchTerms, type Candidate } from './prompt.js';
 import { findWork, type WorkItem, type WorkRef } from './work.js';
@@ -833,6 +834,8 @@ export class TriageEngine {
   readonly changes: ChangeTracker;
   /** Reads the watched repositories for Repo status (not triage, but the same polling loop). */
   readonly repoStatus: RepoStatusTracker;
+  /** Analytics: downloads every 30 minutes, and stars. */
+  readonly analytics: AnalyticsRecorder;
 
   constructor(
     readonly deps: Deps,
@@ -842,6 +845,7 @@ export class TriageEngine {
     this.knowledge = new KnowledgeWriter(deps, ai);
     this.changes = new ChangeTracker(deps);
     this.repoStatus = new RepoStatusTracker(deps);
+    this.analytics = new AnalyticsRecorder(deps);
   }
 
   /** Queues newly filed tickets, and new issues opened on GitHub, where triage is on for them (only those after it was switched on). */

@@ -1,7 +1,7 @@
 import type { Role } from './types.js';
 
 /** The tools in the sidebar, in order. Each one has pages (areas) an admin can open to moderators. */
-export const TOOLS = ['tickets', 'issues', 'repos', 'triage', 'contributors', 'setup', 'workspace'] as const;
+export const TOOLS = ['tickets', 'issues', 'repos', 'analytics', 'triage', 'contributors', 'setup', 'workspace'] as const;
 export type Tool = (typeof TOOLS)[number];
 export type AccessLevel = 'none' | 'view' | 'edit';
 
@@ -30,6 +30,7 @@ export const AREAS = {
   'issues-github': { tool: 'issues', name: 'Opened on GitHub', desc: 'Issues opened directly on GitHub, with their triage.', levels: ['view'] },
   'issues-sync': { tool: 'issues', name: 'Sync', desc: 'How up to date each repository is. Edit: Sync now.', levels: ['view', 'edit'] },
   'repo-status': { tool: 'repos', name: 'Repo status', desc: 'Open PRs and issues, recent activity, builds and what to fix first, per repository. Edit: choose the repositories, turn it on, refresh.', levels: ['view', 'edit'] },
+  'analytics': { tool: 'analytics', name: 'Analytics', desc: 'Downloads every 30 minutes, with tickets, issues, pull requests and stars over time. Edit: turn it on or off.', levels: ['view', 'edit'] },
   'triage.review': { tool: 'triage', name: 'Review', desc: 'Suggestions waiting for someone. Edit: apply and dismiss them, here and on tickets and issues.', levels: ['view', 'edit'] },
   'triage.actions': { tool: 'triage', name: 'Actions', desc: 'Switches, actions, rules and limits.', levels: ['view', 'edit'] },
   'triage.labels': { tool: 'triage', name: 'Label groups', desc: 'Label groups and their options.', levels: ['view', 'edit'] },
@@ -46,7 +47,7 @@ export const AREAS = {
 export type Area = keyof typeof AREAS;
 export const AREA_KEYS = Object.keys(AREAS) as Area[];
 
-export const TOOL_NAMES: Record<Tool, string> = { tickets: 'Discord tickets', issues: 'GitHub issues', repos: 'Repo status', triage: 'AI triage', contributors: 'Contributor roles', setup: 'Setup', workspace: 'Workspace' };
+export const TOOL_NAMES: Record<Tool, string> = { tickets: 'Discord tickets', issues: 'GitHub issues', repos: 'Repo status', analytics: 'Analytics', triage: 'AI triage', contributors: 'Contributor roles', setup: 'Setup', workspace: 'Workspace' };
 
 /** A tool's pages, in order. */
 export function areasOf(tool: Tool): Area[] {

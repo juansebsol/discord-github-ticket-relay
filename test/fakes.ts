@@ -27,6 +27,8 @@ export interface FakeRepo {
   branchCommits?: { sha: string; message: string; user?: string | null; date: string; parents?: number }[];
   /** The app icon (a PNG under assets/app-icon/…), for Repo status. */
   icon?: Buffer;
+  /** Who starred it and when (Analytics). */
+  stars?: { login: string; at: string }[];
 }
 
 /** How the next create-issue call behaves. */
@@ -110,6 +112,7 @@ export class FakeGitHub {
         pulls: r.pulls ?? [],
         branchCommits: r.branchCommits ?? [],
         icon: r.icon,
+        stars: r.stars,
       };
       this.repos.set(repo.id, repo);
       ids.push(repo.id);
@@ -155,6 +158,11 @@ export class FakeGitHub {
       number: i.number, title: i.title, url: `https://github.com/${r.owner}/${r.name}/issues/${i.number}`, createdAt: i.created_at, updatedAt: i.updated_at ?? i.created_at,
       authorAssociation: i.association ?? 'NONE', comments: { totalCount: i.comments?.length ?? 0 }, reactions: { totalCount: i.reactions ?? 0 }, labels: { nodes: i.labels.map((name) => ({ name })) },
     });
+    if (query.includes('stargazers(')) {
+      const list = [...(r.stars ?? [])].sort((a, b) => at(b.at) - at(a.at));
+      const p = page(list, v.after, 100);
+      return { repository: { stargazers: { pageInfo: p.pageInfo, edges: p.nodes.map((x) => ({ starredAt: x.at, node: { login: x.login } })) } } };
+    }
     if (query.includes('releases(')) {
       const p = page(newestFirst(r.releases ?? [], (x) => x.published_at), v.after, 50);
       return { repository: { releases: { pageInfo: p.pageInfo, nodes: p.nodes.map((x) => ({

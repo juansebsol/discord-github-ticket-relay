@@ -133,6 +133,7 @@ export function layout(ctx: PageContext, opts: { title: string; active: string; 
         ${tool(access, 'tickets', attention)}
         ${tool(access, 'issues')}
         ${tool(access, 'repos')}
+        ${tool(access, 'analytics')}
         ${tool(access, 'triage', review)}
         ${tool(access, 'contributors')}
         <div class="nav-label">Workspace</div>

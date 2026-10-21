@@ -12,6 +12,7 @@ import { html, raw, type SafeHtml } from '../../lib/html.js';
 import type { LogDetail, TriageAction } from '../../triage/engine.js';
 import { getTriageSettings, monthlyUsage } from '../../triage/settings.js';
 import { getStatusSettings, statusRepos, statusRows } from '../../repo-status/tracker.js';
+import { analyticsRepos, getAnalyticsSettings } from '../../analytics/recorder.js';
 import type { StepState } from '../layout.js';
 import { setFlash } from '../session.js';
 import type { Web, WorkspaceRequestContext } from '../server.js';
@@ -40,7 +41,7 @@ import { areaHref, canOpen, canOpenIssue, firstPage, panelPill, repoSyncState, T
 // ---- Overview -----------------------------------------------------------------------------------
 
 /** The tools with a card on the overview, in sidebar order. */
-const OVERVIEW_TOOLS: readonly ToolName[] = ['tickets', 'issues', 'repos', 'triage', 'contributors'];
+const OVERVIEW_TOOLS: readonly ToolName[] = ['tickets', 'issues', 'repos', 'analytics', 'triage', 'contributors'];
 
 const DAY_MS = 86_400_000;
 /** Latest goes back this far for issues opened on GitHub (the others are newest first by index). */
@@ -274,7 +275,33 @@ async function reposCard({ web, ctx }: Shared): Promise<ToolCard> {
   };
 }
 
-const CARDS: Record<ToolName, (s: Shared) => Promise<ToolCard>> = { tickets: ticketsCard, issues: issuesCard, repos: reposCard, triage: triageCard, contributors: contributorsCard };
+async function analyticsCard({ web, ctx }: Shared): Promise<ToolCard> {
+  const { db } = web.deps;
+  const b = ctx.base;
+  const s = await getAnalyticsSettings(db, ctx.workspace.id);
+  const repos = await analyticsRepos(db, ctx.workspace.id);
+  const ids = repos.map((r) => r.id);
+  const since = (ms: number) => new Date(Date.now() - ms);
+  const downloads = async (ms: number) => Number((await db.query<{ n: number }>(
+    `SELECT COALESCE(sum(c.downloads), 0) AS n FROM download_counts c JOIN download_assets a ON a.id = c.asset_id
+      WHERE a.repo_id IN (SELECT value FROM json_each($1)) AND a.kind <> 'meta' AND c.slot_at >= $2`, [ids, since(ms)])).rows[0]?.n ?? 0);
+  const day = s.enabled ? await downloads(86_400_000) : 0;
+  const week = s.enabled ? await downloads(7 * 86_400_000) : 0;
+  const stars = s.enabled ? Number((await db.query<{ n: number }>('SELECT count(*) AS n FROM repo_stars WHERE repo_id IN (SELECT value FROM json_each($1)) AND starred_at >= $2', [ids, since(7 * 86_400_000)])).rows[0]?.n ?? 0) : 0;
+  return {
+    tool: 'analytics',
+    meta: s.enabled ? `Downloads every 30 minutes${s.enabledAt ? ` · started ${timeAgo(s.enabledAt)}` : ''}` : 'Off',
+    status: s.enabled ? pill('Recording', 'ok') : pill('Off', 'neutral'),
+    stats: [
+      { label: 'Downloads, last 24 h', value: day, area: 'analytics', href: `${b}/analytics` },
+      { label: 'Last 7 days', value: week, area: 'analytics', href: `${b}/analytics?range=7d` },
+      { label: 'Stars, last 7 days', value: stars, area: 'analytics', href: `${b}/analytics?range=7d` },
+    ],
+    go: [{ area: 'analytics', label: s.enabled ? 'Open Analytics' : 'Set up Analytics', primary: !s.enabled && can(ctx.membership, 'analytics.edit') }],
+  };
+}
+
+const CARDS: Record<ToolName, (s: Shared) => Promise<ToolCard>> = { tickets: ticketsCard, issues: issuesCard, repos: reposCard, analytics: analyticsCard, triage: triageCard, contributors: contributorsCard };
 
 // ---- Latest: what just happened, across the tools ------------------------------------------------
 

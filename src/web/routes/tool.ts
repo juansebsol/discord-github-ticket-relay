@@ -16,10 +16,10 @@ import type { Web, WorkspaceRequestContext } from '../server.js';
 import { chip, pageHeader, pill, plural, postBtn, tabs, timeAgo, viewOnlyTag, type IconName } from '../ui.js';
 
 /** The tools that have their own item in the sidebar, in order. */
-export type ToolName = 'tickets' | 'issues' | 'repos' | 'triage' | 'contributors';
+export type ToolName = 'tickets' | 'issues' | 'repos' | 'analytics' | 'triage' | 'contributors';
 
 /** Each tool's icon, in the sidebar, on the overview and on Members. */
-export const TOOL_ICONS: Record<Tool, IconName> = { tickets: 'ticket', issues: 'circle-dot', repos: 'chart-no-axes-column-increasing', triage: 'sparkles', contributors: 'award', setup: 'boxes', workspace: 'activity' };
+export const TOOL_ICONS: Record<Tool, IconName> = { tickets: 'ticket', issues: 'circle-dot', repos: 'chart-no-axes-column-increasing', analytics: 'chart-line', triage: 'sparkles', contributors: 'award', setup: 'boxes', workspace: 'activity' };
 
 /** Every page's address under /w/:wid. */
 export const AREA_PATHS: Record<Area, string> = {
@@ -32,6 +32,7 @@ export const AREA_PATHS: Record<Area, string> = {
   'issues-github': '/issues/github',
   'issues-sync': '/issues/sync',
   'repo-status': '/repos',
+  'analytics': '/analytics',
   'triage.review': '/triage',
   'triage.actions': '/triage/actions',
   'triage.labels': '/triage/labels',
@@ -120,6 +121,7 @@ const VIEW_ONLY: Partial<Record<Area, string>> = {
   'files': 'You can see the stored files. Scanning and deleting them needs Edit on Files. Ask an admin or the owner.',
   'issues-sync': 'You can see how up to date each repository is. Sync now needs Edit on Sync. Ask an admin if you need it.',
   'repo-status': 'You can see each repository’s status. Choosing the repositories and refreshing need Edit on Repo status. Ask an admin if you need it.',
+  'analytics': 'You can see the analytics. Turning recording on or off needs Edit on Analytics. Ask an admin if you need it.',
   'triage.review': 'You can see the suggestions. Applying and dismissing them needs Edit on Review. Ask an admin if you need it.',
   'triage.actions': 'You can see the triage settings. Ask an admin if you need to change them.',
   'triage.labels': 'You can see the label groups. Ask an admin if you need to change them.',

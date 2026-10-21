@@ -53,6 +53,12 @@ export class TriageWorker {
       } catch (err) {
         this.engine.deps.log.error({ err: (err as Error).message }, 'repo status loop error');
       }
+      // Analytics: each recorded repository's downloads once per 30-minute slot.
+      try {
+        await this.engine.analytics.tick();
+      } catch (err) {
+        this.engine.deps.log.error({ err: (err as Error).message }, 'analytics loop error');
+      }
       await new Promise<void>((resolve) => {
         const timer = setTimeout(resolve, this.opts.indexMs ?? 15_000);
         this.wakeIndex = () => {

@@ -31,6 +31,8 @@ const NAMES = [
   'chart-no-axes-column-increasing', 'flame', 'git-pull-request', 'package', 'download',
   // Pull requests
   'git-pull-request-draft',
+  // Analytics
+  'chart-line', 'star',
 ];
 
 const require = createRequire(import.meta.url);

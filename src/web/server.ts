@@ -31,6 +31,7 @@ import { registerTriageRoutes } from './routes/triage.js';
 import { registerTriageConfigRoutes } from './routes/triage-config.js';
 import { registerTriageKnowledgeRoutes } from './routes/triage-knowledge.js';
 import { registerRepoStatusRoutes } from './routes/repo-status.js';
+import { registerAnalyticsRoutes } from './routes/analytics.js';
 import { registerTriageRunRoutes } from './routes/triage-runs.js';
 import { registerTriageActivityRoutes } from './routes/triage-activity.js';
 import { registerTriageBulkRoutes } from './routes/triage-bulk.js';
@@ -273,6 +274,7 @@ export async function buildServer(deps: Deps, processor: Processor, opts: { logg
   registerTriageConfigRoutes(app, web);
   registerTriageKnowledgeRoutes(app, web);
   registerRepoStatusRoutes(app, web);
+  registerAnalyticsRoutes(app, web);
   registerTriageRunRoutes(app, web);
   registerTriageActivityRoutes(app, web);
   registerTriageBulkRoutes(app, web);

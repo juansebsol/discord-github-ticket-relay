@@ -1931,4 +1931,220 @@
     document.addEventListener('tr:live-updated', function (e) { setup(e.detail); });
     setup(document);
   })();
+
+  // ---- Time zone: pages that count by day (Analytics) start "today" at the viewer's midnight ------
+
+  (function () {
+    var tz;
+    try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone; } catch (e) { return; }
+    if (!tz) return;
+    var had = /(?:^|; )tr_tz=([^;]*)/.exec(document.cookie);
+    if (had && decodeURIComponent(had[1]) === tz) return;
+    document.cookie = 'tr_tz=' + encodeURIComponent(tz) + '; path=/; max-age=31536000; samesite=lax';
+    // The page was counted in another time zone: once, again in this one.
+    var page = document.querySelector('[data-an-tz]');
+    if (page && page.getAttribute('data-an-tz') !== tz) location.reload();
+  })();
+
+  // ---- Analytics: column charts drawn from the numbers on the page (each has a table view too) ----
+
+  (function () {
+    var SVG = 'http://www.w3.org/2000/svg';
+    var charts = $$('[data-an-chart]');
+    if (!charts.length) return;
+    function el(name, attrs, parent) {
+      var e = document.createElementNS(SVG, name);
+      for (var k in attrs) e.setAttribute(k, attrs[k]);
+      if (parent) parent.appendChild(e);
+      return e;
+    }
+    function fmt(v) { return v.toLocaleString('en-US'); }
+    function short(v) {
+      if (v >= 1e6) return (v / 1e6).toFixed(v >= 1e7 ? 0 : 1).replace(/\.0$/, '') + 'M';
+      if (v >= 1e3) return (v / 1e3).toFixed(v >= 1e4 ? 0 : 1).replace(/\.0$/, '') + 'K';
+      return String(v);
+    }
+    // A round top for the axis, and a few round ticks under it.
+    function niceTicks(max, count) {
+      if (max <= 0) return [0, 1];
+      var raw = max / count;
+      var mag = Math.pow(10, Math.floor(Math.log10(raw)));
+      var step = [1, 2, 2.5, 5, 10].map(function (m) { return m * mag; }).find(function (s) { return s >= raw; });
+      if (step < 1) step = 1;
+      var ticks = [];
+      for (var t = 0; t <= max + step * 0.001; t += step) ticks.push(t);
+      if (ticks[ticks.length - 1] < max) ticks.push(ticks[ticks.length - 1] + step);
+      return ticks;
+    }
+    var dayFmt = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' });
+    var wdayFmt = new Intl.DateTimeFormat(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+    var timeFmt = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' });
+    var hourFmt = new Intl.DateTimeFormat(undefined, { hour: 'numeric' });
+    function isMidnight(ms) { var d = new Date(ms); return d.getHours() === 0 && d.getMinutes() === 0; }
+    function bucketTitle(d, i) {
+      var from = d.buckets[i], to = d.buckets[i + 1] || d.end;
+      if (d.step === '1d') return wdayFmt.format(new Date(from));
+      return dayFmt.format(new Date(from)) + ', ' + timeFmt.format(new Date(from)) + ' – ' + timeFmt.format(new Date(to));
+    }
+    // Which buckets get an x label: evenly spaced, on midnights when several days are shown.
+    function labelsFor(d, width) {
+      var n = d.buckets.length, room = Math.max(2, Math.floor(width / 64));
+      var multiDay = d.end - d.buckets[0] > 86400000 * 1.5;
+      var out = [];
+      if (d.step !== '1d' && multiDay) {
+        var mids = [];
+        d.buckets.forEach(function (b, i) { if (isMidnight(b)) mids.push(i); });
+        var k = Math.max(1, Math.ceil(mids.length / room));
+        mids.forEach(function (i, j) { if (j % k === 0) out.push({ i: i, text: dayFmt.format(new Date(d.buckets[i])) }); });
+        return out;
+      }
+      var every = Math.max(1, Math.ceil(n / room));
+      for (var i = 0; i < n; i += every) out.push({ i: i, text: d.step === '1d' ? dayFmt.format(new Date(d.buckets[i])) : hourFmt.format(new Date(d.buckets[i])) });
+      return out;
+    }
+
+    function draw(box) {
+      var d = JSON.parse(box.getAttribute('data-an-chart'));
+      var W = box.clientWidth;
+      if (!W) return;
+      var small = d.small, H = small ? 96 : 240;
+      var padL = small ? 30 : 44, padR = 6, padT = 8, padB = small ? 18 : 24;
+      var n = d.buckets.length, plotW = W - padL - padR, plotH = H - padT - padB;
+      var totals = d.buckets.map(function (_, i) {
+        var known = false, t = 0;
+        d.series.forEach(function (s) { var v = s.values[i]; if (v !== null && v !== undefined) { known = true; t += v; } });
+        return known ? t : null;
+      });
+      var ticks = niceTicks(Math.max.apply(null, totals.map(function (t) { return t || 0; })), small ? 2 : 4);
+      var top = ticks[ticks.length - 1];
+      var y = function (v) { return padT + plotH - (v / top) * plotH; };
+      var band = plotW / n;
+      var barW = band >= 6 ? Math.min(24, Math.max(2, band * 0.7)) : Math.max(1, band - 1);
+      box.textContent = '';
+      var svg = el('svg', { width: W, height: H, class: 'an-svg', tabindex: '0', role: 'img', focusable: 'true' }, box);
+      svg.setAttribute('aria-label', (box.getAttribute('aria-label') || 'Chart').replace(/: chart.*/, '') + ': use the left and right arrow keys to read each bar');
+      var grid = el('g', { class: 'an-gl' }, svg);
+      ticks.forEach(function (t) {
+        el('line', { x1: padL, x2: W - padR, y1: Math.round(y(t)) + 0.5, y2: Math.round(y(t)) + 0.5 }, grid);
+        var lab = el('text', { x: padL - 6, y: y(t) + 4, 'text-anchor': 'end', class: 'an-axis' }, grid);
+        lab.textContent = short(t);
+      });
+      // Before recording began (nothing known, but not still to come): a quiet band that says so.
+      var firstKnown = totals.findIndex(function (t) { return t !== null; });
+      var unrec = firstKnown < 0 ? d.buckets.filter(function (b) { return b < d.until; }).length : firstKnown;
+      if (unrec > 0 && !small) {
+        var uw = unrec * band;
+        el('rect', { class: 'an-norec', x: padL, y: padT, width: uw, height: plotH, rx: 4 }, svg);
+        if (uw > 96) {
+          var ut = el('text', { x: padL + uw / 2, y: padT + plotH / 2, 'text-anchor': 'middle', class: 'an-norec-t' }, svg);
+          ut.textContent = 'Not recorded';
+        }
+      }
+      var hover = el('rect', { class: 'an-hover', x: 0, y: padT, width: band, height: plotH, rx: 3, visibility: 'hidden' }, svg);
+      var marks = el('g', {}, svg);
+      d.buckets.forEach(function (_, i) {
+        var x = padL + i * band + (band - barW) / 2, base = y(0), stack = 0;
+        var parts = d.series.map(function (s) { return { s: s, v: s.values[i] || 0 }; }).filter(function (p) { return p.v > 0; });
+        parts.forEach(function (p, j) {
+          var y0 = y(stack), y1 = y(stack + p.v);
+          stack += p.v;
+          var h = Math.max(1, y0 - y1 - (j > 0 ? 2 : 0));
+          var yTop = y0 - (j > 0 ? 2 : 0) - h;
+          var last = j === parts.length - 1, r = last ? Math.min(4, barW / 2, h) : 0;
+          var path = 'M' + x + ',' + (yTop + h) + ' V' + (yTop + r) + (r ? ' Q' + x + ',' + yTop + ' ' + (x + r) + ',' + yTop : '') + ' H' + (x + barW - r) + (r ? ' Q' + (x + barW) + ',' + yTop + ' ' + (x + barW) + ',' + (yTop + r) : '') + ' V' + (yTop + h) + ' Z';
+          el('path', { d: path, class: 'an-bar-s s' + p.s.slot }, marks);
+        });
+        if (totals[i] === null && i * band + padL < W) {
+          // Nothing known (before recording, or still to come): a faint baseline only.
+          el('line', { x1: x, x2: x + barW, y1: base - 0.5, y2: base - 0.5, class: 'an-unknown' }, marks);
+        }
+      });
+      el('line', { x1: padL, x2: W - padR, y1: Math.round(y(0)) + 0.5, y2: Math.round(y(0)) + 0.5, class: 'an-base' }, svg);
+      labelsFor(d, plotW).forEach(function (l) {
+        var t = el('text', { x: padL + l.i * band + band / 2, y: H - (small ? 4 : 6), 'text-anchor': 'middle', class: 'an-axis' }, svg);
+        t.textContent = l.text;
+      });
+
+      // Hover and keyboard: one tooltip with every series at that bucket.
+      var tip = document.createElement('div');
+      tip.className = 'an-tip';
+      tip.hidden = true;
+      box.appendChild(tip);
+      var active = -1;
+      function show(i) {
+        if (i < 0 || i >= n) return;
+        active = i;
+        hover.setAttribute('x', padL + i * band);
+        hover.setAttribute('visibility', 'visible');
+        tip.textContent = '';
+        var h = document.createElement('div');
+        h.className = 'an-tip-h';
+        h.textContent = bucketTitle(d, i);
+        tip.appendChild(h);
+        if (totals[i] === null) {
+          var none = document.createElement('div');
+          none.className = 'an-tip-none';
+          none.textContent = d.buckets[i] >= d.until ? 'Still to come' : 'Not recorded';
+          tip.appendChild(none);
+        } else {
+          d.series.forEach(function (s) {
+            var row = document.createElement('div');
+            row.className = 'an-tip-r';
+            var key = document.createElement('i');
+            key.className = 'an-line s' + s.slot;
+            var v = document.createElement('b');
+            v.textContent = fmt(s.values[i] || 0);
+            var name = document.createElement('span');
+            name.textContent = s.name;
+            row.appendChild(key); row.appendChild(v); row.appendChild(name);
+            tip.appendChild(row);
+          });
+          if (d.series.length > 1) {
+            var tot = document.createElement('div');
+            tot.className = 'an-tip-t';
+            var tv = document.createElement('b');
+            tv.textContent = fmt(totals[i]);
+            var tn = document.createElement('span');
+            tn.textContent = 'Total';
+            tot.appendChild(tv); tot.appendChild(tn);
+            tip.appendChild(tot);
+          }
+        }
+        tip.hidden = false;
+        var cx = padL + i * band + band / 2;
+        var left = Math.min(Math.max(cx - tip.offsetWidth / 2, 0), W - tip.offsetWidth);
+        tip.style.left = left + 'px';
+        tip.style.top = Math.max(0, y(totals[i] || 0) - tip.offsetHeight - 10) + 'px';
+      }
+      function hide() { active = -1; tip.hidden = true; hover.setAttribute('visibility', 'hidden'); }
+      svg.addEventListener('pointermove', function (e) {
+        var r = svg.getBoundingClientRect();
+        var i = Math.floor((e.clientX - r.left - padL) / band);
+        if (i >= 0 && i < n) { if (i !== active) show(i); } else hide();
+      });
+      svg.addEventListener('pointerleave', hide);
+      svg.addEventListener('blur', hide);
+      svg.addEventListener('focus', function () {
+        var last = -1;
+        totals.forEach(function (t, i) { if (t !== null) last = i; });
+        show(last >= 0 ? last : 0);
+      });
+      svg.addEventListener('keydown', function (e) {
+        if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+          e.preventDefault();
+          show(Math.min(n - 1, Math.max(0, (active < 0 ? 0 : active) + (e.key === 'ArrowRight' ? 1 : -1))));
+        } else if (e.key === 'Escape') hide();
+      });
+    }
+
+    charts.forEach(draw);
+    var timer = null;
+    var lastW = window.innerWidth;
+    window.addEventListener('resize', function () {
+      if (window.innerWidth === lastW) return;
+      lastW = window.innerWidth;
+      clearTimeout(timer);
+      timer = setTimeout(function () { charts.forEach(draw); }, 150);
+    });
+  })();
 })();
