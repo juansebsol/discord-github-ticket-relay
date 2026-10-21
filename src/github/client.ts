@@ -79,6 +79,32 @@ function toIssueDetail(data: any): IssueDetail {
   };
 }
 
+/** A pull request, as GitHub lists it among the issues. */
+export interface PullDetail {
+  number: number;
+  url: string;
+  title: string;
+  body: string;
+  state: 'open' | 'closed';
+  draft: boolean;
+  mergedAt: Date | null;
+  labels: string[];
+  author: string | null;
+  authorIsBot: boolean;
+  createdAt: Date;
+  updatedAt: Date;
+  closedAt: Date | null;
+}
+
+function toPullDetail(data: any): PullDetail {
+  const i = toIssueDetail(data);
+  const merged = data.pull_request?.merged_at;
+  return {
+    number: i.number, url: i.url, title: i.title, body: i.body, state: i.state, draft: Boolean(data.draft), mergedAt: typeof merged === 'string' ? new Date(merged) : null,
+    labels: i.labels, author: i.author, authorIsBot: i.authorIsBot, createdAt: i.createdAt, updatedAt: i.updatedAt, closedAt: i.closedAt,
+  };
+}
+
 export interface CreatedIssue {
   number: number;
   url: string;
@@ -467,21 +493,22 @@ export class GitHubClient {
   }
 
   /**
-   * One page (up to 100) of a repository's issues, open and closed, pull requests left out.
-   * `more` says whether another page may follow. Used to fill and refresh the issue index.
+   * One page (up to 100) of a repository's issues, open and closed, with the pull requests GitHub
+   * lists among them kept apart. `more` says whether another page may follow. Used to fill and
+   * refresh the issue index and the pull request index.
    */
   async listIssuesPage(
     installationId: number,
     owner: string,
     repo: string,
-    o: { sort: 'created' | 'updated'; direction: 'asc' | 'desc'; page: number; since?: Date; perPage?: number },
-  ): Promise<{ issues: IssueDetail[]; more: boolean }> {
+    o: { sort: 'created' | 'updated'; direction: 'asc' | 'desc'; page: number; since?: Date; perPage?: number; state?: 'all' | 'open' },
+  ): Promise<{ issues: IssueDetail[]; pulls: PullDetail[]; more: boolean }> {
     const perPage = o.perPage ?? 100;
-    const params = new URLSearchParams({ state: 'all', sort: o.sort, direction: o.direction, per_page: String(perPage), page: String(o.page) });
+    const params = new URLSearchParams({ state: o.state ?? 'all', sort: o.sort, direction: o.direction, per_page: String(perPage), page: String(o.page) });
     if (o.since) params.set('since', o.since.toISOString());
     const { data } = await this.request('GET', `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues?${params}`, await this.asInstallation(installationId));
     const items = data as any[];
-    return { issues: items.filter((i) => !i.pull_request).map(toIssueDetail), more: items.length >= perPage };
+    return { issues: items.filter((i) => !i.pull_request).map(toIssueDetail), pulls: items.filter((i) => i.pull_request).map(toPullDetail), more: items.length >= perPage };
   }
 
   /** The first comments on an issue (to find "Duplicate of #N"). */

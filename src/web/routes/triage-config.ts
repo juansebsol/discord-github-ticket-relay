@@ -24,6 +24,7 @@ import {
   MODES,
   parseTriageConfig,
   saveTriageConfig,
+  workOn,
   type LabelGroup,
   type Mode,
   type TriageConfig,
@@ -313,8 +314,12 @@ export function registerTriageConfigRoutes(app: FastifyInstance, web: Web): void
     const sample = buildUserPrompt(
       { app: apps[0]?.name ?? 'Your app', type: 'Bug Report', title: 'Example: the app closes when I export to PNG', description: 'Every time I export a two-page spread to PNG the app closes. Version 0.9 on Windows 11.' },
       [{ ref: `${apps[0] ? `${apps[0].repo_owner}/${apps[0].repo_name}` : 'owner/repo'}#12`, repo: apps[0] ? `${apps[0].repo_owner}/${apps[0].repo_name}` : 'owner/repo', sameRepo: true, number: 12, state: 'closed', stateReason: 'completed', createdAt: new Date('2026-01-15'), app: apps[0]?.name ?? null, title: 'Crash when exporting spreads', text: 'Exporting a spread crashes the app.' }],
+      [],
+      [],
+      // Being worked on, Already fixed: an example pull request.
+      workOn(c) ? [{ ref: '#15', kind: 'pull', number: 15, title: 'Fix the crash when exporting spreads to PNG', url: '', state: 'open', text: 'Renders each page of a spread separately. Fixes #12.', for: [12], mergedAt: null, author: 'someone' }] : undefined,
     );
-    const fields = Object.keys(verdictSchema({ groups, apps: apps.map((a) => a.name) }).shape);
+    const fields = Object.keys(verdictSchema({ groups, apps: apps.map((a) => a.name), work: workOn(c) }).shape);
     const body = html`
       ${pageHeader({ title: 'Full prompt', crumbs: [{ href: toolHref(ctx, 'triage') ?? undefined, label: 'AI triage' }, { href: promptUrl(ctx), label: 'Prompt' }, { label: 'Full prompt' }], description: `Exactly what Claude is told, with your current settings.${editIn(ctx.membership)}` })}
       <div class="stack">

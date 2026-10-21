@@ -9,6 +9,7 @@ import { getInstallationRepos } from '../../domain/repos.js';
 import { getGitHubConnection } from '../../domain/store.js';
 import { html, raw, type SafeHtml } from '../../lib/html.js';
 import { DEFAULT_PERIOD, mostReported, PERIODS, periodOf, periodStart, type PeriodId, type Reported } from '../../repo-status/reports.js';
+import { fixesFor, listPulls, type IssueFix, type PullItem, type PullLists } from '../../repo-status/pulls.js';
 import type { UrgentIssue } from '../../repo-status/score.js';
 import {
   ALL_TIME,
@@ -186,7 +187,7 @@ export function registerRepoStatusRoutes(app: FastifyInstance, web: Web): void {
   }
 
   /** Fix first: open issues across the repositories, best score first, with why. */
-  function fixFirst(ctx: WorkspaceRequestContext, rows: Row[], only: string | null): SafeHtml {
+  function fixFirst(ctx: WorkspaceRequestContext, rows: Row[], only: string | null, fixes: Map<string, IssueFix>): SafeHtml {
     const all = rows.flatMap((r) => (r.stats?.urgent ?? []).map((u) => ({ u, repo: r.repo })));
     const list = all.filter((x) => !only || x.repo.name === only).sort((a, b) => b.u.score - a.u.score || (b.u.createdAt ?? '').localeCompare(a.u.createdAt ?? '')).slice(0, 150);
     const filters = [{ href: `${base(ctx)}?view=fix`, label: 'All', count: all.length, current: !only },
@@ -197,7 +198,7 @@ export function registerRepoStatusRoutes(app: FastifyInstance, web: Web): void {
       <div class="rs-fx-b">
         <a class="rs-fx-t" href="${u.url}" target="_blank" rel="noopener noreferrer">${u.critical ? icon('flame', 14, 'rs-flame') : ''}${u.title}</a>
         <div class="rs-fx-m"><span class="mono">${repo.name}#${String(u.number)}</span>${u.createdAt ? html` · opened ${timeAgo(new Date(u.createdAt))}` : ''}${u.labels.length ? html` · ${u.labels.slice(0, 4).join(', ')}` : ''}</div>
-        <div class="rs-fx-why">${u.reasons.map((x) => html`<span class="rs-why">${x}</span>`)}</div>
+        <div class="rs-fx-why">${fixChip(fixes.get(`${repo.id}:${u.number}`))}${u.reasons.map((x) => html`<span class="rs-why">${x}</span>`)}</div>
       </div>
     </li>`;
     return html`<div class="rs-fix">
@@ -210,7 +211,7 @@ export function registerRepoStatusRoutes(app: FastifyInstance, web: Web): void {
   }
 
   /** Most reported: the issues Discord tickets are about, most tickets first (reported once, folded away). */
-  function mostReportedView(ctx: WorkspaceRequestContext, all: Reported[], only: string | null, period: PeriodId): SafeHtml {
+  function mostReportedView(ctx: WorkspaceRequestContext, all: Reported[], only: string | null, period: PeriodId, fixes: Map<string, IssueFix>): SafeHtml {
     const href = (o: { repo?: string | null; period?: PeriodId }) => {
       const p = new URLSearchParams({ view: 'reported' });
       const per = o.period ?? period;
@@ -240,7 +241,8 @@ export function registerRepoStatusRoutes(app: FastifyInstance, web: Web): void {
       <div class="rs-fx-b">
         <div class="rs-rp-h"><a class="rs-fx-t" href="${x.url}" target="_blank" rel="noopener noreferrer">${x.title}</a>${state(x)}</div>
         <div class="rs-fx-m"><span class="mono">${x.repo.name}#${String(x.number)}</span> · ${plural(x.people, 'person', 'people')} · last reported ${timeAgo(x.lastAt)}${x.reports.length > 1 ? html` · first ${timeAgo(x.firstAt)}` : ''}</div>
-        ${x.suggested || x.github || x.afterClosed ? html`<div class="rs-fx-why">
+        ${x.suggested || x.github || x.afterClosed || fixes.has(`${x.repo.id}:${x.number}`) ? html`<div class="rs-fx-why">
+          ${fixChip(fixes.get(`${x.repo.id}:${x.number}`))}
           ${x.afterClosed ? html`<span class="rs-why warn" title="Reported again after it was closed as fixed: the fix may not have worked, or not shipped yet">${plural(x.afterClosed, 'report')} since it was closed</span>` : ''}
           ${x.suggested ? (review
             ? html`<a class="rs-why sug" href="${ctx.base}/triage" title="Claude thinks these tickets are about this issue. Apply or dismiss that in AI triage › Review.">${n(x.suggested)} waiting for review</a>`
@@ -268,6 +270,67 @@ export function registerRepoStatusRoutes(app: FastifyInstance, web: Web): void {
     </div>`;
   }
 
+  /** Pull requests: open ones (most reported first), merged ones waiting for a release, and merged ones. */
+  function pullsView(ctx: WorkspaceRequestContext, lists: PullLists, reportsOf: Map<string, number>, which: 'open' | 'waiting' | 'merged', only: string | null): SafeHtml {
+    const href = (o: { which?: string; repo?: string | null }) => {
+      const p = new URLSearchParams({ view: 'pulls' });
+      const w = o.which ?? which;
+      if (w !== 'open') p.set('list', w);
+      const repo = o.repo === undefined ? only : o.repo;
+      if (repo) p.set('repo', repo);
+      return `${base(ctx)}?${p.toString()}`;
+    };
+    const mine = (list: PullItem[]) => list.filter((x) => !only || x.repo.name === only);
+    const reports = (x: PullItem) => x.issues.reduce((s, i) => s + (reportsOf.get(`${x.repo.id}:${i.number}`) ?? 0), 0);
+    const shown = mine(lists[which]);
+    if (which === 'open') shown.sort((a, b) => reports(b) - reports(a) || b.pull.updated_at.getTime() - a.pull.updated_at.getTime());
+    const repoNames = [...new Set([...lists.open, ...lists.waiting, ...lists.merged].map((x) => x.repo.name))];
+    const lists_ = segLinks('Pull requests', [
+      { href: href({ which: 'open' }), label: 'Open', count: mine(lists.open).length, current: which === 'open' },
+      ...(lists.waiting.length || which === 'waiting' ? [{ href: href({ which: 'waiting' }), label: 'Waiting for a release', count: mine(lists.waiting).length, current: which === 'waiting' }] : []),
+      { href: href({ which: 'merged' }), label: 'Merged', count: mine(lists.merged).length, current: which === 'merged' },
+    ]);
+    const repoFilter = repoNames.length > 1 || only
+      ? segLinks('Repositories', [{ href: href({ repo: null }), label: 'All', current: !only }, ...repoNames.map((name) => ({ href: href({ repo: name }), label: name, current: only === name }))])
+      : '';
+    const item = (x: PullItem) => {
+      const p = x.pull;
+      const r = reports(x);
+      const ic = p.state === 'open' ? (p.draft ? 'git-pull-request-draft' : 'git-pull-request') : 'git-merge';
+      const when = p.state === 'open'
+        ? html`opened ${timeAgo(p.created_at)} · updated ${timeAgo(p.updated_at)}`
+        : html`merged ${timeAgo(p.merged_at!)}${x.release ? html` · in <span class="mono">${x.release.tag}</span>` : x.release === null && which === 'waiting' ? ' · not released yet' : ''}`;
+      return html`<li class="rs-fx rs-pr">
+        <span class="rs-pr-ic ${p.state === 'open' ? (p.draft ? 'draft' : 'open') : 'merged'}" title="${p.state === 'open' ? (p.draft ? 'Draft' : 'Open') : 'Merged'}">${icon(ic, 16)}</span>
+        <div class="rs-fx-b">
+          <div class="rs-rp-h"><a class="rs-fx-t" href="${p.html_url}" target="_blank" rel="noopener noreferrer">${p.title}</a>${p.draft ? pill('Draft', 'neutral') : ''}${r ? html`<span class="rs-why sug" title="Discord tickets about the issues it’s for, duplicates included">${plural(r, 'Discord report')}</span>` : ''}</div>
+          <div class="rs-fx-m"><span class="mono">${x.repo.name}#${String(p.number)}</span>${p.author ? html` · ${p.author}` : ''} · ${when}</div>
+          ${x.issues.length ? html`<ul class="rs-pr-for">${x.issues.slice(0, 4).map((i) => {
+            const count = reportsOf.get(`${x.repo.id}:${i.number}`) ?? 0;
+            return html`<li><span class="muted">${i.closes ? (p.state === 'open' ? 'Fixes' : 'Fixed') : 'For'}</span> <a href="https://github.com/${x.repo.owner}/${x.repo.name}/issues/${String(i.number)}" target="_blank" rel="noopener noreferrer">#${String(i.number)}</a>${i.title ? html` <span class="rs-pr-it">${i.title}</span>` : ''}${count && x.issues.length > 1 ? html` <a class="rs-why" href="${base(ctx)}?view=reported&amp;period=all&amp;repo=${encodeURIComponent(x.repo.name)}" title="Discord tickets about it, all time">${plural(count, 'report')}</a>` : ''}</li>`;
+          })}</ul>` : ''}
+        </div>
+      </li>`;
+    };
+    const none = which === 'open' ? ['No open pull requests', 'Nothing is waiting for review in these repositories.']
+      : which === 'waiting' ? ['Nothing waiting for a release', 'Every merged pull request is in a release.']
+        : ['Nothing merged in the last 90 days', 'Merged pull requests show up here for 90 days.'];
+    return html`<div class="rs-fix">
+      <div class="rs-fix-h rs-rp-filters">${lists_}${repoFilter}</div>
+      ${shown.length ? html`<ol class="rs-fxs">${shown.slice(0, 200).map(item)}</ol>` : html`<div class="card">${empty('git-pull-request', none[0]!, none[1]!)}</div>`}
+      <p class="small muted rs-fix-note">From the issue sync, every couple of minutes: pull requests by bots and chores (dependency bumps, CI, tests) are left out. A pull request is for an issue when it says so (“Fixes #12”) or names it (“for #12”). Reports are the Discord tickets about those issues, duplicates included.</p>
+    </div>`;
+  }
+
+  /** A chip for an issue a pull request is about: being worked on, waiting for a release, or fixed. */
+  function fixChip(f: IssueFix | undefined): SafeHtml | string {
+    if (!f) return '';
+    const p = f.pull;
+    if (f.status === 'open') return html`<a class="rs-why sug" href="${p.html_url}" target="_blank" rel="noopener noreferrer" title="${p.title}">${p.draft ? 'Draft' : 'Open'} PR #${String(p.number)}</a>`;
+    if (f.status === 'waiting') return html`<a class="rs-why ok" href="${p.html_url}" target="_blank" rel="noopener noreferrer" title="${`${p.title}: merged, not in a release yet`}">Fixed in #${String(p.number)}, not released</a>`;
+    return html`<a class="rs-why ok" href="${p.html_url}" target="_blank" rel="noopener noreferrer" title="${p.title}">Fixed in #${String(p.number)}${f.release ? ` (${f.release.tag})` : ''}</a>`;
+  }
+
   function footer(l: Awaited<ReturnType<typeof load>>): SafeHtml {
     return html`<div class="rs-foot">
       <span>${l.next ? html`Next read ${localTime(l.next)} · every ${plural(l.s.everyMinutes, 'minute')}` : l.s.enabled ? 'Reading…' : 'Off'}</span>
@@ -280,26 +343,43 @@ export function registerRepoStatusRoutes(app: FastifyInstance, web: Web): void {
   app.get('/w/:wid/repos', async (req, reply) => {
     const ctx = await web.requireWorkspace(req, reply, { permission: 'repo-status.view' });
     if (!ctx) return reply;
-    const q = req.query as { view?: string; repo?: string; partial?: string; period?: string };
+    const q = req.query as { view?: string; repo?: string; partial?: string; period?: string; list?: string };
     const edit = can(ctx.membership, 'repo-status.edit');
     const l = await load(ctx);
-    const view = q.view === 'fix' ? 'fix' : q.view === 'reported' ? 'reported' : 'repos';
+    const view = q.view === 'fix' ? 'fix' : q.view === 'reported' ? 'reported' : q.view === 'pulls' ? 'pulls' : 'repos';
     const period = view === 'reported' ? periodOf(q.period).id : DEFAULT_PERIOD;
-    const reports = l.s.enabled ? await mostReported(deps.db, deps.box, ctx.workspace.id, l.rows.map((r) => r.repo), periodStart(period)) : [];
+    const repos = l.rows.map((r) => r.repo);
+    const reports = l.s.enabled ? await mostReported(deps.db, deps.box, ctx.workspace.id, repos, periodStart(period)) : [];
+    const pulls = l.s.enabled ? await listPulls(deps.db, repos) : { open: [], waiting: [], merged: [] };
+    const which = q.list === 'waiting' ? 'waiting' : q.list === 'merged' ? 'merged' : 'open';
+    // The pull requests about the issues on the page.
+    const fixes = new Map<string, IssueFix>();
+    if (view === 'fix' || view === 'reported') {
+      for (const r of l.rows) {
+        const numbers = view === 'fix' ? (r.stats?.urgent ?? []).map((u) => u.number) : reports.filter((x) => x.repo.id === r.repo.id).map((x) => x.number);
+        for (const [num, f] of await fixesFor(deps.db, r.repo.id, numbers)) fixes.set(`${r.repo.id}:${num}`, f);
+      }
+    }
+    const reportsAll = view === 'pulls'
+      ? new Map((await mostReported(deps.db, deps.box, ctx.workspace.id, repos, null)).map((x) => [`${x.repo.id}:${x.number}`, x.reports.length]))
+      : new Map<string, number>();
     const live = html`<div class="rs-live">
       <div class="rs-bar">
         ${segLinks('View', [
           { href: base(ctx), label: 'Repos', count: l.rows.length, current: view === 'repos' },
           { href: `${base(ctx)}?view=fix`, label: 'Fix first', count: l.rows.reduce((s, r) => s + (r.stats?.urgent.length ?? 0), 0), current: view === 'fix' },
           { href: `${base(ctx)}?view=reported`, label: 'Most reported', count: reports.filter((x) => x.reports.length > 1).length, current: view === 'reported' },
+          { href: `${base(ctx)}?view=pulls`, label: 'Pull requests', count: pulls.open.length, current: view === 'pulls' },
         ])}
         <span class="rs-fresh">${freshPill(l.freshness)}${l.oldest ? html`<span class="small muted">Data as of ${localTime(l.oldest)} (${timeAgo(l.oldest)})</span>` : ''}</span>
       </div>
       ${l.rows.filter((r) => r.row?.error).map((r) => html`<div class="rs-err">${notice('warn', `${r.repo.owner}/${r.repo.name}`, r.row!.error!)}</div>`)}
       ${view === 'fix'
-        ? fixFirst(ctx, l.rows, q.repo ?? null)
+        ? fixFirst(ctx, l.rows, q.repo ?? null, fixes)
         : view === 'reported'
-          ? mostReportedView(ctx, reports, q.repo ?? null, period)
+          ? mostReportedView(ctx, reports, q.repo ?? null, period, fixes)
+          : view === 'pulls'
+            ? pullsView(ctx, pulls, reportsAll, which, q.repo ?? null)
           : html`<section class="card rs-card" aria-label="Repositories">${table(ctx, l.rows)}${footer(l)}</section>`}
     </div>`;
     if (q.partial === '1') return reply.header('x-live-partial', '1').header('Cache-Control', 'no-store').type('text/html').send(live.toString());
@@ -327,7 +407,7 @@ export function registerRepoStatusRoutes(app: FastifyInstance, web: Web): void {
                 ${edit ? html`<div class="row">${postBtn(`${base(ctx)}/settings`, 'Turn on', ctx.csrf, { variant: 'primary', icon: 'chart-no-axes-column-increasing', fields: { enabled: '1', keep: '1' } })}${linkBtn(`${base(ctx)}/settings`, 'Choose the repositories', { variant: 'ghost' })}</div>` : html`<p class="small muted">An admin can turn it on.</p>`}
               </div>
             </section>`
-          : html`<div data-live="30000" data-live-src="${`${base(ctx)}?${new URLSearchParams({ partial: '1', ...(view !== 'repos' ? { view } : {}), ...(view !== 'repos' && q.repo ? { repo: q.repo } : {}), ...(view === 'reported' && period !== DEFAULT_PERIOD ? { period } : {}) }).toString()}`}">${live}</div>`}`;
+          : html`<div data-live="30000" data-live-src="${`${base(ctx)}?${new URLSearchParams({ partial: '1', ...(view !== 'repos' ? { view } : {}), ...(view !== 'repos' && q.repo ? { repo: q.repo } : {}), ...(view === 'reported' && period !== DEFAULT_PERIOD ? { period } : {}), ...(view === 'pulls' && which !== 'open' ? { list: which } : {}) }).toString()}`}">${live}</div>`}`;
     return web.render(reply, ctx, 'Repo status', 'repos', body, { width: 'full' });
   });
 

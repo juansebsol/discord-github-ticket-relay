@@ -1737,6 +1737,19 @@ a.rs-why:hover { border-color: currentColor; }
 .rs-once > summary { display: inline-flex; align-items: center; gap: 6px; margin-bottom: 8px; font-weight: 500; font-size: 13px; color: var(--muted); cursor: pointer; }
 .rs-once > summary:hover { color: var(--text); }
 .rs-once > summary .n { padding: 0 6px; border-radius: var(--r-full); background: var(--surface-2); font-size: 12px; font-variant-numeric: tabular-nums; }
+/* Pull requests */
+.rs-pr { grid-template-columns: 20px minmax(0, 1fr); }
+.rs-pr-ic { display: inline-flex; justify-content: center; padding-top: 2px; }
+.rs-pr-ic.open { color: var(--ok); }
+.rs-pr-ic.draft { color: var(--muted); }
+.rs-pr-ic.merged { color: var(--dot-2); }
+.rs-pr-for { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 2px; font-size: 13px; }
+.rs-pr-for li { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
+.rs-pr-for a { color: var(--text); }
+.rs-pr-for a:hover { text-decoration: underline; }
+.rs-pr-for a.rs-why { color: var(--muted); }
+.rs-pr-it { color: var(--muted); }
+.rs-why.ok { color: var(--ok-text); background: var(--ok-soft); border-color: var(--ok-border); }
 /* Settings: the repository list */
 .rs-pick { list-style: none; margin: 0; padding: 4px 0; max-height: 440px; overflow-y: auto; }
 .rs-pick li { padding: 6px 20px; border-top: 1px solid var(--border); }

@@ -299,6 +299,10 @@ function actionText(a: TriageAction): string {
       return `Duplicate of #${String(a.duplicateOf)}`;
     case 'regression':
       return `Regression of #${String(a.regressionOf)}`;
+    case 'inProgress':
+      return `Being worked on in ${a.work?.ref ?? 'a pull request'}`;
+    case 'fixed':
+      return `Already fixed in ${a.work?.ref ?? 'an earlier change'}`;
     case 'needsInfo':
       return 'Needs more info';
     case 'multiple':

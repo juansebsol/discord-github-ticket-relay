@@ -40,6 +40,14 @@ export function actionTitle(a: TriageAction, repo: Repo, o: { applied?: boolean 
       return html`Duplicate of ${issueLink(repo, a.duplicateOf)}${a.originalClosed ? html`<span class="muted"> · the original is closed${o.applied ? '' : ', so this is only suggested'}</span>` : ''}`;
     case 'regression':
       return html`Regression of ${issueLink(repo, a.regressionOf)}<span class="muted"> · closed as fixed, reported again</span>`;
+    case 'inProgress':
+      return a.work
+        ? html`Being worked on in <a href="${a.work.url}" target="_blank" rel="noopener noreferrer">${a.work.ref}</a><span class="muted"> · ${a.work.draft ? 'draft: ' : ''}${a.work.title}</span>`
+        : html`Being worked on`;
+    case 'fixed':
+      return a.work
+        ? html`Already fixed in <a href="${a.work.url}" target="_blank" rel="noopener noreferrer">${a.work.ref}</a><span class="muted"> · ${a.work.release ? `released in ${a.work.release}` : a.work.release === null ? 'not released yet' : 'merged'} · ${a.work.title}</span>`
+        : html`Already fixed`;
     case 'needsInfo':
       return html`Needs more info${a.missing?.length ? html`<span class="muted"> · ${a.missing.map((m) => MISSING_SHORT[m]).join(', ')}</span>` : ''}`;
     case 'multiple':

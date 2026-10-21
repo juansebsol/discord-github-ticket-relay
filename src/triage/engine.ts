@@ -24,6 +24,7 @@ import { ChangeTracker, recentChanges, type AppChange } from './knowledge-change
 import { RepoStatusTracker } from '../repo-status/tracker.js';
 import { actionMatcher } from './state.js';
 import { buildKnowledgeBlock, buildSystemPrompt, buildUserPrompt, extractDescription, searchTerms, type Candidate } from './prompt.js';
+import { findWork, type WorkItem, type WorkRef } from './work.js';
 import {
   appOf,
   chooseOriginal,
@@ -45,6 +46,7 @@ import {
   withActionsOff,
   CLOSE_ONLY_COMMENT,
   FLAG_DEFAULTS,
+  workOn,
   MISSING_TEXT,
   NOTIFIABLE,
   anyActionOn,
@@ -91,6 +93,8 @@ export interface TriageAction {
   /** Wrong repository: the app (and its repository) the ticket belongs to. */
   rightApp?: string;
   rightRepo?: string;
+  /** Being worked on: the open pull request. Already fixed: the merged pull request or commit (and its release). */
+  work?: WorkRef;
   /** Label groups: the options chosen (all added as labels). */
   labels?: string[];
   groupName?: string;
@@ -143,11 +147,15 @@ export function renderTemplate(template: string, ctx: TemplateContext, a: Partia
     shared_issue: a.sharedIssue ? refText(a.sharedIssue, ctx, target) || 'another issue' : 'no issue yet',
     right_app: a.rightApp ? name(a.rightApp) : 'another app',
     right_repo: a.rightRepo ? `[${a.rightRepo}](https://github.com/${a.rightRepo})` : 'another repository',
+    // GitHub links "#12" and a commit's sha in the same repository by itself.
+    pull: a.work ? (target === 'github' ? a.work.ref : `[${a.work.ref}](${a.work.url})`) : 'a pull request',
+    fix: a.work ? (target === 'github' ? a.work.ref : `[${a.work.ref}](${a.work.url})`) : 'an earlier change',
+    release: a.work?.release ? `it’s in ${name(a.work.release)}` : a.work?.release === null ? 'it will be in the next release' : 'it’s merged',
     help_channel: channel && ctx.guildId
       ? target === 'github' ? `[#${channel.name} on Discord](https://discord.com/channels/${ctx.guildId}/${channel.id})` : `<#${channel.id}>`
       : 'our Discord server',
   };
-  return template.replace(/\{(app|duplicate|regression|missing|parts|related|shared_apps|shared_issue|right_app|right_repo|help_channel)\}/g, (_m, k: string) => vars[k]!).trim();
+  return template.replace(/\{(app|duplicate|regression|missing|parts|related|shared_apps|shared_issue|right_app|right_repo|help_channel|pull|fix|release)\}/g, (_m, k: string) => vars[k]!).trim();
 }
 
 export interface TriageResultRow {
@@ -233,8 +241,13 @@ export function planActions(v: Verdict, c: TriageConfig, ctx?: TemplateContext, 
   if (!junk) {
     const regression = v.regression_of ?? null;
     if (regression !== null) add('regression', v.regression_confidence ?? 0, { regressionOf: regression });
-    if (v.duplicate_of !== null && v.duplicate_of !== regression) add('duplicate', v.duplicate_confidence, { duplicateOf: v.duplicate_of, ...(v.duplicate_closed ? { originalClosed: true } : {}) });
-    else if (v.needs_info && !notDev && regression === null) add('needsInfo', v.needs_info_confidence, { missing: v.missing ?? [] });
+    const duplicate = v.duplicate_of !== null && v.duplicate_of !== regression;
+    if (duplicate) add('duplicate', v.duplicate_confidence, { duplicateOf: v.duplicate_of!, ...(v.duplicate_closed ? { originalClosed: true } : {}) });
+    // A fix that didn't hold is a regression; one that did makes asking for details pointless.
+    const fixed = regression === null && v.fixed_work && on('fixed') ? v.fixed_work : null;
+    if (fixed) add('fixed', v.fixed_confidence ?? 0, { work: fixed });
+    else if (v.in_progress_work) add('inProgress', v.in_progress_confidence ?? 0, { work: v.in_progress_work });
+    if (!duplicate && v.needs_info && !notDev && regression === null && !fixed) add('needsInfo', v.needs_info_confidence, { missing: v.missing ?? [] });
     if ((v.parts ?? []).length >= 2) add('multiple', v.parts_confidence ?? 0, { parts: v.parts });
     if ((v.related ?? []).length) add('related', v.related_confidence ?? 0, { related: v.related });
     if (v.shared) add('shared', v.shared_confidence ?? 0, { sharedApps: v.shared_apps ?? [], sharedIssue: v.shared_issue ?? null });
@@ -264,6 +277,8 @@ export function describeAction(a: TriageAction): string {
     ? a.label
     : a.kind === 'duplicate' ? `duplicate of #${a.duplicateOf}`
     : a.kind === 'regression' ? `regression of #${a.regressionOf}`
+    : a.kind === 'inProgress' ? `being worked on in ${a.work?.ref ?? 'a pull request'}`
+    : a.kind === 'fixed' ? `fixed in ${a.work?.ref ?? 'an earlier change'}${a.work?.release ? ` (${a.work.release})` : a.work?.release === null ? ', not released yet' : ''}`
     : a.kind === 'spam' ? 'spam'
     : a.kind === 'needsInfo' ? 'needs info'
     : a.kind === 'support' ? 'not a development issue'
@@ -384,7 +399,7 @@ function githubMessage(err: unknown): string {
 export function systemPromptFor(c: TriageConfig, apps: AppRow[]): string {
   return buildSystemPrompt(
     { ...c, labelGroups: c.labelGroups.filter((g) => g.mode !== 'off') },
-    { apps: apps.map((a) => ({ name: a.name, repo: `${a.repo_owner}/${a.repo_name}`, description: a.description ?? '' })) },
+    { apps: apps.map((a) => ({ name: a.name, repo: `${a.repo_owner}/${a.repo_name}`, description: a.description ?? '' })), work: workOn(c) },
   );
 }
 
@@ -1065,6 +1080,10 @@ export class TriageEngine {
     const own = `${target.repo_owner}/${target.repo_name}`;
     const repoRef: RepoRef = { repo_id: target.repo_id, owner: target.repo_owner, name: target.repo_name, installation_id: inst };
     const candidates = await this.findCandidates(issue, repoRef, c, apps);
+    // Being worked on, Already fixed: the pull requests and commits that may be about it.
+    const work: WorkItem[] | undefined = workOn(effective)
+      ? await findWork(deps.db, target.repo_id, ftsQuery(issue.title, extractDescription(issue.body)), candidates.filter((x) => x.sameRepo).map((x) => x.number)).catch(() => [])
+      : undefined;
     const appNames = [...new Set(apps.map((a) => a.name))];
     // Groups that are off for this source aren't asked about; groups off for this type are listed as off.
     const groups = c.labelGroups.filter((g) => effective.labelGroups.find((b) => b.id === g.id)?.mode !== 'off');
@@ -1088,8 +1107,9 @@ export class TriageEngine {
         candidates,
         [...off].filter((k) => !k.startsWith('group:')),
         groupsOff,
+        work,
       ),
-      verdictSchema({ groups, apps: appNames }),
+      verdictSchema({ groups, apps: appNames, work: Boolean(work) }),
       withImages,
     );
     let result;
@@ -1124,6 +1144,7 @@ export class TriageEngine {
       refs: new Set(candidates.map((x) => x.ref)),
       apps: appNames,
       groups: groups.filter((g) => g.mode !== 'off'),
+      work: new Map((work ?? []).map((w) => [w.ref, w])),
     });
     if (verdict.duplicates.length && c.duplicate.mode !== 'off') await this.pickOriginal(verdict, repoRef);
     const dc = await getDiscordConnection(deps.db, workspaceId);
@@ -1141,7 +1162,7 @@ export class TriageEngine {
     const { deps } = this;
     const own = `${repo.owner}/${repo.name}`;
     const on = (k: Flag) => c[k].mode !== 'off';
-    if (!on('duplicate') && !on('regression') && !on('related') && !on('shared')) return [];
+    if (!on('duplicate') && !on('regression') && !on('related') && !on('shared') && !on('inProgress') && !on('fixed')) return [];
     const same = new Map<number, Candidate>();
     const index = await this.indexer.refresh(repo).catch(() => null);
     const query = ftsQuery(issue.title, extractDescription(issue.body));

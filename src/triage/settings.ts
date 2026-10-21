@@ -19,18 +19,20 @@ export type Mode = (typeof MODES)[number];
 export const PRIORITIES = ['critical', 'high', 'medium', 'low'] as const;
 export type Priority = (typeof PRIORITIES)[number];
 /** Display order on the Triage tab. */
-export const FLAGS = ['support', 'duplicate', 'regression', 'needsInfo', 'multiple', 'related', 'shared', 'wrongRepo', 'spam', 'noAction'] as const;
+export const FLAGS = ['support', 'duplicate', 'regression', 'inProgress', 'fixed', 'needsInfo', 'multiple', 'related', 'shared', 'wrongRepo', 'spam', 'noAction'] as const;
 export type Flag = (typeof FLAGS)[number];
 /** A label group's action: "group:<id>". */
 export type GroupKind = `group:${string}`;
 export type ActionKind = 'priority' | Flag;
 /** Every built-in action, in the column order of the "Rules by ticket type" table (label groups follow). */
-export const ACTION_KINDS = ['priority', 'support', 'duplicate', 'regression', 'needsInfo', 'multiple', 'related', 'shared', 'wrongRepo', 'spam', 'noAction'] as const satisfies readonly ActionKind[];
+export const ACTION_KINDS = ['priority', 'support', 'duplicate', 'regression', 'inProgress', 'fixed', 'needsInfo', 'multiple', 'related', 'shared', 'wrongRepo', 'spam', 'noAction'] as const satisfies readonly ActionKind[];
 export const ACTION_NAMES: Record<ActionKind, string> = {
   priority: 'Priority',
   support: 'Not a dev issue',
   duplicate: 'Duplicates',
   regression: 'Regression',
+  inProgress: 'Being worked on',
+  fixed: 'Already fixed',
   needsInfo: 'Needs info',
   multiple: 'Several problems',
   related: 'Related',
@@ -40,7 +42,14 @@ export const ACTION_NAMES: Record<ActionKind, string> = {
   noAction: 'No action',
 };
 /** These never close the issue, so the option isn't offered. */
-export const NO_CLOSE: ReadonlySet<Flag> = new Set(['regression', 'related', 'shared', 'wrongRepo']);
+export const NO_CLOSE: ReadonlySet<Flag> = new Set(['regression', 'inProgress', 'fixed', 'related', 'shared', 'wrongRepo']);
+/** They compare tickets with pull requests and commits: Claude is only shown those when one is on. */
+export const WORK_FLAGS: readonly Flag[] = ['inProgress', 'fixed'];
+
+/** Whether Claude is shown pull requests and commits (Being worked on or Already fixed is on). */
+export function workOn(c: { inProgress: { mode: Mode }; fixed: { mode: Mode } }): boolean {
+  return c.inProgress.mode !== 'off' || c.fixed.mode !== 'off';
+}
 
 export const DEFAULT_PRIORITY_LABELS: Record<Priority, string> = {
   critical: 'priority: critical',
@@ -67,6 +76,8 @@ export const FLAG_DEFAULTS: Record<Flag, { label: string; close: boolean; commen
     comment: 'This looks like {regression} coming back: that issue was closed as fixed, but this report says it still happens.',
     notifyMember: false,
   },
+  inProgress: { label: 'in progress', close: false, comment: 'This is being worked on in {pull}.', notifyMember: false },
+  fixed: { label: 'fixed', close: false, comment: 'This was already fixed in {fix}: {release}.', notifyMember: false },
   multiple: {
     label: 'multiple issues',
     close: false,
@@ -256,6 +267,8 @@ export const TriageConfigSchema = z.object({
   spam: flag('spam'),
   noAction: flag('noAction'),
   regression: flag('regression'),
+  inProgress: flag('inProgress'),
+  fixed: flag('fixed'),
   multiple: flag('multiple'),
   related: flag('related'),
   shared: flag('shared'),

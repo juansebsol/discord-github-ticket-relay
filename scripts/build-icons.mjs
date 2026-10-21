@@ -29,6 +29,8 @@ const NAMES = [
   'git-merge', 'git-commit-horizontal',
   // Repo status
   'chart-no-axes-column-increasing', 'flame', 'git-pull-request', 'package', 'download',
+  // Pull requests
+  'git-pull-request-draft',
 ];
 
 const require = createRequire(import.meta.url);

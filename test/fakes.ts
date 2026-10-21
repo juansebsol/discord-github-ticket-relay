@@ -22,7 +22,7 @@ export interface FakeRepo {
   topics?: string[];
   default_branch?: string;
   /** Pull requests (closed ones with merged_at were merged), and the commits each one brought (merged or rebased). */
-  pulls?: { number: number; title: string; body?: string; user: string; base?: string; merged_at?: string | null; updated_at?: string; created_at?: string; labels?: string[]; commits?: string[] }[];
+  pulls?: { number: number; title: string; body?: string; user: string; base?: string; merged_at?: string | null; updated_at?: string; created_at?: string; labels?: string[]; commits?: string[]; draft?: boolean }[];
   /** Commits on the default branch, newest first. */
   branchCommits?: { sha: string; message: string; user?: string | null; date: string; parents?: number }[];
   /** The app icon (a PNG under assets/app-icon/…), for Repo status. */
@@ -401,13 +401,29 @@ export class FakeGitHub {
         const perPage = Number(p.get('per_page') ?? 30);
         const page = Number(p.get('page') ?? 1);
         const time = (v: string | undefined) => Date.parse(v ?? '') || Date.now();
-        const key = (i: FakeRepo['issues'][number]) => time(sort === 'updated' ? i.updated_at ?? i.created_at : i.created_at) * 100000 + i.number;
-        const items = [...repo.issues]
+        // GitHub lists pull requests among the issues (with a pull_request key).
+        type Listed = { created_at: string; updated_at?: string; state?: 'open' | 'closed'; number: number; json: () => Json };
+        const pullsListed: Listed[] = (repo.pulls ?? []).map((x) => {
+          const created = x.created_at ?? x.updated_at ?? x.merged_at ?? new Date().toISOString();
+          const state = x.merged_at === undefined ? 'open' as const : 'closed' as const;
+          return {
+            created_at: created, updated_at: x.updated_at ?? x.merged_at ?? created, state, number: x.number,
+            json: () => ({
+              number: x.number, title: x.title, body: x.body ?? '', user: { login: x.user, type: /\[bot\]$/.test(x.user) ? 'Bot' : 'User' }, state, draft: Boolean(x.draft),
+              closed_at: state === 'closed' ? x.merged_at ?? x.updated_at ?? created : null, created_at: created, updated_at: x.updated_at ?? x.merged_at ?? created,
+              labels: (x.labels ?? []).map((name) => ({ name })), html_url: `https://github.com/${repo.owner}/${repo.name}/pull/${x.number}`,
+              pull_request: { url: `https://api.github.com/repos/${repo.owner}/${repo.name}/pulls/${x.number}`, merged_at: x.merged_at ?? null },
+            }),
+          };
+        });
+        const listed: Listed[] = [...repo.issues.map((i) => ({ ...i, json: () => this.issueJson(repo, i) })), ...pullsListed];
+        const key = (i: Listed) => time(sort === 'updated' ? i.updated_at ?? i.created_at : i.created_at) * 100000 + i.number;
+        const items = listed
           .filter((i) => state === 'all' || (i.state ?? 'open') === state)
           .filter((i) => !since || time(i.updated_at ?? i.created_at) >= Date.parse(since))
           .sort((a, b) => (asc ? key(a) - key(b) : key(b) - key(a)))
           .slice((page - 1) * perPage, page * perPage)
-          .map((i) => this.issueJson(repo, i));
+          .map((i) => i.json());
         return json(200, items);
       }
       this.createCalls++;
@@ -600,7 +616,8 @@ export class FakeAnthropic {
   verdict: Json = {
     reason: 'A genuine bug report.', summary: 'A bug report.',
     spam: false, spam_confidence: 5, no_action: false, no_action_confidence: 5, not_dev_issue: false, not_dev_issue_confidence: 5,
-    duplicates: [], regression_of: null, regression_confidence: 0, needs_info: false, needs_info_confidence: 10, missing: [],
+    duplicates: [], regression_of: null, regression_confidence: 0, in_progress: null, in_progress_confidence: 0, fixed_by: null, fixed_confidence: 0,
+    needs_info: false, needs_info_confidence: 10, missing: [],
     parts: [], parts_confidence: 0, related: [], related_confidence: 0, shared: false, shared_confidence: 0, shared_apps: [], shared_issue: null,
     right_app: null, right_app_confidence: 0, version: null, labels: {}, priority: 'medium', priority_confidence: 80, missing_context: null,
   };

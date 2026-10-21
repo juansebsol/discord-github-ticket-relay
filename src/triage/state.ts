@@ -56,6 +56,8 @@ const STATE_SQL: Record<TriageState, string> = {
 const FLAG_FILTER_NAMES: Record<Flag, string> = {
   duplicate: 'Duplicate',
   regression: 'Regression',
+  inProgress: 'Being worked on',
+  fixed: 'Already fixed',
   needsInfo: 'Needs more info',
   multiple: 'Several problems',
   related: 'Related issues',

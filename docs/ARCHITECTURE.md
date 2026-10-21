@@ -102,6 +102,18 @@ Discord endpoint, OAuth), one or more queue workers, and an optional triage work
   triage applied, or `issue_index.duplicate_of`, followed up to five hops); a duplicate Claude
   suggested and nobody reviewed counts too, marked as suggested; spam doesn't count. Issues opened
   directly on GitHub as duplicates are counted apart.
+- **Pull requests** (`pull_index`, `src/domain/pull-index.ts`): GitHub lists pull requests among
+  the issues, so the issue index's own sync keeps them instead of dropping them (no extra calls):
+  open ones, and closed ones for 90 days, with the issues each says it fixes ("Fixes #12") or names
+  ("for #12"); bots and chores are marked and left out. A repository indexed before they were kept
+  gets its open and recent ones read once (`pulls_loaded_at`), and each repository's releases are
+  read every 30 minutes (`issue_index_repos.releases`), so a merged fix is "not released yet" or
+  "in v1.4.3" (the first release published after the merge). With Being worked on or Already fixed
+  on, triage (`src/triage/work.ts`) shows Claude the pull requests that name the issues the ticket
+  matched, the best text matches among open and recently merged ones, and commits pushed without
+  a pull request that close one of those issues (from Knowledge's change tracking); Claude answers
+  `in_progress` and `fixed_by` with a ref it was shown, checked in `normalizeVerdict` (only an open
+  one is in progress, only merged work fixed it). Repo status › Pull requests lists them.
 - **No Discord gateway.** The bot is driven entirely by Discord's HTTP interactions endpoint and
   REST API. It needs no privileged intents and no slash-command registration.
 - **GitHub App auth.** Short-lived installation tokens are minted from the app's private key
@@ -203,6 +215,7 @@ stable user ID are recorded in the body.
 | `submissions` | Tickets, routing snapshot, queue state, lease, reconcile counters, encrypted payload |
 | `submission_events` | Append-only timeline for investigation |
 | `contributor_settings`, `contributor_panels`, `contributor_tiers` | On/off, panel channel, published panel, and role tiers (role + minimum contributions) per workspace |
+| `pull_index` | Pull requests of the indexed repositories (open, and closed for 90 days), with the issues each is for |
 | `repo_status_settings`, `repo_status` | Repo status: on/off, the repositories and how often per workspace; what was last read per repository (stats, the kept activity, the icon, the error and the GraphQL budget left) |
 | `contributor_links`, `contributor_verifications` | One GitHub account ↔ one Discord member per workspace; audit trail of every verification |
 

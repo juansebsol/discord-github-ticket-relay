@@ -8,6 +8,7 @@ import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod';
 import { z } from 'zod';
 import type { FetchLike } from '../lib/http.js';
 import { MISSING_ITEMS, PRIORITIES, type LabelGroup, type PauseReason } from './settings.js';
+import { workByRef, workRef, type WorkItem, type WorkRef } from './work.js';
 
 const int = () => z.number().int();
 
@@ -15,6 +16,8 @@ const int = () => z.number().int();
 export interface VerdictContext {
   groups: LabelGroup[];
   apps: string[];
+  /** Being worked on or Already fixed is on: the answer says which pull request or commit. */
+  work?: boolean;
 }
 
 /**
@@ -42,6 +45,14 @@ export function verdictSchema(ctx: VerdictContext) {
     duplicates: z.array(z.object({ number: int(), confidence: int() })),
     regression_of: int().nullable(),
     regression_confidence: int(),
+    ...(ctx.work ? {
+      /** The ref of an open pull request working on it, from the list shown. */
+      in_progress: z.string().nullable(),
+      in_progress_confidence: int(),
+      /** The ref of a merged pull request or commit that fixed it, from the list shown. */
+      fixed_by: z.string().nullable(),
+      fixed_confidence: int(),
+    } : {}),
     needs_info: z.boolean(),
     needs_info_confidence: int(),
     /** For needs_info: what's missing, chosen from a fixed list. */
@@ -72,6 +83,11 @@ export type AiVerdict = Omit<z.infer<typeof VerdictSchema>, 'labels' | 'shared_a
   labels: Record<string, { options: string[]; confidence: number }>;
   shared_apps: string[];
   right_app: string | null;
+  /** Only asked when Being worked on or Already fixed is on. */
+  in_progress?: string | null;
+  in_progress_confidence?: number;
+  fixed_by?: string | null;
+  fixed_confidence?: number;
 };
 
 /**
@@ -87,6 +103,9 @@ export interface Verdict extends AiVerdict {
   duplicate_closed?: boolean;
   /** Other matches. */
   duplicate_others?: number[];
+  /** The pull request or commit in_progress and fixed_by name, as Claude was shown it. */
+  in_progress_work?: WorkRef | null;
+  fixed_work?: WorkRef | null;
 }
 
 export interface ModelOption {
@@ -268,6 +287,8 @@ export interface NormalizeContext {
   refs: Set<string>;
   apps: string[];
   groups: LabelGroup[];
+  /** The pull requests and commits shown, by ref (when Being worked on or Already fixed is on). */
+  work?: Map<string, WorkItem>;
 }
 
 /**
@@ -290,6 +311,12 @@ export function normalizeVerdict(v: AiVerdict, ctx: NormalizeContext | Set<numbe
     .sort((a, b) => b.confidence - a.confidence)
     .slice(0, 10);
   const related = [...new Set((v.related ?? []).filter((r) => x.refs.has(r)))].slice(0, 3);
+  // Only an open pull request is in progress, and only merged work fixed it.
+  const shown = x.work ?? new Map<string, WorkItem>();
+  const progress = workByRef(v.in_progress, shown);
+  const inProgress = progress && progress.state !== 'merged' ? progress : null;
+  const fix = workByRef(v.fixed_by, shown);
+  const fixed = fix && fix.state === 'merged' ? fix : null;
   const parts = (v.parts ?? []).map((p) => text(p, 160)).filter(Boolean).slice(0, 6);
   const labels: Verdict['labels'] = {};
   for (const g of x.groups) {
@@ -307,6 +334,12 @@ export function normalizeVerdict(v: AiVerdict, ctx: NormalizeContext | Set<numbe
     duplicate_confidence: duplicates[0]?.confidence ?? 0,
     regression_of: regression,
     regression_confidence: regression === null ? 0 : c(v.regression_confidence),
+    in_progress: inProgress?.ref ?? null,
+    in_progress_confidence: inProgress ? c(v.in_progress_confidence ?? 0) : 0,
+    in_progress_work: inProgress ? workRef(inProgress) : null,
+    fixed_by: fixed?.ref ?? null,
+    fixed_confidence: fixed ? c(v.fixed_confidence ?? 0) : 0,
+    fixed_work: fixed ? workRef(fixed) : null,
     spam_confidence: c(v.spam_confidence),
     needs_info_confidence: c(v.needs_info_confidence),
     no_action_confidence: c(v.no_action_confidence),

@@ -10,6 +10,7 @@
  */
 import type { Queryable } from '../db/database.js';
 import { GitHubApiError, type IssueDetail } from '../github/client.js';
+import { prunePulls, PULLS_KEEP_DAYS, upsertPulls } from './pull-index.js';
 import { MARKER_PREFIX } from '../github/issue-content.js';
 import { extractDescription, STOPWORDS } from '../triage/prompt.js';
 import type { Deps } from './types.js';
@@ -54,7 +55,17 @@ export interface IndexRepo {
   last_synced_at: Date | null;
   last_error: string | null;
   lease_until_at: Date | null;
+  /** Recent releases as JSON ([{tag, at}], newest first), for pull requests' "fixed in". */
+  releases: string | null;
+  releases_checked_at: Date | null;
+  /** When the open pull requests were first read (repositories indexed before they were kept). */
+  pulls_loaded_at: Date | null;
 }
+
+/** How often a repository's releases are read again. */
+const RELEASES_EVERY_MS = 30 * 60_000;
+/** Page cap for the one-time read of a repository's pull requests. */
+const PULL_LOAD_PAGES = 20;
 
 // ---- What's stored -----------------------------------------------------------------------
 
@@ -362,6 +373,7 @@ export class IssueIndexer {
         while (budget-- > 0) {
           const page = await github.listIssuesPage(repo.installation_id, repo.owner, repo.name, { sort: 'created', direction: 'asc', page: repo.next_page });
           await upsertIssues(db, repoId, page.issues);
+          await upsertPulls(db, repoId, page.pulls);
           repo.next_page++;
           if (!page.more) {
             done = true;
@@ -370,10 +382,12 @@ export class IssueIndexer {
         }
         await db.query(
           `UPDATE issue_index_repos SET status = $2, next_page = $3, newest_number = $4, synced_until = $5, full_check_at = CASE WHEN $2 = 'ready' THEN now_ms() ELSE full_check_at END,
+             pulls_loaded_at = CASE WHEN $2 = 'ready' THEN now_ms() ELSE pulls_loaded_at END,
              last_synced_at = now_ms(), last_error = NULL, sync_requested_at = NULL WHERE repo_id = $1`,
           [repoId, done ? 'ready' : 'loading', repo.next_page, repo.newest_number, repo.synced_until],
         );
         if (!done) return getIndexRepo(db, repoId);
+        repo.pulls_loaded_at = new Date();
       }
 
       // Issues changed since the last sync (new, edited, closed, reopened, relabelled).
@@ -382,22 +396,59 @@ export class IssueIndexer {
       for (let p = 1; budget-- > 0; p++) {
         const page = await github.listIssuesPage(repo.installation_id, repo.owner, repo.name, { sort: 'updated', direction: 'asc', page: p, since });
         await upsertIssues(db, repoId, page.issues);
-        for (const i of page.issues) newest = Math.max(newest, i.updatedAt.getTime());
+        await upsertPulls(db, repoId, page.pulls);
+        for (const i of [...page.issues, ...page.pulls]) newest = Math.max(newest, i.updatedAt.getTime());
         if (!page.more) break;
+      }
+
+      // Not before triage (it waits on this): the pull requests of a repository indexed before
+      // they were kept, once (the open ones, and the ones closed in the last 90 days), and its
+      // releases every half hour (so a merged fix is "not released yet" or "in v1.4.3").
+      if (o.fullCheck !== false) {
+        if (!repo.pulls_loaded_at) {
+          for (let p = 1; p <= PULL_LOAD_PAGES; p++) {
+            const page = await github.listIssuesPage(repo.installation_id, repo.owner, repo.name, { sort: 'created', direction: 'desc', page: p, state: 'open' });
+            await upsertPulls(db, repoId, page.pulls);
+            if (!page.more) break;
+          }
+          const recent = new Date(Date.now() - PULLS_KEEP_DAYS * 86_400_000);
+          for (let p = 1; p <= PULL_LOAD_PAGES; p++) {
+            const page = await github.listIssuesPage(repo.installation_id, repo.owner, repo.name, { sort: 'updated', direction: 'desc', page: p, since: recent });
+            await upsertPulls(db, repoId, page.pulls);
+            if (!page.more) break;
+          }
+          await db.query('UPDATE issue_index_repos SET pulls_loaded_at = now_ms() WHERE repo_id = $1', [repoId]);
+        }
+        if (!repo.releases_checked_at || repo.releases_checked_at.getTime() < Date.now() - RELEASES_EVERY_MS) {
+          let releases: string | null = null;
+          try {
+            const list = await github.listReleases(repo.installation_id, repo.owner, repo.name, 20);
+            releases = JSON.stringify(list.filter((r) => r.publishedAt).map((r) => ({ tag: r.tag, at: r.publishedAt!.toISOString() })));
+          } catch (err) {
+            // Releases of a private repository need Contents: read. Without them, fixes are just "merged".
+            if (!(err instanceof GitHubApiError) || err.isRateLimit || (err.status !== 403 && err.status !== 404)) throw err;
+          }
+          await db.query('UPDATE issue_index_repos SET releases = $2, releases_checked_at = now_ms() WHERE repo_id = $1', [repoId, releases]);
+        }
       }
 
       // Weekly: anything no longer listed was deleted or moved to another repository.
       const fullDue = o.fullCheck ?? (!repo.full_check_at || repo.full_check_at.getTime() < Date.now() - FULL_CHECK_EVERY_MS);
       if (fullDue) {
         const seen: number[] = [];
+        const seenPulls: number[] = [];
         for (let p = 1; p <= 1000; p++) {
           const page = await github.listIssuesPage(repo.installation_id, repo.owner, repo.name, { sort: 'created', direction: 'asc', page: p });
           seen.push(...page.issues.map((i) => i.number));
+          seenPulls.push(...page.pulls.map((i) => i.number));
           // The full list also refreshes every copy (and fills in details added later, like the author).
           await upsertIssues(db, repoId, page.issues);
+          await upsertPulls(db, repoId, page.pulls);
           if (!page.more) break;
         }
         await db.query('DELETE FROM issue_index WHERE repo_id = $1 AND number NOT IN (SELECT value FROM json_each($2))', [repoId, JSON.stringify(seen)]);
+        await db.query('DELETE FROM pull_index WHERE repo_id = $1 AND number NOT IN (SELECT value FROM json_each($2))', [repoId, JSON.stringify(seenPulls)]);
+        await prunePulls(db, repoId);
       }
 
       await db.query(
