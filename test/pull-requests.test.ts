@@ -71,7 +71,7 @@ function seed() {
   r.releases = [{ tag: 'v1.4.3', published_at: ago(10) }, { tag: 'v1.4.2', published_at: ago(30) }];
 }
 
-describe('Pull requests: kept from the issue sync', () => {
+describe('Pull requests: read from GitHub', () => {
   it('keeps open and recently merged pull requests, what they’re for, and the releases', async () => {
     seed();
     await sync();
@@ -89,16 +89,52 @@ describe('Pull requests: kept from the issue sync', () => {
     expect(releases.map((x: { tag: string }) => x.tag)).toEqual(['v1.4.3', 'v1.4.2']);
   });
 
-  it('reads a repository’s pull requests once when it was indexed before they were kept', async () => {
-    await sync();
+  it('reads them from the pull request list: without Pull requests: Read for a public repository, and says so for a private one', async () => {
+    // Like the GitHub App in production: issues and metadata only, so the issue list has no pull requests.
+    env.github.installationPermissions = { issues: 'write', metadata: 'read' };
     seed();
-    // As if indexed before: the regular sync only sees what changed since.
-    await env.db.query('UPDATE issue_index_repos SET pulls_loaded_at = NULL, synced_until = $2 WHERE repo_id = $1', [repo().id, Date.now()]);
-    await env.db.query('DELETE FROM pull_index');
-    repo().pulls!.find((x) => x.number === 3597)!.updated_at = ago(40);
+    repo().private = false;
     await sync();
-    expect((await pulls()).map((p) => p.number)).toContain(3597);
-    expect((await env.db.query('SELECT pulls_loaded_at FROM issue_index_repos WHERE repo_id = $1', [repo().id])).rows[0].pulls_loaded_at).toBeInstanceOf(Date);
+    expect((await pulls()).map((p) => p.number)).toEqual([3500, 3597, 3598, 3599, 3601]);
+    const row = async () => (await env.db.query('SELECT * FROM issue_index_repos WHERE repo_id = $1', [repo().id])).rows[0];
+    expect(await row()).toMatchObject({ pulls_error: null, pulls_loaded_at: expect.any(Date) });
+    // A private repository's pull requests can't be listed without the permission: the tab says so.
+    repo().private = true;
+    await env.db.query('DELETE FROM pull_index');
+    await env.db.query('UPDATE issue_index_repos SET pulls_loaded_at = NULL, pulls_checked_at = NULL');
+    await sync();
+    expect(await pulls()).toEqual([]);
+    expect((await row()).pulls_error).toBe('GitHub didn’t let the app read this repository’s pull requests. A private repository needs Pull requests: Read.');
+    // The issue sync isn't affected.
+    expect(await row()).toMatchObject({ status: 'ready', last_error: null });
+  });
+
+  it('after the catch-up, reads only what changed, every 10 minutes', async () => {
+    seed();
+    await sync();
+    const calls = env.github.pullListCalls;
+    repo().pulls!.push({ number: 3610, title: 'Snap guides to the pixel grid', body: '', user: 'eli', created_at: ago(0), updated_at: ago(0) });
+    await sync();
+    expect(env.github.pullListCalls).toBe(calls);
+    await env.db.query('UPDATE issue_index_repos SET pulls_checked_at = $1', [new Date(Date.now() - 11 * 60_000)]);
+    await sync();
+    expect(env.github.pullListCalls - calls).toBe(1);
+    expect((await pulls()).map((p) => p.number)).toContain(3610);
+  });
+
+  it('tries a failed catch-up again two minutes later, without breaking the issue sync', async () => {
+    seed();
+    env.github.failRequests.push({ match: /^GET \/repos\/[^/]+\/mobile\/pulls$/, status: 500, message: 'Server error' });
+    await sync();
+    let row = (await env.db.query('SELECT * FROM issue_index_repos WHERE repo_id = $1', [repo().id])).rows[0];
+    expect(row).toMatchObject({ status: 'ready', last_error: null, pulls_loaded_at: null, pulls_error: 'GitHub returned 500. Trying again shortly.' });
+    await sync();
+    expect(await pulls()).toEqual([]);
+    await env.db.query('UPDATE issue_index_repos SET pulls_checked_at = $1', [new Date(Date.now() - 3 * 60_000)]);
+    await sync();
+    row = (await env.db.query('SELECT * FROM issue_index_repos WHERE repo_id = $1', [repo().id])).rows[0];
+    expect(row).toMatchObject({ pulls_error: null, pulls_loaded_at: expect.any(Date) });
+    expect((await pulls()).length).toBe(5);
   });
 
   it('reads which issues a pull request names, and which release shipped a fix', () => {
@@ -241,5 +277,33 @@ describe('Repo status › Pull requests', () => {
     expect(merged).toContain('in <span class="mono">v1.4.3</span>');
     // Most reported shows that someone's on it.
     expect(await page('/repos?view=reported')).toContain('Open PR #3597');
+  });
+
+  it('says how far reading got, what went wrong, and when the background process is out of date', async () => {
+    seed();
+    await turnOn();
+    const page = () => env.server.inject({ method: 'GET', url: `${w()}/repos?view=pulls`, ...get(ws.owner) }).then((r) => r.body);
+    // Not read yet.
+    let body = await page();
+    expect(body).toContain('Reading pull requests');
+    expect(body).toContain('0 of 1 repositories done');
+    // Issues sync, but nothing has started on pull requests long after this version arrived: an old process.
+    await new IssueIndexer(env.deps).sync(repo().id, { pages: 5 }).catch(() => null);
+    await env.db.query("INSERT INTO issue_index_repos (repo_id, owner, name, installation_id, last_synced_at) VALUES ($1, $2, $3, $4, now_ms()) ON CONFLICT (repo_id) DO UPDATE SET last_synced_at = now_ms()", [repo().id, repo().owner, repo().name, ws.installationId]);
+    await env.db.query("UPDATE schema_migrations SET applied_at = $1 WHERE name = '034_pull_request_list.sql'", [new Date(Date.now() - 20 * 60_000)]);
+    body = await page();
+    expect(body).toContain('Pull requests aren’t being read');
+    expect(body).toContain('ticket-relay-triage');
+    // Read, with a problem.
+    await env.db.query('UPDATE issue_index_repos SET pulls_checked_at = now_ms(), pulls_error = $1', ['GitHub returned 502. Trying again shortly.']);
+    body = await page();
+    expect(body).not.toContain('Pull requests aren’t being read');
+    expect(body).toContain(`Couldn’t read the pull requests of ${repo().owner}/mobile`);
+    expect(body).toContain('GitHub returned 502');
+    // Done.
+    await env.db.query('UPDATE issue_index_repos SET pulls_loaded_at = now_ms(), pulls_error = NULL');
+    body = await page();
+    expect(body).not.toContain('Reading pull requests');
+    expect(body).not.toContain('Couldn’t read');
   });
 });

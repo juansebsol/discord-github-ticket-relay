@@ -82,6 +82,8 @@ export class FakeGitHub {
   mergedPrs = new Map<number, Map<string, number>>();
   commits = new Map<number, Map<string, number>>();
   installationPermissions: Record<string, string> = { issues: 'write', metadata: 'read', pull_requests: 'read', contents: 'read' };
+  /** GET /repos/:o/:r/pulls calls (the pull request index reads with these). */
+  pullListCalls = 0;
   /** POST /graphql calls, the points GitHub says are left, and whether the next calls are rate limited. */
   graphqlCalls = 0;
   graphqlBudget = 4800;
@@ -314,14 +316,22 @@ export class FakeGitHub {
       this.commitPullsCalls += m[3] ? 1 : 0;
       if (m[3]) return json(200, (r!.pulls ?? []).filter((x) => x.commits?.includes(decodeURIComponent(m![3]!))).map((x) => ({ number: x.number, merged_at: x.merged_at ?? null })));
       const p = url.searchParams;
+      this.pullListCalls++;
       const perPage = Number(p.get('per_page') ?? 30);
       const page = Number(p.get('page') ?? 1);
-      const closed = (r!.pulls ?? [])
-        .filter((x) => (p.get('state') !== 'closed' || x.merged_at !== undefined) && (!p.get('base') || (x.base ?? r!.default_branch ?? 'main') === p.get('base')))
-        .sort((a, b) => Date.parse(b.updated_at ?? b.merged_at ?? '') - Date.parse(a.updated_at ?? a.merged_at ?? ''));
-      return json(200, closed.slice((page - 1) * perPage, page * perPage).map((x) => ({
-        number: x.number, title: x.title, body: x.body ?? '', user: user(x.user), merged_at: x.merged_at ?? null, updated_at: x.updated_at ?? x.merged_at, labels: (x.labels ?? []).map((name) => ({ name })),
-        html_url: `https://github.com/${r!.owner}/${r!.name}/pull/${x.number}`,
+      // A pull request without merged_at (undefined) is open; null means closed without merging.
+      const state = p.get('state') ?? 'open';
+      const created = (x: NonNullable<FakeRepo['pulls']>[number]) => x.created_at ?? x.updated_at ?? x.merged_at ?? '2020-01-01T00:00:00Z';
+      const updated = (x: NonNullable<FakeRepo['pulls']>[number]) => x.updated_at ?? x.merged_at ?? created(x);
+      const when = (x: NonNullable<FakeRepo['pulls']>[number]) => Date.parse(p.get('sort') === 'created' ? created(x) : updated(x));
+      const asc = p.get('direction') === 'asc';
+      const listed = (r!.pulls ?? [])
+        .filter((x) => (state === 'all' || (state === 'closed') === (x.merged_at !== undefined)) && (!p.get('base') || (x.base ?? r!.default_branch ?? 'main') === p.get('base')))
+        .sort((a, b) => (asc ? when(a) - when(b) : when(b) - when(a)));
+      return json(200, listed.slice((page - 1) * perPage, page * perPage).map((x) => ({
+        number: x.number, title: x.title, body: x.body ?? '', user: user(x.user), state: x.merged_at === undefined ? 'open' : 'closed', draft: Boolean(x.draft),
+        merged_at: x.merged_at ?? null, created_at: created(x), updated_at: updated(x), closed_at: x.merged_at === undefined ? null : x.merged_at ?? updated(x),
+        labels: (x.labels ?? []).map((name) => ({ name })), html_url: `https://github.com/${r!.owner}/${r!.name}/pull/${x.number}`,
       })));
     }
     if ((m = /^\/repos\/([^/]+)\/([^/]+)\/(readme|contents\/(.+)|releases)$/.exec(path)) && method === 'GET') {
@@ -401,7 +411,8 @@ export class FakeGitHub {
         const perPage = Number(p.get('per_page') ?? 30);
         const page = Number(p.get('page') ?? 1);
         const time = (v: string | undefined) => Date.parse(v ?? '') || Date.now();
-        // GitHub lists pull requests among the issues (with a pull_request key).
+        // GitHub lists pull requests among the issues (with a pull_request key), but only for an
+        // app with Pull requests: Read; without it they're left out, even in a public repository.
         type Listed = { created_at: string; updated_at?: string; state?: 'open' | 'closed'; number: number; json: () => Json };
         const pullsListed: Listed[] = (repo.pulls ?? []).map((x) => {
           const created = x.created_at ?? x.updated_at ?? x.merged_at ?? new Date().toISOString();
@@ -416,7 +427,7 @@ export class FakeGitHub {
             }),
           };
         });
-        const listed: Listed[] = [...repo.issues.map((i) => ({ ...i, json: () => this.issueJson(repo, i) })), ...pullsListed];
+        const listed: Listed[] = [...repo.issues.map((i) => ({ ...i, json: () => this.issueJson(repo, i) })), ...(this.installationPermissions.pull_requests ? pullsListed : [])];
         const key = (i: Listed) => time(sort === 'updated' ? i.updated_at ?? i.created_at : i.created_at) * 100000 + i.number;
         const items = listed
           .filter((i) => state === 'all' || (i.state ?? 'open') === state)

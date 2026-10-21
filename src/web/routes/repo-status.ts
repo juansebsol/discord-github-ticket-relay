@@ -270,8 +270,37 @@ export function registerRepoStatusRoutes(app: FastifyInstance, web: Web): void {
     </div>`;
   }
 
+  /**
+   * How far reading the pull requests got: repositories done, problems, repositories without an app
+   * (only the apps' repositories are read), and whether the background process seems out of date
+   * (issues sync, but it never started on pull requests well after this version's update).
+   */
+  async function pullsProgress(ctx: WorkspaceRequestContext, repos: RepoRef[]) {
+    const { rows: apps } = await deps.db.query<{ repo_id: number }>('SELECT DISTINCT repo_id FROM apps WHERE workspace_id = $1', [ctx.workspace.id]);
+    const withApp = new Set(apps.map((a) => a.repo_id));
+    const covered = repos.filter((r) => withApp.has(r.id));
+    const { rows } = covered.length
+      ? await deps.db.query<{ repo_id: number; pulls_loaded_at: Date | null; pulls_checked_at: Date | null; pulls_error: string | null; last_synced_at: Date | null }>(
+          'SELECT repo_id, pulls_loaded_at, pulls_checked_at, pulls_error, last_synced_at FROM issue_index_repos WHERE repo_id IN (SELECT value FROM json_each($1))',
+          [covered.map((r) => r.id)],
+        )
+      : { rows: [] };
+    const byId = new Map(rows.map((r) => [r.repo_id, r]));
+    const now = Date.now();
+    const { rows: updated } = await deps.db.query<{ applied_at: Date }>("SELECT applied_at FROM schema_migrations WHERE name = '034_pull_request_list.sql'");
+    const started = rows.some((r) => r.pulls_checked_at);
+    const issuesSyncing = rows.some((r) => r.last_synced_at && now - r.last_synced_at.getTime() < 10 * 60_000);
+    return {
+      total: covered.length,
+      done: covered.filter((r) => byId.get(r.id)?.pulls_loaded_at).length,
+      stale: !started && issuesSyncing && Boolean(updated[0]) && now - updated[0]!.applied_at.getTime() > 10 * 60_000,
+      errors: covered.filter((r) => byId.get(r.id)?.pulls_error).map((r) => ({ repo: `${r.owner}/${r.name}`, error: byId.get(r.id)!.pulls_error! })),
+      noApp: repos.filter((r) => !withApp.has(r.id)).map((r) => r.name),
+    };
+  }
+
   /** Pull requests: open ones (most reported first), merged ones waiting for a release, and merged ones. */
-  function pullsView(ctx: WorkspaceRequestContext, lists: PullLists, reportsOf: Map<string, number>, which: 'open' | 'waiting' | 'merged', only: string | null): SafeHtml {
+  function pullsView(ctx: WorkspaceRequestContext, lists: PullLists, reportsOf: Map<string, number>, which: 'open' | 'waiting' | 'merged', only: string | null, progress: Awaited<ReturnType<typeof pullsProgress>>): SafeHtml {
     const href = (o: { which?: string; repo?: string | null }) => {
       const p = new URLSearchParams({ view: 'pulls' });
       const w = o.which ?? which;
@@ -312,13 +341,22 @@ export function registerRepoStatusRoutes(app: FastifyInstance, web: Web): void {
         </div>
       </li>`;
     };
-    const none = which === 'open' ? ['No open pull requests', 'Nothing is waiting for review in these repositories.']
-      : which === 'waiting' ? ['Nothing waiting for a release', 'Every merged pull request is in a release.']
-        : ['Nothing merged in the last 90 days', 'Merged pull requests show up here for 90 days.'];
+    const reading = progress.done < progress.total;
+    const none = reading && !progress.done ? ['Reading pull requests…', 'They show up here as each repository is read, usually within a few minutes.']
+      : which === 'open' ? ['No open pull requests', 'Nothing is waiting for review in these repositories.']
+        : which === 'waiting' ? ['Nothing waiting for a release', 'Every merged pull request is in a release.']
+          : ['Nothing merged in the last 90 days', 'Merged pull requests show up here for 90 days.'];
+    const status = html`
+      ${progress.stale
+        ? html`<div class="rs-err">${notice('warn', 'Pull requests aren’t being read', 'Issues are syncing, but the background process hasn’t started on pull requests, so it’s probably running an older version of Ticket Relay. Restart it (with PM2: ticket-relay-triage).')}</div>`
+        : reading ? html`<div class="rs-err">${notice('info', 'Reading pull requests', `${progress.done} of ${progress.total} repositories done. The rest come in over the next few minutes.`)}</div>` : ''}
+      ${progress.errors.length ? html`<div class="rs-err">${notice('warn', progress.errors.length === 1 ? `Couldn’t read the pull requests of ${progress.errors[0]!.repo}` : `Couldn’t read the pull requests of ${progress.errors.length} repositories`,
+        html`<ul class="rs-pr-errs">${progress.errors.map((e) => html`<li>${progress.errors.length > 1 ? html`<span class="mono">${e.repo}</span>: ` : ''}${e.error}</li>`)}</ul>`)}</div>` : ''}`;
     return html`<div class="rs-fix">
+      ${status}
       <div class="rs-fix-h rs-rp-filters">${lists_}${repoFilter}</div>
       ${shown.length ? html`<ol class="rs-fxs">${shown.slice(0, 200).map(item)}</ol>` : html`<div class="card">${empty('git-pull-request', none[0]!, none[1]!)}</div>`}
-      <p class="small muted rs-fix-note">From the issue sync, every couple of minutes: pull requests by bots and chores (dependency bumps, CI, tests) are left out. A pull request is for an issue when it says so (“Fixes #12”) or names it (“for #12”). Reports are the Discord tickets about those issues, duplicates included.</p>
+      <p class="small muted rs-fix-note">Read from GitHub every 10 minutes, for your apps’ repositories${progress.noApp.length ? ` (not ${progress.noApp.join(', ')}, which ${progress.noApp.length === 1 ? 'has' : 'have'} no app)` : ''}. Pull requests by bots and chores (dependency bumps, CI, tests) are left out. A pull request is for an issue when it says so (“Fixes #12”) or names it (“for #12”). Reports are the Discord tickets about those issues, duplicates included.</p>
     </div>`;
   }
 
@@ -379,7 +417,7 @@ export function registerRepoStatusRoutes(app: FastifyInstance, web: Web): void {
         : view === 'reported'
           ? mostReportedView(ctx, reports, q.repo ?? null, period, fixes)
           : view === 'pulls'
-            ? pullsView(ctx, pulls, reportsAll, which, q.repo ?? null)
+            ? pullsView(ctx, pulls, reportsAll, which, q.repo ?? null, await pullsProgress(ctx, repos))
           : html`<section class="card rs-card" aria-label="Repositories">${table(ctx, l.rows)}${footer(l)}</section>`}
     </div>`;
     if (q.partial === '1') return reply.header('x-live-partial', '1').header('Cache-Control', 'no-store').type('text/html').send(live.toString());

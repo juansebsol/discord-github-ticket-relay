@@ -1749,6 +1749,7 @@ a.rs-why:hover { border-color: currentColor; }
 .rs-pr-for a:hover { text-decoration: underline; }
 .rs-pr-for a.rs-why { color: var(--muted); }
 .rs-pr-it { color: var(--muted); }
+.rs-pr-errs { margin: 4px 0 0; padding-left: 16px; }
 .rs-why.ok { color: var(--ok-text); background: var(--ok-soft); border-color: var(--ok-border); }
 /* Settings: the repository list */
 .rs-pick { list-style: none; margin: 0; padding: 4px 0; max-height: 440px; overflow-y: auto; }

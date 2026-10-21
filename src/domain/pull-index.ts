@@ -1,15 +1,30 @@
 /**
- * The pull request index: open pull requests of the indexed repositories, and closed ones for 90
- * days, kept from the issue index's own sync (GitHub lists pull requests with the issues, so this
- * costs no extra calls). AI triage reads it to say a ticket is being worked on, or already fixed
- * (and whether that fix is released), and Repo status › Pull requests lists it.
+ * The pull request index: open pull requests of the indexed repositories (the apps' ones), and
+ * closed ones for 90 days. Read from GitHub's pull request list, on its own every 10 minutes: the
+ * issue list leaves pull requests out unless the app has Pull requests: Read, while a public
+ * repository's can be listed without it. A first catch-up reads the open ones and the ones closed
+ * in the last 90 days; after that, only what changed (usually one call). AI triage reads the index
+ * to say a ticket is being worked on, or already fixed (and whether that fix is released), and
+ * Repo status › Pull requests lists it.
  */
 import type { Queryable } from '../db/database.js';
-import type { PullDetail } from '../github/client.js';
+import { GitHubApiError, type PullDetail } from '../github/client.js';
 import { closedIssues, noiseOf } from '../triage/knowledge-changes.js';
+import type { Deps } from './types.js';
 
 /** Closed pull requests are kept this long after they were closed or merged. */
 export const PULLS_KEEP_DAYS = 90;
+/** How often each repository's pull requests are checked for changes, and its releases read. */
+export const PULLS_EVERY_MS = 10 * 60_000;
+const RELEASES_EVERY_MS = 30 * 60_000;
+/** A catch-up that failed (a timeout, say) is tried again this soon. */
+const PULLS_RETRY_MS = 2 * 60_000;
+const PULLS_LEASE_MS = 2 * 60_000;
+/** Page caps: the catch-up's two lists, and a regular check. */
+const CATCH_UP_PAGES = 10;
+const CHECK_PAGES = 5;
+/** Repositories read per round of the index loop. */
+const PULLS_PER_ROUND = 4;
 const EXCERPT_CHARS = 600;
 
 export interface IndexedPull {
@@ -54,7 +69,7 @@ function excerptOf(body: string): string {
     .slice(0, EXCERPT_CHARS);
 }
 
-/** Keeps a pull request from the issue sync (or forgets a closed one past PULLS_KEEP_DAYS). */
+/** Keeps pull requests (or forgets closed ones past PULLS_KEEP_DAYS). */
 export async function upsertPulls(q: Queryable, repoId: number, pulls: PullDetail[], now = Date.now()): Promise<void> {
   for (const p of pulls) await upsertPull(q, repoId, p, now);
 }
@@ -137,4 +152,107 @@ export async function pullsForIssues(q: Queryable, repoId: number, numbers: numb
     out.set(n, list.sort((a, b) => Number(b.closes.includes(n)) - Number(a.closes.includes(n)) || Number(a.state !== 'open') - Number(b.state !== 'open') || b.updated_at.getTime() - a.updated_at.getTime()));
   }
   return out;
+}
+
+// ---- Reading them from GitHub --------------------------------------------------------------------
+
+interface PullSyncRepo {
+  repo_id: number;
+  owner: string;
+  name: string;
+  installation_id: number;
+  pulls_loaded_at: Date | null;
+  pulls_synced_until: number | null;
+  releases_checked_at: Date | null;
+}
+
+/**
+ * Reads the pull requests of the repositories that are due: a catch-up first, then every 10
+ * minutes. A few per round, so the issue sync sharing the loop stays current. Returns how many.
+ */
+export async function syncDuePulls(deps: Deps, now = Date.now()): Promise<number> {
+  if (!deps.github) return 0;
+  const { rows } = await deps.db.query<PullSyncRepo>(
+    `SELECT repo_id, owner, name, installation_id, pulls_loaded_at, pulls_synced_until, releases_checked_at FROM issue_index_repos
+      WHERE (pulls_lease_until_at IS NULL OR pulls_lease_until_at < $1)
+        AND (pulls_checked_at IS NULL OR pulls_checked_at < $1 - CASE WHEN pulls_loaded_at IS NULL THEN $2 ELSE $3 END)
+      ORDER BY pulls_loaded_at IS NOT NULL, pulls_checked_at LIMIT $4`,
+    [new Date(now), PULLS_RETRY_MS, PULLS_EVERY_MS, PULLS_PER_ROUND],
+  );
+  for (const r of rows) await syncPulls(deps, r, now);
+  return rows.length;
+}
+
+async function syncPulls(deps: Deps, repo: PullSyncRepo, now: number): Promise<void> {
+  const { db, github } = deps;
+  const claimed = await db.query(
+    'UPDATE issue_index_repos SET pulls_lease_until_at = $2 WHERE repo_id = $1 AND (pulls_lease_until_at IS NULL OR pulls_lease_until_at < $3) RETURNING repo_id',
+    [repo.repo_id, new Date(now + PULLS_LEASE_MS), new Date(now)],
+  );
+  if (!claimed.rows.length || !github) return;
+  const list = (o: Parameters<typeof github.listPullsPage>[3]) => github.listPullsPage(repo.installation_id, repo.owner, repo.name, o);
+  let newest = repo.pulls_synced_until ?? 0;
+  let loaded = Boolean(repo.pulls_loaded_at);
+  let error: string | null = null;
+  let pauseUntil: Date | null = null;
+  const keep = async (pulls: PullDetail[]) => {
+    await upsertPulls(db, repo.repo_id, pulls, now);
+    for (const x of pulls) newest = Math.max(newest, x.updatedAt.getTime());
+  };
+  try {
+    if (!loaded) {
+      // Every open one, then the ones closed in the last 90 days (newest first, until older).
+      for (let p = 1; p <= CATCH_UP_PAGES; p++) {
+        const page = await list({ state: 'open', sort: 'created', direction: 'desc', page: p, perPage: 100 });
+        await keep(page.pulls);
+        if (!page.more) break;
+      }
+      const keepAfter = now - PULLS_KEEP_DAYS * 86_400_000;
+      for (let p = 1; p <= CATCH_UP_PAGES; p++) {
+        const page = await list({ state: 'closed', sort: 'updated', direction: 'desc', page: p, perPage: 100 });
+        await keep(page.pulls);
+        if (!page.more || page.pulls.some((x) => x.updatedAt.getTime() < keepAfter)) break;
+      }
+      loaded = true;
+    } else {
+      // What changed since the last check, newest first, until it reaches what was already seen.
+      const since = (repo.pulls_synced_until ?? 0) - 60_000;
+      for (let p = 1; p <= CHECK_PAGES; p++) {
+        const page = await list({ state: 'all', sort: 'updated', direction: 'desc', page: p, perPage: 50 });
+        await keep(page.pulls);
+        if (!page.more || page.pulls.some((x) => x.updatedAt.getTime() < since)) break;
+      }
+      await prunePulls(db, repo.repo_id, now);
+    }
+  } catch (err) {
+    const e = err as Error;
+    if (err instanceof GitHubApiError && err.isRateLimit) pauseUntil = new Date(now + Math.min(3600, Math.max(60, err.retryAfterSeconds ?? 60)) * 1000);
+    error = err instanceof GitHubApiError
+      ? err.isRateLimit ? 'GitHub’s hourly budget ran out: reading again when it resets.'
+        : err.status === 403 || err.status === 404 ? 'GitHub didn’t let the app read this repository’s pull requests. A private repository needs Pull requests: Read.'
+          : `GitHub returned ${err.status}. Trying again shortly.`
+      : `GitHub couldn’t be reached (${e.message}). Trying again shortly.`;
+    deps.log.warn({ repo: `${repo.owner}/${repo.name}`, err: e.message }, 'pull request sync failed');
+  }
+  // Releases, so a merged fix is "not released yet" or "in v1.4.3" (a failure here only waits for the next round).
+  if (!error && (!repo.releases_checked_at || repo.releases_checked_at.getTime() < now - RELEASES_EVERY_MS)) {
+    try {
+      let releases: string | null = null;
+      try {
+        const found = await github.listReleases(repo.installation_id, repo.owner, repo.name, 20);
+        releases = JSON.stringify(found.filter((r) => r.publishedAt).map((r) => ({ tag: r.tag, at: r.publishedAt!.toISOString() })));
+      } catch (err) {
+        // A private repository's releases need Contents: read. Without them, fixes are just "merged".
+        if (!(err instanceof GitHubApiError) || err.isRateLimit || (err.status !== 403 && err.status !== 404)) throw err;
+      }
+      await db.query('UPDATE issue_index_repos SET releases = $2, releases_checked_at = $3 WHERE repo_id = $1', [repo.repo_id, releases, new Date(now)]);
+    } catch (err) {
+      deps.log.warn({ repo: `${repo.owner}/${repo.name}`, err: (err as Error).message }, 'release check failed');
+    }
+  }
+  await db.query(
+    `UPDATE issue_index_repos SET pulls_loaded_at = CASE WHEN $2 = 1 THEN COALESCE(pulls_loaded_at, $5) ELSE pulls_loaded_at END,
+       pulls_synced_until = $3, pulls_checked_at = $5, pulls_error = $4, pulls_lease_until_at = $6 WHERE repo_id = $1`,
+    [repo.repo_id, loaded && !error ? 1 : 0, newest || null, error, new Date(now), pauseUntil],
+  );
 }

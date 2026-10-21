@@ -102,13 +102,17 @@ Discord endpoint, OAuth), one or more queue workers, and an optional triage work
   triage applied, or `issue_index.duplicate_of`, followed up to five hops); a duplicate Claude
   suggested and nobody reviewed counts too, marked as suggested; spam doesn't count. Issues opened
   directly on GitHub as duplicates are counted apart.
-- **Pull requests** (`pull_index`, `src/domain/pull-index.ts`): GitHub lists pull requests among
-  the issues, so the issue index's own sync keeps them instead of dropping them (no extra calls):
-  open ones, and closed ones for 90 days, with the issues each says it fixes ("Fixes #12") or names
-  ("for #12"); bots and chores are marked and left out. A repository indexed before they were kept
-  gets its open and recent ones read once (`pulls_loaded_at`), and each repository's releases are
-  read every 30 minutes (`issue_index_repos.releases`), so a merged fix is "not released yet" or
-  "in v1.4.3" (the first release published after the merge). With Being worked on or Already fixed
+- **Pull requests** (`pull_index`, `src/domain/pull-index.ts`): read from GitHub's pull request
+  list for the issue index's repositories (the apps' ones), in the same loop but on their own: the
+  issue list leaves pull requests out unless the app has Pull requests: Read, while a public
+  repository's can be listed without it. A catch-up reads the open ones and the ones closed in the
+  last 90 days (`pulls_loaded_at`); then, every 10 minutes, only what changed since the newest one
+  seen (`pulls_synced_until`, usually one call). A failure is kept in `pulls_error` (shown on Repo
+  status › Pull requests) and never touches the issue sync; a failed catch-up is tried again two
+  minutes later. Kept: open ones, and closed ones for 90 days, with the issues each says it fixes
+  ("Fixes #12") or names ("for #12"); bots and chores are marked and left out. Each repository's
+  releases are read every 30 minutes (`issue_index_repos.releases`), so a merged fix is "not
+  released yet" or "in v1.4.3" (the first release published after the merge). With Being worked on or Already fixed
   on, triage (`src/triage/work.ts`) shows Claude the pull requests that name the issues the ticket
   matched, the best text matches among open and recently merged ones, and commits pushed without
   a pull request that close one of those issues (from Knowledge's change tracking); Claude answers

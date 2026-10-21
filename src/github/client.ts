@@ -98,7 +98,8 @@ export interface PullDetail {
 
 function toPullDetail(data: any): PullDetail {
   const i = toIssueDetail(data);
-  const merged = data.pull_request?.merged_at;
+  // The pull request list has merged_at; the issue list has it under pull_request.
+  const merged = data.merged_at ?? data.pull_request?.merged_at;
   return {
     number: i.number, url: i.url, title: i.title, body: i.body, state: i.state, draft: Boolean(data.draft), mergedAt: typeof merged === 'string' ? new Date(merged) : null,
     labels: i.labels, author: i.author, authorIsBot: i.authorIsBot, createdAt: i.createdAt, updatedAt: i.updatedAt, closedAt: i.closedAt,
@@ -419,6 +420,23 @@ export class GitHubClient {
       if (err instanceof GitHubApiError && err.status === 404) return null;
       throw err;
     }
+  }
+
+  /**
+   * One page of a repository's pull requests. Unlike the issue list (which leaves them out unless
+   * the app has Pull requests: Read), this lists a public repository's pull requests without it.
+   */
+  async listPullsPage(
+    installationId: number,
+    owner: string,
+    repo: string,
+    o: { state: 'open' | 'closed' | 'all'; sort: 'created' | 'updated'; direction: 'asc' | 'desc'; page: number; perPage?: number },
+  ): Promise<{ pulls: PullDetail[]; more: boolean }> {
+    const perPage = o.perPage ?? 50;
+    const params = new URLSearchParams({ state: o.state, sort: o.sort, direction: o.direction, per_page: String(perPage), page: String(o.page) });
+    const { data } = await this.request('GET', `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls?${params}`, await this.asInstallation(installationId));
+    const items = Array.isArray(data) ? (data as any[]) : [];
+    return { pulls: items.map(toPullDetail), more: items.length >= perPage };
   }
 
   /** The latest published releases, newest first (drafts left out). */
