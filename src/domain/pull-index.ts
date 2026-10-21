@@ -1,9 +1,9 @@
 /**
- * The pull request index: open pull requests of the indexed repositories (the apps' ones), and
- * closed ones for 90 days. Read from GitHub's pull request list, on its own every 10 minutes: the
+ * The pull request index: open pull requests of the indexed repositories (the apps' ones), merged
+ * ones for good (contributor roles count them), and ones closed without merging for 90 days. Read from GitHub's pull request list, on its own every 10 minutes: the
  * issue list leaves pull requests out unless the app has Pull requests: Read, while a public
- * repository's can be listed without it. A first catch-up reads the open ones and the ones closed
- * in the last 90 days; after that, only what changed (usually one call). AI triage reads the index
+ * repository's can be listed without it. A first catch-up reads the open ones and the closed ones;
+ * after that, only what changed (usually one call). AI triage reads the index
  * to say a ticket is being worked on, or already fixed (and whether that fix is released), and
  * Repo status › Pull requests lists it.
  */
@@ -12,7 +12,7 @@ import { GitHubApiError, type PullDetail } from '../github/client.js';
 import { closedIssues, noiseOf } from '../triage/knowledge-changes.js';
 import type { Deps } from './types.js';
 
-/** Closed pull requests are kept this long after they were closed or merged. */
+/** Pull requests closed without merging are kept this long; merged ones for good. Lists and triage look this far back. */
 export const PULLS_KEEP_DAYS = 90;
 /** How often each repository's pull requests are checked for changes, and its releases read. */
 export const PULLS_EVERY_MS = 10 * 60_000;
@@ -20,8 +20,8 @@ const RELEASES_EVERY_MS = 30 * 60_000;
 /** A catch-up that failed (a timeout, say) is tried again this soon. */
 const PULLS_RETRY_MS = 2 * 60_000;
 const PULLS_LEASE_MS = 2 * 60_000;
-/** Page caps: the catch-up's two lists, and a regular check. */
-const CATCH_UP_PAGES = 10;
+/** Page caps: the catch-up's two lists (100 a page), and a regular check. */
+const CATCH_UP_PAGES = 20;
 const CHECK_PAGES = 5;
 /** Repositories read per round of the index loop. */
 const PULLS_PER_ROUND = 4;
@@ -69,13 +69,13 @@ function excerptOf(body: string): string {
     .slice(0, EXCERPT_CHARS);
 }
 
-/** Keeps pull requests (or forgets closed ones past PULLS_KEEP_DAYS). */
+/** Keeps pull requests (or forgets ones closed without merging past PULLS_KEEP_DAYS). */
 export async function upsertPulls(q: Queryable, repoId: number, pulls: PullDetail[], now = Date.now()): Promise<void> {
   for (const p of pulls) await upsertPull(q, repoId, p, now);
 }
 
 async function upsertPull(q: Queryable, repoId: number, p: PullDetail, now: number): Promise<void> {
-  if (p.state === 'closed' && (p.closedAt?.getTime() ?? p.updatedAt.getTime()) < now - PULLS_KEEP_DAYS * 86_400_000) {
+  if (p.state === 'closed' && !p.mergedAt && (p.closedAt?.getTime() ?? p.updatedAt.getTime()) < now - PULLS_KEEP_DAYS * 86_400_000) {
     await q.query('DELETE FROM pull_index WHERE repo_id = $1 AND number = $2', [repoId, p.number]);
     return;
   }
@@ -95,10 +95,10 @@ async function upsertPull(q: Queryable, repoId: number, p: PullDetail, now: numb
   );
 }
 
-/** Closed pull requests older than PULLS_KEEP_DAYS go. */
+/** Pull requests closed without merging, older than PULLS_KEEP_DAYS, go. */
 export async function prunePulls(q: Queryable, repoId: number, now = Date.now()): Promise<void> {
   await q.query(
-    "DELETE FROM pull_index WHERE repo_id = $1 AND state = 'closed' AND COALESCE(closed_at, updated_at) < $2",
+    "DELETE FROM pull_index WHERE repo_id = $1 AND state = 'closed' AND merged_at IS NULL AND COALESCE(closed_at, updated_at) < $2",
     [repoId, new Date(now - PULLS_KEEP_DAYS * 86_400_000)],
   );
 }
@@ -129,17 +129,18 @@ export async function getPulls(q: Queryable, repoId: number, numbers: number[]):
   return new Map(rows.map((r) => [r.number, r]));
 }
 
-/** Open and merged pull requests that name these issues (closing keyword or mention), not bots or chores. */
+/** Open pull requests, and ones merged in the last 90 days, that name these issues (closing keyword or mention), not bots or chores. */
 export async function pullsForIssues(q: Queryable, repoId: number, numbers: number[]): Promise<Map<number, IndexedPull[]>> {
   const out = new Map<number, IndexedPull[]>();
   if (!numbers.length) return out;
+  const since = new Date(Date.now() - PULLS_KEEP_DAYS * 86_400_000);
   const { rows } = await q.query<IndexedPull>(
     `SELECT DISTINCT p.* FROM pull_index p, json_each(p.closes) c
-      WHERE p.repo_id = $1 AND p.noise IS NULL AND (p.state = 'open' OR p.merged_at IS NOT NULL) AND c.value IN (SELECT value FROM json_each($2))
+      WHERE p.repo_id = $1 AND p.noise IS NULL AND (p.state = 'open' OR p.merged_at >= $3) AND c.value IN (SELECT value FROM json_each($2))
      UNION
      SELECT DISTINCT p.* FROM pull_index p, json_each(p.mentions) c
-      WHERE p.repo_id = $1 AND p.noise IS NULL AND (p.state = 'open' OR p.merged_at IS NOT NULL) AND c.value IN (SELECT value FROM json_each($2))`,
-    [repoId, numbers],
+      WHERE p.repo_id = $1 AND p.noise IS NULL AND (p.state = 'open' OR p.merged_at >= $3) AND c.value IN (SELECT value FROM json_each($2))`,
+    [repoId, numbers, since],
   );
   for (const p of rows) {
     for (const n of new Set([...p.closes, ...p.mentions])) {
@@ -201,17 +202,17 @@ async function syncPulls(deps: Deps, repo: PullSyncRepo, now: number): Promise<v
   };
   try {
     if (!loaded) {
-      // Every open one, then the ones closed in the last 90 days (newest first, until older).
+      // Every open one, then the closed ones, newest first: merged ones are kept for good (they
+      // count for contributor roles), ones closed without merging only from the last 90 days.
       for (let p = 1; p <= CATCH_UP_PAGES; p++) {
         const page = await list({ state: 'open', sort: 'created', direction: 'desc', page: p, perPage: 100 });
         await keep(page.pulls);
         if (!page.more) break;
       }
-      const keepAfter = now - PULLS_KEEP_DAYS * 86_400_000;
       for (let p = 1; p <= CATCH_UP_PAGES; p++) {
         const page = await list({ state: 'closed', sort: 'updated', direction: 'desc', page: p, perPage: 100 });
         await keep(page.pulls);
-        if (!page.more || page.pulls.some((x) => x.updatedAt.getTime() < keepAfter)) break;
+        if (!page.more) break;
       }
       loaded = true;
     } else {
@@ -255,4 +256,41 @@ async function syncPulls(deps: Deps, repo: PullSyncRepo, now: number): Promise<v
        pulls_synced_until = $3, pulls_checked_at = $5, pulls_error = $4, pulls_lease_until_at = $6 WHERE repo_id = $1`,
     [repo.repo_id, loaded && !error ? 1 : 0, newest || null, error, new Date(now), pauseUntil],
   );
+}
+
+// ---- Contributor roles ----------------------------------------------------------------------------
+
+/**
+ * Before counting someone's merged pull requests: makes sure each repository's pull requests have
+ * been read, and reads what changed since the last check (usually one call), so one merged a
+ * moment ago counts. Repositories are read at the same time. Returns the ones whose pull requests
+ * are known (read at least once); a failure only leaves what's already kept.
+ */
+export async function refreshPulls(deps: Deps, repos: { id: number; owner: string; name: string }[], installationId: number, now = Date.now()): Promise<Set<number>> {
+  const { db } = deps;
+  await Promise.all(repos.map(async (r) => {
+    await db.query(
+      'INSERT INTO issue_index_repos (repo_id, owner, name, installation_id) VALUES ($1, $2, $3, $4) ON CONFLICT (repo_id) DO NOTHING',
+      [r.id, r.owner, r.name, installationId],
+    );
+    const { rows } = await db.query<PullSyncRepo & { pulls_checked_at: Date | null }>(
+      'SELECT repo_id, owner, name, installation_id, pulls_loaded_at, pulls_synced_until, releases_checked_at, pulls_checked_at FROM issue_index_repos WHERE repo_id = $1',
+      [r.id],
+    );
+    const row = rows[0];
+    if (row) {
+      await syncPulls(deps, row, now).catch((err) => deps.log.warn({ repo: `${r.owner}/${r.name}`, err: (err as Error).message }, 'pull request refresh failed'));
+    }
+  }));
+  const { rows } = await db.query<{ repo_id: number }>('SELECT repo_id FROM issue_index_repos WHERE repo_id IN (SELECT value FROM json_each($1)) AND pulls_loaded_at IS NOT NULL', [repos.map((r) => r.id)]);
+  return new Set(rows.map((r) => r.repo_id));
+}
+
+/** Merged pull requests by a GitHub account, per repository (any base branch, chores included: they're contributions too). */
+export async function mergedPullsBy(q: Queryable, repoIds: number[], login: string): Promise<Map<number, number>> {
+  const { rows } = await q.query<{ repo_id: number; n: number }>(
+    'SELECT repo_id, count(*) AS n FROM pull_index WHERE repo_id IN (SELECT value FROM json_each($1)) AND merged_at IS NOT NULL AND lower(author) = lower($2) GROUP BY repo_id',
+    [repoIds, login],
+  );
+  return new Map(rows.map((r) => [r.repo_id, Number(r.n)]));
 }

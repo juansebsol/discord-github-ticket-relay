@@ -671,13 +671,6 @@ export class GitHubClient {
     return { id: data.id, login: data.login };
   }
 
-  /** Number of merged pull requests authored by `login` in the repository. */
-  async countMergedPullRequests(installationId: number, owner: string, repo: string, login: string): Promise<number> {
-    const q = `repo:${owner}/${repo} is:pr is:merged author:${login}`;
-    const { data } = await this.request('GET', `/search/issues?q=${encodeURIComponent(q)}&per_page=1`, await this.asInstallation(installationId));
-    return Number(data.total_count ?? 0);
-  }
-
   /** Number of commits on the default branch attributed to `login` (read from pagination). */
   async countAuthoredCommits(installationId: number, owner: string, repo: string, login: string): Promise<number> {
     try {

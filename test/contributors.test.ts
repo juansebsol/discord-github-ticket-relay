@@ -43,11 +43,19 @@ async function enable() {
   await setContributorApps(env.db, ws.workspace.id, ws.apps.map((a) => a.id));
 }
 
+/** Merged pull requests by LOGIN in a repository (replacing any from before), as GitHub lists them. */
+function mergedBy(repoIndex: number, n: number, login = LOGIN) {
+  const r = env.github.repos.get(ws.repoIds[repoIndex]!)!;
+  const others = (r.pulls ?? []).filter((p) => p.user !== login);
+  const at = new Date(Date.now() - 3_600_000).toISOString();
+  r.pulls = [...others, ...Array.from({ length: n }, (_, i) => ({ number: 5000 + repoIndex * 100 + i, title: `Change ${i}`, user: login, created_at: at, merged_at: at, updated_at: new Date(Date.now() - i * 1000).toISOString() }))];
+}
+
 /** Contributions in the mobile repo (index 0) and optionally the website repo (index 1). */
 function contributed(prs: number, commits = 0, website: { prs?: number; commits?: number } = {}) {
-  env.github.mergedPrs.set(ws.repoIds[0]!, new Map([[LOGIN, prs]]));
+  mergedBy(0, prs);
   env.github.commits.set(ws.repoIds[0]!, new Map([[LOGIN, commits]]));
-  env.github.mergedPrs.set(ws.repoIds[1]!, new Map([[LOGIN, website.prs ?? 0]]));
+  mergedBy(1, website.prs ?? 0);
   env.github.commits.set(ws.repoIds[1]!, new Map([[LOGIN, website.commits ?? 0]]));
 }
 
@@ -72,6 +80,49 @@ async function verifications() {
 
 const added = () => env.discord.roleChanges.filter((c) => c.method === 'PUT').map((c) => c.roleId);
 const removed = () => env.discord.roleChanges.filter((c) => c.method === 'DELETE').map((c) => c.roleId);
+
+describe('counting merged pull requests', () => {
+  it('counts them without Pull requests: Read, as in production (the issue search leaves them out)', async () => {
+    await enable();
+    // Like the real GitHub App: issues and metadata only. The repositories are public, so their
+    // pull request list is readable anyway; his commits aren't linked to his account.
+    env.github.installationPermissions = { issues: 'write', metadata: 'read' };
+    for (const i of [0, 1]) env.github.repos.get(ws.repoIds[i]!)!.private = false;
+    mergedBy(1, 3);
+    const { page } = await verify();
+    expect(page.body).toContain('Junior Contributor');
+    const [v] = await verifications();
+    expect(v).toMatchObject({ result: 'verified', method: 'merged_pr', contributions: 3, github_login: LOGIN });
+    expect(added()).toEqual([JUNIOR_ID]);
+  });
+
+  it('counts a pull request merged long ago, and one merged a moment ago', async () => {
+    await enable();
+    const r = env.github.repos.get(ws.repoIds[0]!)!;
+    const old = new Date(Date.now() - 400 * 86_400_000).toISOString();
+    r.pulls = [{ number: 12, title: 'Early fix', user: LOGIN, created_at: old, merged_at: old, updated_at: old }];
+    await verify();
+    expect((await verifications())[0]).toMatchObject({ result: 'verified', contributions: 1 });
+    // Merged just now: read before counting, no waiting for the 10-minute check.
+    const now = new Date().toISOString();
+    r.pulls.push(...Array.from({ length: 9 }, (_, i) => ({ number: 20 + i, title: `Fix ${i}`, user: LOGIN, created_at: now, merged_at: now, updated_at: now })));
+    await verify();
+    expect((await verifications())[1]).toMatchObject({ result: 'verified', contributions: 10, role_name: 'Contributor' });
+  });
+
+  it('asks to try again, rather than saying no, when a repository’s pull requests can’t be read', async () => {
+    await enable();
+    // mobile is private: without Pull requests: Read its pull request list can't be read.
+    env.github.installationPermissions = { issues: 'write', metadata: 'read', contents: 'read' };
+    mergedBy(0, 2);
+    const { page } = await verify();
+    expect(page.body).toContain('try again in a few minutes');
+    const [v] = await verifications();
+    expect(v.result).toBe('error');
+    expect(v.info).toContain(`Pull requests not read yet for ${env.github.repos.get(ws.repoIds[0]!)!.owner}/mobile`);
+    expect(added()).toEqual([]);
+  });
+});
 
 describe('member verification flow', () => {
   it('sends a private, single-use GitHub sign-in link listing the roles', async () => {

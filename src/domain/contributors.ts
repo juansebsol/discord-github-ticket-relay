@@ -6,6 +6,7 @@ import { computeBasePermissions, Permission } from '../discord/permissions.js';
 import { GitHubApiError } from '../github/client.js';
 import { sha256 } from '../lib/crypto.js';
 import { consumeState, createState, type StateRow } from './oauth-state.js';
+import { mergedPullsBy, refreshPulls } from './pull-index.js';
 import { getDiscordConnection, getGitHubConnection, listApps } from './store.js';
 import { UserFacingError, type AppRow, type Deps, type DiscordConnectionRow, type WorkspaceRow } from './types.js';
 
@@ -421,9 +422,9 @@ export async function consumeContributorState(q: Queryable, token: string | unde
 }
 
 /** Distinct repositories of the enabled apps (several apps can share one repository). */
-function distinctRepos(apps: AppRow[]): { owner: string; name: string }[] {
-  const seen = new Map<number, { owner: string; name: string }>();
-  for (const a of apps) if (!seen.has(a.repo_id)) seen.set(a.repo_id, { owner: a.repo_owner, name: a.repo_name });
+function distinctRepos(apps: AppRow[]): { id: number; owner: string; name: string }[] {
+  const seen = new Map<number, { id: number; owner: string; name: string }>();
+  for (const a of apps) if (!seen.has(a.repo_id)) seen.set(a.repo_id, { id: a.repo_id, owner: a.repo_owner, name: a.repo_name });
   return [...seen.values()];
 }
 
@@ -484,15 +485,19 @@ export async function completeVerification(deps: Deps, state: StateRow, code: st
   }
 
   // Per repository: merged PRs or direct commits, whichever is higher (a squash-merged PR is
-  // usually also a commit). Then add up all repositories. Checked one repository at a time
-  // to stay within GitHub's search rate limit; any failure aborts rather than under-counting.
+  // usually also a commit). Then add up all repositories. Merged PRs come from the pull request
+  // index, read from GitHub's pull request list just before (GitHub's issue search leaves pull
+  // requests out unless the app has Pull requests: Read, even in a public repository). Commits
+  // are asked of GitHub one repository at a time; any failure aborts rather than under-counting.
   const perRepo: { repo: string; prs: number; commits: number; count: number }[] = [];
+  let unread: string[] = [];
   try {
+    const known = await refreshPulls(deps, repos, gh.installation_id);
+    unread = repos.filter((r) => !known.has(r.id)).map((r) => `${r.owner}/${r.name}`);
+    const merged = await mergedPullsBy(deps.db, repos.map((r) => r.id), user.login);
     for (const r of repos) {
-      const [prs, commits] = await Promise.all([
-        deps.github.countMergedPullRequests(gh.installation_id, r.owner, r.name, user.login),
-        deps.github.countAuthoredCommits(gh.installation_id, r.owner, r.name, user.login),
-      ]);
+      const prs = merged.get(r.id) ?? 0;
+      const commits = await deps.github.countAuthoredCommits(gh.installation_id, r.owner, r.name, user.login);
       perRepo.push({ repo: r.name, prs, commits, count: Math.max(prs, commits) });
     }
   } catch (err) {
@@ -514,6 +519,10 @@ export async function completeVerification(deps: Deps, state: StateRow, code: st
   const info = breakdown ? `Counted: ${breakdown}` : null;
 
   if (!earned) {
+    // Some repositories' pull requests couldn't be read yet: not a "no", just not known.
+    if (unread.length) {
+      return finish('error', 'We couldn’t check every repository just now. Please try again in a few minutes.', { ...who, contributions, info: `Pull requests not read yet for ${unread.join(', ')}.${breakdown ? ` Counted so far: ${breakdown}.` : ''}` });
+    }
     return finish(
       'not_contributor',
       contributions === 0

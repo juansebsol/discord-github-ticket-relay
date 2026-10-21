@@ -80,8 +80,7 @@ export class FakeGitHub {
   rejectAppJwt = false;
   /** GitHub account returned for the user access token from code `good-code`. */
   oauthUser = { id: 4242, login: 'octo-dev' };
-  /** repoId → login → number of merged PRs / authored commits. */
-  mergedPrs = new Map<number, Map<string, number>>();
+  /** repoId → login → number of authored commits (merged pull requests are in each repo's pulls). */
   commits = new Map<number, Map<string, number>>();
   installationPermissions: Record<string, string> = { issues: 'write', metadata: 'read', pull_requests: 'read', contents: 'read' };
   /** GET /repos/:o/:r/pulls calls (the pull request index reads with these). */
@@ -459,14 +458,8 @@ export class FakeGitHub {
       if (behavior === 'reset_after_create') throw netError('ECONNRESET');
       return json(201, { number: issue.number, html_url: `https://github.com/${repo.owner}/${repo.name}/issues/${issue.number}` });
     }
-    if (path === '/search/issues' && (url.searchParams.get('q') ?? '').includes('is:pr')) {
-      const q = url.searchParams.get('q') ?? '';
-      const [owner, name] = (/repo:(\S+)/.exec(q)?.[1] ?? '/').split('/');
-      const author = /author:(\S+)/.exec(q)?.[1] ?? '';
-      const r = this.repoByName(owner!, name!);
-      const n = r && accessible(r) ? (this.mergedPrs.get(r.id)?.get(author) ?? 0) : 0;
-      return json(200, { total_count: n, items: [] });
-    }
+    // Issue search leaves pull requests out unless the app has Pull requests: Read (like GitHub).
+    if (path === '/search/issues' && (url.searchParams.get('q') ?? '').includes('is:pr')) return json(200, { total_count: 0, items: [] });
     if (path === '/search/issues') {
       const q = url.searchParams.get('q') ?? '';
       const marker = /"([^"]+)"/.exec(q)?.[1];

@@ -105,11 +105,11 @@ Discord endpoint, OAuth), one or more queue workers, and an optional triage work
 - **Pull requests** (`pull_index`, `src/domain/pull-index.ts`): read from GitHub's pull request
   list for the issue index's repositories (the apps' ones), in the same loop but on their own: the
   issue list leaves pull requests out unless the app has Pull requests: Read, while a public
-  repository's can be listed without it. A catch-up reads the open ones and the ones closed in the
-  last 90 days (`pulls_loaded_at`); then, every 10 minutes, only what changed since the newest one
+  repository's can be listed without it. A catch-up reads the open ones and the closed ones
+  (`pulls_loaded_at`); then, every 10 minutes, only what changed since the newest one
   seen (`pulls_synced_until`, usually one call). A failure is kept in `pulls_error` (shown on Repo
   status › Pull requests) and never touches the issue sync; a failed catch-up is tried again two
-  minutes later. Kept: open ones, and closed ones for 90 days, with the issues each says it fixes
+  minutes later. Kept: open ones, merged ones for good, and ones closed without merging for 90 days (lists and triage look 90 days back), with the issues each says it fixes
   ("Fixes #12") or names ("for #12"); bots and chores are marked and left out. Each repository's
   releases are read every 30 minutes (`issue_index_repos.releases`), so a merged fix is "not
   released yet" or "in v1.4.3" (the first release published after the merge). With Being worked on or Already fixed
@@ -134,7 +134,7 @@ Discord endpoint, OAuth), one or more queue workers, and an optional triage work
 - **No Discord gateway.** The bot is driven entirely by Discord's HTTP interactions endpoint and
   REST API. It needs no privileged intents and no slash-command registration.
 - **GitHub App auth.** Short-lived installation tokens are minted from the app's private key
-  (RS256 JWT). Required permissions: `Issues: read & write`, `Metadata: read`; contributor roles add `Pull requests: read` and `Contents: read`, which AI triage › Knowledge also uses for private repositories (README and docs, merged pull requests, commits).
+  (RS256 JWT). Required permissions: `Issues: read & write`, `Metadata: read`; private repositories also need `Pull requests: read` and `Contents: read` (public ones' pull requests, commits, README and releases are readable without them). Contributor roles count merged pull requests from the pull request index, refreshed just before each check (GitHub's issue search leaves pull requests out without `Pull requests: read`, even in a public repository), and commits on each default branch; a repository whose pull requests couldn't be read yet makes a member who doesn't qualify try again later, rather than turning them down.
 - **SQLite-backed queue.** Submissions are the jobs. Workers in any number of processes claim
   them with one atomic `UPDATE … RETURNING` under SQLite's write lock, plus a 90s lease.
   WAL mode and a busy timeout let processes share the file on one host.

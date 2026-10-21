@@ -67,6 +67,7 @@ function seed() {
     { number: 3500, title: 'Fix ruler units in preferences', body: 'Closes #3400', user: 'cy', created_at: ago(20), merged_at: ago(15), updated_at: ago(15) },
     { number: 3599, title: 'Bump lodash from 4.17.20 to 4.17.21', body: '', user: 'dependabot[bot]', created_at: ago(2), updated_at: ago(2) },
     { number: 3200, title: 'Old merged change', body: '', user: 'cy', created_at: ago(200), merged_at: ago(150), updated_at: ago(150) },
+    { number: 3100, title: 'Abandoned idea', body: '', user: 'cy', created_at: ago(220), merged_at: null, updated_at: ago(160) },
   ];
   r.releases = [{ tag: 'v1.4.3', published_at: ago(10) }, { tag: 'v1.4.2', published_at: ago(30) }];
 }
@@ -76,7 +77,8 @@ describe('Pull requests: read from GitHub', () => {
     seed();
     await sync();
     const got = await pulls();
-    expect(got.map((p) => p.number)).toEqual([3500, 3597, 3598, 3599, 3601]);
+    // Merged ones are kept for good (contributor roles count them); ones closed without merging only for 90 days.
+    expect(got.map((p) => p.number)).toEqual([3200, 3500, 3597, 3598, 3599, 3601]);
     const p = Object.fromEntries(got.map((x) => [x.number, x]));
     expect(p[3597]).toMatchObject({ state: 'open', draft: false, author: 'FredApps', closes: [], mentions: [3592], noise: null });
     expect(p[3598]).toMatchObject({ draft: true });
@@ -95,7 +97,7 @@ describe('Pull requests: read from GitHub', () => {
     seed();
     repo().private = false;
     await sync();
-    expect((await pulls()).map((p) => p.number)).toEqual([3500, 3597, 3598, 3599, 3601]);
+    expect((await pulls()).map((p) => p.number)).toEqual([3200, 3500, 3597, 3598, 3599, 3601]);
     const row = async () => (await env.db.query('SELECT * FROM issue_index_repos WHERE repo_id = $1', [repo().id])).rows[0];
     expect(await row()).toMatchObject({ pulls_error: null, pulls_loaded_at: expect.any(Date) });
     // A private repository's pull requests can't be listed without the permission: the tab says so.
@@ -134,7 +136,7 @@ describe('Pull requests: read from GitHub', () => {
     await sync();
     row = (await env.db.query('SELECT * FROM issue_index_repos WHERE repo_id = $1', [repo().id])).rows[0];
     expect(row).toMatchObject({ pulls_error: null, pulls_loaded_at: expect.any(Date) });
-    expect((await pulls()).length).toBe(5);
+    expect((await pulls()).length).toBe(6);
   });
 
   it('reads which issues a pull request names, and which release shipped a fix', () => {
@@ -275,6 +277,8 @@ describe('Repo status › Pull requests', () => {
     const merged = await page('/repos?view=pulls&list=merged');
     expect(merged).toContain('Fix ruler units in preferences');
     expect(merged).toContain('in <span class="mono">v1.4.3</span>');
+    // The list shows the last 90 days; older merged ones are kept for contributor roles only.
+    expect(merged).not.toContain('Old merged change');
     // Most reported shows that someone's on it.
     expect(await page('/repos?view=reported')).toContain('Open PR #3597');
   });

@@ -4,7 +4,7 @@
  * how many Discord tickets are about those. From the pull request index: nothing asked of GitHub.
  */
 import type { Queryable } from '../db/database.js';
-import { pullsForIssues, releaseOf, repoReleases, type IndexedPull, type Release } from '../domain/pull-index.js';
+import { pullsForIssues, PULLS_KEEP_DAYS, releaseOf, repoReleases, type IndexedPull, type Release } from '../domain/pull-index.js';
 import type { RepoRef } from './tracker.js';
 
 export interface LinkedIssue {
@@ -37,8 +37,8 @@ export async function listPulls(q: Queryable, repos: RepoRef[]): Promise<PullLis
   const out: PullLists = { open: [], waiting: [], merged: [] };
   for (const repo of repos) {
     const { rows } = await q.query<IndexedPull>(
-      `SELECT * FROM pull_index WHERE repo_id = $1 AND noise IS NULL AND (state = 'open' OR merged_at IS NOT NULL) ORDER BY updated_at DESC LIMIT 300`,
-      [repo.id],
+      `SELECT * FROM pull_index WHERE repo_id = $1 AND noise IS NULL AND (state = 'open' OR merged_at >= $2) ORDER BY updated_at DESC LIMIT 300`,
+      [repo.id, new Date(Date.now() - PULLS_KEEP_DAYS * 86_400_000)],
     );
     if (!rows.length) continue;
     const numbers = [...new Set(rows.flatMap((p) => [...p.closes, ...p.mentions]))];

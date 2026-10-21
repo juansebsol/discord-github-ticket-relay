@@ -43,7 +43,7 @@ and filed by a GitHub App. Reporters never need a GitHub account.
   - AI triage › Activity shows what it's doing live, with a log kept 90 days.
   - It runs in its own worker with a monthly limit and keeps GitHub API headroom for filing, so filing never depends on it.
   - If Claude stops (out of credits, a rejected key, the monthly limit), every page shows an alert until it's fixed. Out of credits, it checks again every 5 minutes and carries on by itself.
-- **Contributor roles:** a second panel where members sign in with GitHub and get a role based on their merged PRs or commits across all your apps, e.g. Junior Contributor at 1, Contributor at 10.
+- **Contributor roles:** a second panel where members sign in with GitHub and get a role based on their merged PRs or commits across all your apps, e.g. Junior Contributor at 1, Contributor at 10. Merged PRs are counted from the pull requests the app keeps (read again just before each check, so one merged a moment ago counts), which works for public repositories without the Pull requests permission.
 - **Server health:** processes, memory, disk, queues, GitHub API usage and alerts, with a Dev mode so restarts while you deploy aren't counted as crashes.
 
 **Team**
