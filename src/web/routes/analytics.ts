@@ -96,8 +96,8 @@ export function registerAnalyticsRoutes(app: FastifyInstance, web: Web): void {
     </li>`)}</ul>`;
   }
 
-  function tile(label: string, value: string, d: SafeHtml, title?: string): SafeHtml {
-    return html`<div class="an-kpi" ${title ? html`title="${title}"` : ''}><div class="an-kl">${label}</div><div class="an-kv">${value}</div>${d}</div>`;
+  function tile(label: string, value: string, d: SafeHtml, title?: string, sub?: SafeHtml | string): SafeHtml {
+    return html`<div class="an-kpi" ${title ? html`title="${title}"` : ''}><div class="an-kl">${label}</div><div class="an-kv">${value}</div>${sub ? html`<div class="an-ks">${sub}</div>` : ''}${d}</div>`;
   }
 
   function body(ctx: WorkspaceRequestContext, w: Window, tz: string, d: AnalyticsData, repoChoice: string, apps: { id: number; name: string }[], metric: 'downloads' | 'stars'): SafeHtml {
@@ -141,9 +141,9 @@ export function registerAnalyticsRoutes(app: FastifyInstance, web: Web): void {
 
       <div class="an-kpis">
         ${tile('Downloads', compact(d.downloads.total), delta(d.downloads.total, d.downloads.prev, compare, 'up'), 'Release files downloaded from GitHub (checksums and update data left out)')}
-        ${tile('Tickets', compact(d.tickets.total), delta(d.tickets.total, d.tickets.prev, compare, null), 'Discord tickets filed')}
-        ${tile('Tickets per 1K downloads', perK === null ? '—' : perK.toFixed(perK < 10 ? 1 : 0), perK === null ? html`<div class="an-d muted">—<span class="an-vs">no downloads yet</span></div>` : delta(Math.round(perK * 10), prevPerK === null ? null : Math.round(prevPerK * 10), compare, 'down'), 'Fewer is better: a bad build shows up here first')}
-        ${tile('Issues opened', compact(d.issuesOpened.total), delta(d.issuesOpened.total, d.issuesOpened.prev, compare, null))}
+        ${tile('Discord tickets', compact(d.tickets.total), delta(d.tickets.total, d.tickets.prev, compare, null), 'Reports members filed through your Discord panel (each becomes a GitHub issue)')}
+        ${tile('Tickets per 1K downloads', perK === null ? '—' : perK.toFixed(perK < 10 ? 1 : 0), perK === null ? html`<div class="an-d muted">—<span class="an-vs">no downloads yet</span></div>` : delta(Math.round(perK * 10), prevPerK === null ? null : Math.round(prevPerK * 10), compare, 'down'), 'Discord tickets per 1,000 downloads. Fewer is better: a bad build shows up here first')}
+        ${tile('Issues opened', compact(d.issuesOpened.total), delta(d.issuesOpened.total, d.issuesOpened.prev, compare, null), 'Every new GitHub issue in these repositories: the ones filed from Discord tickets, and the ones opened on GitHub', `${n(d.issuesOpened.fromDiscord)} from Discord · ${n(Math.max(0, d.issuesOpened.total - d.issuesOpened.fromDiscord))} on GitHub`)}
         ${tile('Issues closed', compact(d.issuesClosed.total), delta(d.issuesClosed.total, d.issuesClosed.prev, compare, 'up'))}
         ${tile('PRs merged', compact(d.pullsMerged.total), delta(d.pullsMerged.total, d.pullsMerged.prev, compare, 'up'))}
         ${tile('Stars', compact(d.stars.total), delta(d.stars.total, d.stars.prev, compare, 'up'))}
@@ -172,7 +172,7 @@ export function registerAnalyticsRoutes(app: FastifyInstance, web: Web): void {
       <section class="card an-card" aria-labelledby="an-act-h">
         <div class="an-ch"><h2 id="an-act-h">Activity</h2><span class="small muted">per ${w.step.id === '1d' ? 'day' : w.step.label}</span></div>
         <div class="an-multi">
-          ${([['Tickets filed', d.tickets], ['Issues opened', d.issuesOpened], ['Issues closed', d.issuesClosed], ['PRs merged', d.pullsMerged], ['Stars', d.stars]] as [string, Metric][]).map(([title, m]) => html`<div class="an-mini">
+          ${([['Discord tickets', d.tickets], ['Issues opened (Discord + GitHub)', d.issuesOpened], ['Issues closed', d.issuesClosed], ['PRs merged', d.pullsMerged], ['Stars', d.stars]] as [string, Metric][]).map(([title, m]) => html`<div class="an-mini">
             <div class="an-mh"><span>${title}</span><b>${n(m.total)}</b></div>
             ${chart(w, tz, { id: title, title, unit: title, small: true, series: [{ key: title, name: title, values: m.values, slot: 1 }] })}
           </div>`)}

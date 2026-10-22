@@ -1781,6 +1781,7 @@ a.rs-why:hover { border-color: currentColor; }
 .an-kpi { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); padding: 14px 16px; min-width: 0; }
 .an-kl { font-size: 12px; color: var(--muted); }
 .an-kv { margin-top: 4px; font: 600 24px/30px var(--font); color: var(--text); }
+.an-ks { margin-top: 2px; font-size: 12px; color: var(--muted); }
 .an-d { margin-top: 2px; font-size: 12px; color: var(--muted); }
 .an-d.good { color: var(--ok-text); }
 .an-d.bad { color: var(--danger-text); }

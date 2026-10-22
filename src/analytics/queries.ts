@@ -58,7 +58,8 @@ export interface AnalyticsData {
   lastRead: Date | null;
   downloads: Metric & { series: Series[]; byApp: Breakdown[]; platforms: Breakdown[]; archs: Breakdown[]; formats: Breakdown[]; versions: Breakdown[] };
   tickets: Metric;
-  issuesOpened: Metric;
+  /** Every new issue in the repositories; fromDiscord of them were filed from a Discord ticket, the rest opened on GitHub. */
+  issuesOpened: Metric & { fromDiscord: number };
   issuesClosed: Metric;
   pullsMerged: Metric;
   stars: Metric;
@@ -159,6 +160,13 @@ export async function analyticsData(q: Queryable, workspaceId: string, repos: Re
   const issuesOpened = await metric(await perSlot(q,
     `SELECT ${slot('created_at')} AS at, count(*) AS n FROM issue_index WHERE repo_id IN (SELECT value FROM json_each($1)) AND gone = 0 AND created_at >= $2 AND created_at < $3 GROUP BY 1`,
     [repoIds, span[0], span[1]]));
+  // Of those, the ones filed from a Discord ticket (any workspace's: an issue is one or the other).
+  const { rows: filed } = await q.query<{ n: number }>(
+    `SELECT count(*) AS n FROM issue_index i WHERE i.repo_id IN (SELECT value FROM json_each($1)) AND i.gone = 0 AND i.created_at >= $2 AND i.created_at < $3
+       AND EXISTS (SELECT 1 FROM submissions s WHERE s.repo_id = i.repo_id AND s.issue_number = i.number)`,
+    [repoIds, new Date(w.start), new Date(w.end)],
+  );
+  const issuesOpenedAll = { ...issuesOpened, fromDiscord: Number(filed[0]?.n ?? 0) };
   const issuesClosed = await metric(await perSlot(q,
     `SELECT ${slot('closed_at')} AS at, count(*) AS n FROM issue_index WHERE repo_id IN (SELECT value FROM json_each($1)) AND gone = 0 AND state = 'closed' AND closed_at >= $2 AND closed_at < $3 GROUP BY 1`,
     [repoIds, span[0], span[1]]));
@@ -212,7 +220,7 @@ export async function analyticsData(q: Queryable, workspaceId: string, repos: Re
   }
   releases.sort((a, b) => (b.publishedAt?.getTime() ?? 0) - (a.publishedAt?.getTime() ?? 0));
 
-  return { recordingSince, lastRead: lastReadMs ? new Date(lastReadMs) : null, downloads, tickets, issuesOpened, issuesClosed, pullsMerged, stars, starsByApp, releases: releases.slice(0, 15) };
+  return { recordingSince, lastRead: lastReadMs ? new Date(lastReadMs) : null, downloads, tickets, issuesOpened: issuesOpenedAll, issuesClosed, pullsMerged, stars, starsByApp, releases: releases.slice(0, 15) };
 }
 
 export { PLATFORM_NAMES };

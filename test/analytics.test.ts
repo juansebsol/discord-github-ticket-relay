@@ -2,6 +2,7 @@ import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { classifyAsset } from '../src/analytics/assets.js';
 import { rollUp } from '../src/analytics/recorder.js';
 import { SLOT_MS, slotOf, windowOf } from '../src/analytics/time.js';
+import { IssueIndexer } from '../src/domain/issue-index.js';
 import { acceptSubmission } from '../src/domain/submissions.js';
 import { createInvite } from '../src/domain/workspaces.js';
 import { form, get, grant, makeAdmin, makeApp, makeWorkspace, resetDb, testDb, type Admin, type ConfiguredWorkspace, type TestEnv } from './helpers.js';
@@ -171,6 +172,9 @@ describe('Analytics: the page', () => {
   it('shows downloads with their breakdowns, activity and release health, for the range and step picked', async () => {
     await recorded();
     await ticket('Export crashes');
+    // One issue opened on GitHub, next to the one the ticket filed.
+    repo().issues.push({ number: 77, title: 'Opened on GitHub', body: '', labels: [], created_at: new Date().toISOString(), user: 'someone' });
+    await new IssueIndexer(env.deps).tick();
     const res = await page('/analytics?range=7d');
     expect(res.statusCode).toBe(200);
     const body = res.body;
@@ -178,6 +182,8 @@ describe('Analytics: the page', () => {
     expect(body).toMatch(/data-an-chart='[^']*&quot;name&quot;:&quot;Windows&quot;[^']*&quot;name&quot;:&quot;macOS&quot;[^']*&quot;name&quot;:&quot;Linux&quot;/);
     expect(body).toContain('<div class="an-kl">Downloads</div><div class="an-kv">500</div>');
     expect(body).toContain('<div class="an-kl">Tickets per 1K downloads</div><div class="an-kv">2.0</div>');
+    expect(body).toContain('<div class="an-kl">Discord tickets</div><div class="an-kv">1</div>');
+    expect(body).toContain('<div class="an-kl">Issues opened</div><div class="an-kv">2</div><div class="an-ks">1 from Discord · 1 on GitHub</div>');
     expect(body).toContain('x64 (Intel, AMD)');
     expect(body).toContain('>MSI<');
     expect(body).toContain('>v0.11.1</a> <span class="tag subtle">Latest</span>');
