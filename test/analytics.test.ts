@@ -130,9 +130,13 @@ describe('Analytics: recording downloads', () => {
     await tick(t0);
     const stars = async () => (await env.db.query('SELECT login FROM repo_stars ORDER BY login')).rows.map((r) => r.login);
     expect(await stars()).toEqual(['ana', 'ben']);
+    // GitHub's own total, per 30-minute slot, with the downloads.
+    expect((await env.db.query('SELECT slot_at, total FROM repo_star_counts')).rows).toEqual([{ slot_at: new Date(slotOf(t0)), total: 2 }]);
     repo().stars!.push({ login: 'cy', at: new Date().toISOString() });
     await tick(t0 + SLOT_MS);
     expect(await stars()).toEqual(['ana', 'ben', 'cy']);
+    expect((await env.db.query('SELECT total FROM repo_star_counts ORDER BY slot_at')).rows.map((r) => r.total)).toEqual([2, 3]);
+    expect((await env.db.query('SELECT stars_total FROM download_sync')).rows[0].stars_total).toBe(3);
     // 30-minute rows older than 32 days are added up per UTC day.
     const old = Date.parse('2026-08-01T10:30:00Z');
     const { rows } = await env.db.query('SELECT id FROM download_assets LIMIT 1');
@@ -186,6 +190,20 @@ describe('Analytics: the page', () => {
     // The viewer's time zone counts the days.
     const berlin = await env.server.inject({ method: 'GET', url: `${w()}/analytics`, headers: { ...get(ws.owner).headers, cookie: `${get(ws.owner).headers!.cookie}; tr_tz=Europe/Berlin` } });
     expect(berlin.body).toContain('data-an-tz="Europe/Berlin"');
+  });
+
+  it('switches the main chart to stars: new stars over time, and each app’s total', async () => {
+    await recorded();
+    const body = (await page('/analytics?range=7d&metric=stars')).body;
+    expect(body).toMatch(/aria-label="Chart"><a class="seg-item" href="[^"]*\/analytics\?range=7d"\s*>Downloads<\/a><a class="seg-item" href="[^"]*\/analytics\?metric=stars&amp;range=7d" aria-current="true">Stars<\/a>/);
+    expect(body).toContain('new stars · PhotoCraft');
+    expect(body).toMatch(/data-an-chart='[^']*&quot;name&quot;:&quot;New stars&quot;/);
+    // Total 2 (GitHub's count), 1 given in the last 7 days.
+    expect(body).toMatch(/Stars by app[\s\S]*?PhotoCraft<\/span>\s*<span class="an-bv num">2 <span class="an-up">\+1<\/span>/);
+    // The download breakdowns aren't shown; the app picker keeps the stars view.
+    expect(body).not.toContain('id="an-pl-h"');
+    expect(body).toContain('<input type="hidden" name="metric" value="stars">');
+    expect((await page('/analytics?range=7d')).body).toContain('id="an-pl-h"');
   });
 
   it('is on the Overview and in the sidebar; moderators need access, and Edit to turn it off', async () => {

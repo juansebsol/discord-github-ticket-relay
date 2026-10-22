@@ -39,6 +39,7 @@ query AnalyticsReleases($owner: String!, $name: String!, $after: String) {
 const STARS_QUERY = `
 query AnalyticsStars($owner: String!, $name: String!, $after: String) {
   repository(owner: $owner, name: $name) {
+    stargazerCount
     stargazers(first: 100, after: $after, orderBy: {field: STARRED_AT, direction: DESC}) {
       pageInfo { hasNextPage endCursor }
       edges { starredAt node { login } }
@@ -237,15 +238,20 @@ export class AnalyticsRecorder {
     }
   }
 
-  /** The star history once (back to the first), then each time the stars added since. */
+  /**
+   * The star history once (back to the first), then each time the stars added since; and the
+   * repository's star total as GitHub counts it, kept per 30-minute slot like the downloads.
+   */
   private async recordStars(sync: SyncRow, now: number): Promise<void> {
     const { db, github } = this.deps;
     const since = sync.stars_loaded_at ? (sync.stars_until_at?.getTime() ?? 0) - 60_000 : null;
     let newest = sync.stars_until_at?.getTime() ?? 0;
     let after: string | null = null;
     let complete = false;
+    let total: number | null = null;
     for (let page = 0; page < (since === null ? STAR_PAGES : 5); page++) {
       const d: any = await github!.graphql(sync.installation_id, STARS_QUERY, { owner: sync.owner, name: sync.name, after });
+      if (total === null && Number.isFinite(Number(d?.repository?.stargazerCount))) total = Number(d.repository.stargazerCount);
       const conn = d?.repository?.stargazers;
       let older = false;
       for (const e of conn?.edges ?? []) {
@@ -266,9 +272,15 @@ export class AnalyticsRecorder {
       after = conn.pageInfo.endCursor;
     }
     await db.query(
-      'UPDATE download_sync SET stars_loaded_at = CASE WHEN $2 = 1 THEN COALESCE(stars_loaded_at, $4) ELSE stars_loaded_at END, stars_until_at = $3 WHERE repo_id = $1',
-      [sync.repo_id, complete ? 1 : 0, newest ? new Date(newest) : null, new Date(now)],
+      'UPDATE download_sync SET stars_loaded_at = CASE WHEN $2 = 1 THEN COALESCE(stars_loaded_at, $4) ELSE stars_loaded_at END, stars_until_at = $3, stars_total = COALESCE($5, stars_total) WHERE repo_id = $1',
+      [sync.repo_id, complete ? 1 : 0, newest ? new Date(newest) : null, new Date(now), total],
     );
+    if (total !== null) {
+      await db.query(
+        'INSERT INTO repo_star_counts (repo_id, slot_at, total) VALUES ($1, $2, $3) ON CONFLICT (repo_id, slot_at) DO UPDATE SET total = excluded.total',
+        [sync.repo_id, new Date(slotOf(now)), total],
+      );
+    }
   }
 }
 

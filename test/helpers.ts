@@ -53,7 +53,7 @@ export function testDb(): Db {
 
 export async function resetDb(db: Db = testDb()): Promise<void> {
   db.exec('DELETE FROM sessions; DELETE FROM oauth_states; DELETE FROM workspaces; DELETE FROM users; DELETE FROM issue_index; DELETE FROM issue_index_repos; DELETE FROM process_status;');
-  db.exec('DELETE FROM pull_index; DELETE FROM repo_status; DELETE FROM download_counts; DELETE FROM download_days; DELETE FROM download_assets; DELETE FROM download_sync; DELETE FROM repo_stars;');
+  db.exec('DELETE FROM pull_index; DELETE FROM repo_status; DELETE FROM download_counts; DELETE FROM download_days; DELETE FROM download_assets; DELETE FROM download_sync; DELETE FROM repo_stars; DELETE FROM repo_star_counts;');
   db.exec('UPDATE server_settings SET dev_mode_on_at = NULL, dev_mode_by = NULL, dev_mode_off_at = NULL;');
 }
 

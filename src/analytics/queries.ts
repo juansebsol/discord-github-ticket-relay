@@ -62,6 +62,8 @@ export interface AnalyticsData {
   issuesClosed: Metric;
   pullsMerged: Metric;
   stars: Metric;
+  /** Per app: its star total as GitHub last counted it (every 30 minutes), and the stars given in the period. */
+  starsByApp: { label: string; total: number | null; gained: number }[];
   releases: ReleaseHealth[];
 }
 
@@ -172,6 +174,17 @@ export async function analyticsData(q: Queryable, workspaceId: string, repos: Re
     `SELECT ${slot('starred_at')} AS at, count(*) AS n FROM repo_stars WHERE repo_id IN (SELECT value FROM json_each($1)) AND starred_at >= $2 AND starred_at < $3 GROUP BY 1`,
     [repoIds, span[0], span[1]]));
 
+  const { rows: totals } = await q.query<{ repo_id: number; stars_total: number | null }>('SELECT repo_id, stars_total FROM download_sync WHERE repo_id IN (SELECT value FROM json_each($1))', [repoIds]);
+  const { rows: given } = await q.query<{ repo_id: number; n: number }>(
+    'SELECT repo_id, count(*) AS n FROM repo_stars WHERE repo_id IN (SELECT value FROM json_each($1)) AND starred_at >= $2 AND starred_at < $3 GROUP BY repo_id',
+    [repoIds, new Date(w.start), new Date(w.end)],
+  );
+  const totalOf = new Map(totals.map((t) => [t.repo_id, t.stars_total === null ? null : Number(t.stars_total)]));
+  const gainedOf = new Map(given.map((g) => [g.repo_id, Number(g.n)]));
+  const starsByApp = repos
+    .map((r) => ({ label: appNames.get(r.id) ?? r.name, total: totalOf.get(r.id) ?? null, gained: gainedOf.get(r.id) ?? 0 }))
+    .sort((a, b) => (b.total ?? -1) - (a.total ?? -1) || b.gained - a.gained);
+
   // ---- Release health: tickets while each release was the latest, per 1,000 of its downloads ----
   const releases: ReleaseHealth[] = [];
   for (const repo of repos) {
@@ -199,7 +212,7 @@ export async function analyticsData(q: Queryable, workspaceId: string, repos: Re
   }
   releases.sort((a, b) => (b.publishedAt?.getTime() ?? 0) - (a.publishedAt?.getTime() ?? 0));
 
-  return { recordingSince, lastRead: lastReadMs ? new Date(lastReadMs) : null, downloads, tickets, issuesOpened, issuesClosed, pullsMerged, stars, releases: releases.slice(0, 15) };
+  return { recordingSince, lastRead: lastReadMs ? new Date(lastReadMs) : null, downloads, tickets, issuesOpened, issuesClosed, pullsMerged, stars, starsByApp, releases: releases.slice(0, 15) };
 }
 
 export { PLATFORM_NAMES };

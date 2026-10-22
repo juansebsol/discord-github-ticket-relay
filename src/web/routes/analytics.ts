@@ -85,14 +85,26 @@ export function registerAnalyticsRoutes(app: FastifyInstance, web: Web): void {
     })}</ul>`;
   }
 
+  /** Each app's star total (GitHub's count) and the stars it was given in the period. */
+  function starList(rows: AnalyticsData['starsByApp']): SafeHtml {
+    if (!rows.some((r) => r.total !== null || r.gained)) return html`<p class="small muted an-none">Star totals show up after the first read.</p>`;
+    const max = Math.max(1, ...rows.map((r) => r.total ?? 0));
+    return html`<ul class="an-bars">${rows.map((r) => html`<li>
+      <span class="an-bl">${r.label}</span>
+      <span class="an-bv num">${r.total === null ? '—' : n(r.total)} <span class="${r.gained ? 'an-up' : 'muted'}">+${n(r.gained)}</span></span>
+      <svg class="an-bar" viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true"><rect class="track" x="0" y="0" width="100" height="6" rx="3"></rect><rect class="fill" x="0" y="0" width="${Math.max(1, ((r.total ?? 0) / max) * 100).toFixed(2)}" height="6" rx="3"></rect></svg>
+    </li>`)}</ul>`;
+  }
+
   function tile(label: string, value: string, d: SafeHtml, title?: string): SafeHtml {
     return html`<div class="an-kpi" ${title ? html`title="${title}"` : ''}><div class="an-kl">${label}</div><div class="an-kv">${value}</div>${d}</div>`;
   }
 
-  function body(ctx: WorkspaceRequestContext, w: Window, tz: string, d: AnalyticsData, repoChoice: string, apps: { id: number; name: string }[]): SafeHtml {
+  function body(ctx: WorkspaceRequestContext, w: Window, tz: string, d: AnalyticsData, repoChoice: string, apps: { id: number; name: string }[], metric: 'downloads' | 'stars'): SafeHtml {
     const compare = w.range.compare;
-    const href = (o: { range?: string; step?: string | null; app?: string }) => {
+    const href = (o: { range?: string; step?: string | null; app?: string; metric?: string }) => {
       const p = new URLSearchParams();
+      if ((o.metric ?? metric) === 'stars') p.set('metric', 'stars');
       const range = o.range ?? w.range.id;
       if (range !== 'today') p.set('range', range);
       const step = o.step === undefined ? (o.range ? null : w.step.id) : o.step;
@@ -106,10 +118,14 @@ export function registerAnalyticsRoutes(app: FastifyInstance, web: Web): void {
     const prevPerK = d.downloads.prev ? (d.tickets.prev ?? 0) / d.downloads.prev * 1000 : null;
     // One repository (picked, or the only one): downloads by platform; several: all of them together.
     const single = d.downloads.series.length > 1;
-    const noDownloads = !d.recordingSince || (d.downloads.total === 0 && d.recordingSince.getTime() > w.start);
+    const noDownloads = metric === 'downloads' && (!d.recordingSince || (d.downloads.total === 0 && d.recordingSince.getTime() > w.start));
+    const per = `per ${w.step.id === '1d' ? 'day' : w.step.label}`;
+    const switcher = html`<nav class="seg sm an-metric" aria-label="Chart">${([['downloads', 'Downloads'], ['stars', 'Stars']] as const).map(([id, label]) => html`<a class="seg-item" href="${href({ metric: id })}" ${id === metric ? raw('aria-current="true"') : ''}>${label}</a>`)}</nav>`;
+    const appLabel = single ? apps.find((a) => String(a.id) === repoChoice)?.name ?? apps[0]?.name ?? 'this app' : 'all apps';
     return html`
       <form method="get" action="${base(ctx)}" class="an-filters" aria-label="Filters">
         ${w.range.id !== 'today' ? html`<input type="hidden" name="range" value="${w.range.id}">` : ''}
+        ${metric === 'stars' ? html`<input type="hidden" name="metric" value="stars">` : ''}
         <label class="sr-only" for="an-app">App</label>
         ${selectWrap(html`<select id="an-app" name="app" data-autosubmit><option value="all" ${repoChoice === 'all' ? raw('selected') : ''}>All apps</option>${apps.map((a) => html`<option value="${String(a.id)}" ${String(a.id) === repoChoice ? raw('selected') : ''}>${a.name}</option>`)}</select>`, { sm: true })}
         <noscript><button class="btn sm" type="submit">Apply</button></noscript>
@@ -133,18 +149,25 @@ export function registerAnalyticsRoutes(app: FastifyInstance, web: Web): void {
         ${tile('Stars', compact(d.stars.total), delta(d.stars.total, d.stars.prev, compare, 'up'))}
       </div>
 
-      <section class="card an-card" aria-labelledby="an-dl-h">
-        <div class="an-ch"><h2 id="an-dl-h">Downloads</h2><span class="small muted">${single ? 'by platform' : 'all apps'} · per ${w.step.id === '1d' ? 'day' : w.step.label}</span></div>
-        ${chart(w, tz, { id: 'downloads', title: 'Downloads', unit: 'Downloads', series: single ? d.downloads.series.map((s, i) => ({ ...s, slot: i + 1 })) : [{ ...d.downloads.series[0]!, slot: 1 }] })}
+      <section class="card an-card" aria-labelledby="an-main-h">
+        <div class="an-ch"><h2 id="an-main-h" class="sr-only">${metric === 'stars' ? 'Stars' : 'Downloads'}</h2>${switcher}<span class="small muted">${metric === 'stars'
+          ? `new stars · ${appLabel} · ${per} · back to the first star`
+          : `${single ? 'by platform' : 'all apps'} · ${per}`}</span></div>
+        ${metric === 'stars'
+          ? chart(w, tz, { id: 'stars', title: 'New stars', unit: 'New stars', series: [{ key: 'stars', name: 'New stars', values: d.stars.values, slot: 1 }] })
+          : chart(w, tz, { id: 'downloads', title: 'Downloads', unit: 'Downloads', series: single ? d.downloads.series.map((s, i) => ({ ...s, slot: i + 1 })) : [{ ...d.downloads.series[0]!, slot: 1 }] })}
       </section>
 
-      <div class="an-grid">
+      ${metric === 'stars' ? html`<div class="an-grid">
+        <section class="card an-card" aria-labelledby="an-sb-h"><div class="an-ch"><h2 id="an-sb-h">Stars by app</h2><span class="small muted">total, and new in this period</span></div>${starList(d.starsByApp)}
+          <p class="small muted an-foot">Totals are GitHub’s own count, read every 30 minutes with the downloads, so a star taken back is counted out. New stars are the ones given in this period.</p></section>
+      </div>` : html`<div class="an-grid">
         ${single ? '' : html`<section class="card an-card" aria-labelledby="an-apps-h"><div class="an-ch"><h2 id="an-apps-h">By app</h2></div>${bars(d.downloads.byApp, { empty: 'No downloads in this period.' })}</section>`}
         <section class="card an-card" aria-labelledby="an-pl-h"><div class="an-ch"><h2 id="an-pl-h">Platforms</h2></div>${bars(d.downloads.platforms, { empty: 'No downloads in this period.', colored: true })}</section>
         <section class="card an-card" aria-labelledby="an-ar-h"><div class="an-ch"><h2 id="an-ar-h">Processor</h2></div>${bars(d.downloads.archs, { empty: 'No downloads in this period.' })}</section>
         <section class="card an-card" aria-labelledby="an-fo-h"><div class="an-ch"><h2 id="an-fo-h">Formats</h2></div>${bars(d.downloads.formats, { empty: 'No downloads in this period.' })}</section>
         <section class="card an-card" aria-labelledby="an-ve-h"><div class="an-ch"><h2 id="an-ve-h">Versions</h2></div>${bars(d.downloads.versions, { empty: 'No downloads in this period.' })}</section>
-      </div>
+      </div>`}
 
       <section class="card an-card" aria-labelledby="an-act-h">
         <div class="an-ch"><h2 id="an-act-h">Activity</h2><span class="small muted">per ${w.step.id === '1d' ? 'day' : w.step.label}</span></div>
@@ -178,7 +201,7 @@ export function registerAnalyticsRoutes(app: FastifyInstance, web: Web): void {
   app.get('/w/:wid/analytics', async (req, reply) => {
     const ctx = await web.requireWorkspace(req, reply, { permission: 'analytics.view' });
     if (!ctx) return reply;
-    const q = req.query as { range?: string; step?: string; app?: string };
+    const q = req.query as { range?: string; step?: string; app?: string; metric?: string };
     const edit = can(ctx.membership, 'analytics.edit');
     const s = await getAnalyticsSettings(deps.db, ctx.workspace.id);
     const tz = safeTimeZone((req.cookies as Record<string, string | undefined>).tr_tz);
@@ -209,7 +232,7 @@ export function registerAnalyticsRoutes(app: FastifyInstance, web: Web): void {
       const w = windowOf(q.range, q.step, tz);
       const picked = repoChoice === 'all' ? repos : repos.filter((r) => String(r.id) === repoChoice);
       const data = await analyticsData(deps.db, ctx.workspace.id, picked, w, appNames);
-      content = html`<div class="an" data-an-tz="${tz}">${body(ctx, w, tz, data, repoChoice, choices)}</div>`;
+      content = html`<div class="an" data-an-tz="${tz}">${body(ctx, w, tz, data, repoChoice, choices, q.metric === 'stars' ? 'stars' : 'downloads')}</div>`;
     }
     const page = html`
       ${pageHeader({ title: 'Analytics', description: 'Downloads, tickets, issues, pull requests and stars over time.', actions })}

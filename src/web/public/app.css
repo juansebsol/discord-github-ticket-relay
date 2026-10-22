@@ -1790,6 +1790,9 @@ a.rs-why:hover { border-color: currentColor; }
 .an-card { padding: 16px 20px 14px; overflow: visible; }
 .an-ch { display: flex; align-items: baseline; gap: 8px 12px; flex-wrap: wrap; margin-bottom: 10px; }
 .an-ch h2 { margin: 0; font-size: 14px; font-weight: 600; }
+.an-metric { height: 30px; }
+.an-metric .seg-item { height: 26px; font-weight: 600; }
+.an-up { color: var(--ok-text); font-size: 12px; margin-left: 4px; }
 .an-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; align-items: start; }
 .an-chart { margin: 0; }
 .an-plot { position: relative; height: 240px; }

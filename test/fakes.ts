@@ -160,7 +160,7 @@ export class FakeGitHub {
     if (query.includes('stargazers(')) {
       const list = [...(r.stars ?? [])].sort((a, b) => at(b.at) - at(a.at));
       const p = page(list, v.after, 100);
-      return { repository: { stargazers: { pageInfo: p.pageInfo, edges: p.nodes.map((x) => ({ starredAt: x.at, node: { login: x.login } })) } } };
+      return { repository: { stargazerCount: list.length, stargazers: { pageInfo: p.pageInfo, edges: p.nodes.map((x) => ({ starredAt: x.at, node: { login: x.login } })) } } };
     }
     if (query.includes('releases(')) {
       const p = page(newestFirst(r.releases ?? [], (x) => x.published_at), v.after, 50);
