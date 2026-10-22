@@ -130,10 +130,10 @@ export function layout(ctx: PageContext, opts: { title: string; active: string; 
         ${manage ? navItem(`${base}/setup/discord`, 'Discord', 'message-circle', a === 'discord', stepMark(p?.discord ?? 'todo')) : lockedNavItem('Discord', 'message-circle')}
         ${can(access, 'apps.view') ? navItem(`${base}/apps`, 'Apps & repositories', 'boxes', a === 'apps', stepMark(p?.apps ?? 'todo')) : lockedNavItem('Apps & repositories', 'boxes', { grantable: true })}
         <div class="nav-label">Tools</div>
+        ${tool(access, 'analytics')}
+        ${tool(access, 'repos')}
         ${tool(access, 'tickets', attention)}
         ${tool(access, 'issues')}
-        ${tool(access, 'repos')}
-        ${tool(access, 'analytics')}
         ${tool(access, 'triage', review)}
         ${tool(access, 'contributors')}
         <div class="nav-label">Workspace</div>

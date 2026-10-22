@@ -92,7 +92,7 @@ describe('sidebar', () => {
     const labels = [...overview.matchAll(/<div class="nav-label">([^<]+)<\/div>/g)].map((m) => m[1]);
     expect(labels).toEqual(['Setup', 'Tools', 'Workspace']);
     const tools = [...overview.matchAll(/class="nav-item"[^>]*>.*?<span>([^<]+)<\/span>/g)].map((m) => m[1]);
-    expect(tools).toEqual(['Overview', 'GitHub', 'Discord', 'Apps &amp; repositories', 'Discord tickets', 'GitHub issues', 'Repo status', 'Analytics', 'AI triage', 'Contributor roles', 'Members &amp; permissions', 'Settings', 'Deployment', 'Server health']);
+    expect(tools).toEqual(['Overview', 'GitHub', 'Discord', 'Apps &amp; repositories', 'Analytics', 'Repo status', 'Discord tickets', 'GitHub issues', 'AI triage', 'Contributor roles', 'Members &amp; permissions', 'Settings', 'Deployment', 'Server health']);
     const active: [string, string][] = [
       ['/tickets', '/tickets'], ['/tickets/files', '/tickets'], ['/tickets/settings', '/tickets'],
       ['/issues/sync', '/issues'], ['/issues/github', '/issues'], ['/repos', '/repos'], ['/repos/settings', '/repos'], ['/analytics', '/analytics'],

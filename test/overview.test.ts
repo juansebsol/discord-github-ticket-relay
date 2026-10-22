@@ -81,7 +81,7 @@ describe('Overview: a card per tool', () => {
   it('admins see all six tools, with buttons to their pages', async () => {
     const res = await page('', ws.owner);
     expect(res.statusCode).toBe(200);
-    expect(cards(res.body)).toEqual(['Discord tickets', 'GitHub issues', 'Repo status', 'Analytics', 'AI triage', 'Contributor roles']);
+    expect(cards(res.body)).toEqual(['Analytics', 'Repo status', 'Discord tickets', 'GitHub issues', 'AI triage', 'Contributor roles']);
     // What needs doing comes first: the ticket panel isn't in Discord yet, triage and verification are off.
     expect(buttons(res.body, 'tickets')).toEqual(['/tickets/panel', '/tickets']);
     expect(res.body).toMatch(/<a class="btn primary sm" href="[^"]+\/tickets\/panel"[^>]*><span class="lbl">Publish panel<\/span>/);

@@ -41,7 +41,7 @@ import { areaHref, canOpen, canOpenIssue, firstPage, panelPill, repoSyncState, T
 // ---- Overview -----------------------------------------------------------------------------------
 
 /** The tools with a card on the overview, in sidebar order. */
-const OVERVIEW_TOOLS: readonly ToolName[] = ['tickets', 'issues', 'repos', 'analytics', 'triage', 'contributors'];
+const OVERVIEW_TOOLS: readonly ToolName[] = ['analytics', 'repos', 'tickets', 'issues', 'triage', 'contributors'];
 
 const DAY_MS = 86_400_000;
 /** Latest goes back this far for issues opened on GitHub (the others are newest first by index). */

@@ -1,7 +1,7 @@
 import type { Role } from './types.js';
 
 /** The tools in the sidebar, in order. Each one has pages (areas) an admin can open to moderators. */
-export const TOOLS = ['tickets', 'issues', 'repos', 'analytics', 'triage', 'contributors', 'setup', 'workspace'] as const;
+export const TOOLS = ['analytics', 'repos', 'tickets', 'issues', 'triage', 'contributors', 'setup', 'workspace'] as const;
 export type Tool = (typeof TOOLS)[number];
 export type AccessLevel = 'none' | 'view' | 'edit';
 
