@@ -71,29 +71,30 @@ export function registerAnalyticsRoutes(app: FastifyInstance, web: Web): void {
   }
 
   /** A ranked list of bars (one colour, or the platform's), with the share of the total. */
-  function bars(items: Breakdown[], o: { empty: string; colored?: boolean }): SafeHtml {
+  /**
+   * A horizontal bar chart app.js draws: names on the left, bars on one axis from zero (so a bar's
+   * length is its value), the value and its share at the tip. Without scripts, the plain list.
+   */
+  function hbars(items: { label: string; value: number; slot?: number; note?: string | null; noteUp?: boolean }[], o: { empty: string; colored?: boolean; share?: boolean; max?: number }): SafeHtml {
     const total = items.reduce((t, b) => t + b.value, 0);
-    if (!total) return html`<p class="small muted an-none">${o.empty}</p>`;
-    const max = Math.max(...items.map((b) => b.value));
-    return html`<ul class="an-bars">${items.slice(0, 10).map((b) => {
-      const pct = (b.value / total) * 100;
-      return html`<li>
-        <span class="an-bl">${o.colored && b.slot ? html`<i class="an-key s${String(b.slot)}" aria-hidden="true"></i>` : ''}${b.label}</span>
-        <span class="an-bv num">${n(b.value)} <span class="muted">${pct < 1 ? '<1' : String(Math.round(pct))}%</span></span>
-        <svg class="an-bar" viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true"><rect class="track" x="0" y="0" width="100" height="6" rx="3"></rect><rect class="fill${o.colored && b.slot ? ` s${String(b.slot)}` : ''}" x="0" y="0" width="${Math.max(1, (b.value / max) * 100).toFixed(2)}" height="6" rx="3"></rect></svg>
-      </li>`;
-    })}</ul>`;
+    if (!total && !items.some((b) => b.note)) return html`<p class="small muted an-none">${o.empty}</p>`;
+    const shown = items.slice(0, o.max ?? 10);
+    const share = o.share !== false && total > 0;
+    const pct = (v: number) => { const p = (v / total) * 100; return p < 1 && v > 0 ? '<1%' : `${Math.round(p)}%`; };
+    const data = { items: shown.map((b) => ({ label: b.label, value: b.value, slot: o.colored && b.slot ? b.slot : 1, share: share ? pct(b.value) : null, note: b.note ?? null, up: Boolean(b.noteUp) })) };
+    return html`<figure class="an-hb" data-an-hbar='${JSON.stringify(data)}'>
+      <ul class="an-hb-list">${shown.map((b) => html`<li><span>${b.label}</span><span class="num">${n(b.value)}${share ? html` <span class="muted">${pct(b.value)}</span>` : ''}${b.note ? html` <span class="${b.noteUp ? 'an-up' : 'muted'}">${b.note}</span>` : ''}</span></li>`)}</ul>
+    </figure>`;
+  }
+
+  function bars(items: Breakdown[], o: { empty: string; colored?: boolean }): SafeHtml {
+    return hbars(items, o);
   }
 
   /** Each app's star total (GitHub's count) and the stars it was given in the period. */
   function starList(rows: AnalyticsData['starsByApp'], o: { gained?: boolean } = { gained: true }): SafeHtml {
     if (!rows.some((r) => r.total !== null || r.gained)) return html`<p class="small muted an-none">Star totals show up after the first read.</p>`;
-    const max = Math.max(1, ...rows.map((r) => r.total ?? 0));
-    return html`<ul class="an-bars">${rows.map((r) => html`<li>
-      <span class="an-bl">${r.label}</span>
-      <span class="an-bv num">${r.total === null ? '—' : n(r.total)}${o.gained ? html` <span class="${r.gained ? 'an-up' : 'muted'}">+${n(r.gained)}</span>` : ''}</span>
-      <svg class="an-bar" viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true"><rect class="track" x="0" y="0" width="100" height="6" rx="3"></rect><rect class="fill" x="0" y="0" width="${Math.max(1, ((r.total ?? 0) / max) * 100).toFixed(2)}" height="6" rx="3"></rect></svg>
-    </li>`)}</ul>`;
+    return hbars(rows.map((r) => ({ label: r.label, value: r.total ?? 0, note: o.gained ? `+${n(r.gained)}` : null, noteUp: r.gained > 0 })), { empty: 'No stars yet.', share: false, max: 30 });
   }
 
   function tile(label: string, value: string, d: SafeHtml, title?: string, sub?: SafeHtml | string): SafeHtml {

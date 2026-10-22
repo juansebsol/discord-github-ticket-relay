@@ -217,7 +217,9 @@ describe('Analytics: the page', () => {
     expect(body).toContain('id="an-pl-h"');
     const starsAll = (await page('/analytics?range=all&metric=stars')).body;
     expect(starsAll).toContain('all time · by app');
-    expect(starsAll).toMatch(/PhotoCraft<\/span>\s*<span class="an-bv num">2<\/span>/);
+    expect(starsAll).toContain('<li><span>PhotoCraft</span><span class="num">2</span></li>');
+    // Drawn as a bar chart by app.js from these numbers.
+    expect(starsAll).toContain('data-an-hbar=\'{&quot;items&quot;:[{&quot;label&quot;:&quot;PhotoCraft&quot;,&quot;value&quot;:2,');
   });
 
   it('switches the main chart to stars: new stars over time, and each app’s total', async () => {
@@ -227,7 +229,7 @@ describe('Analytics: the page', () => {
     expect(body).toContain('new stars · PhotoCraft');
     expect(body).toMatch(/data-an-chart='[^']*&quot;name&quot;:&quot;New stars&quot;/);
     // Total 2 (GitHub's count), 1 given in the last 7 days.
-    expect(body).toMatch(/Stars by app[\s\S]*?PhotoCraft<\/span>\s*<span class="an-bv num">2 <span class="an-up">\+1<\/span>/);
+    expect(body).toMatch(/Stars by app[\s\S]*?<li><span>PhotoCraft<\/span><span class="num">2 <span class="an-up">\+1<\/span><\/span><\/li>/);
     // The download breakdowns aren't shown; the app picker keeps the stars view.
     expect(body).not.toContain('id="an-pl-h"');
     expect(body).toContain('<input type="hidden" name="metric" value="stars">');

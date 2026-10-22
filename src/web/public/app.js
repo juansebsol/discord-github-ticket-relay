@@ -1951,7 +1951,8 @@
   (function () {
     var SVG = 'http://www.w3.org/2000/svg';
     var charts = $$('[data-an-chart]');
-    if (!charts.length) return;
+    var hbars = $$('[data-an-hbar]');
+    if (!charts.length && !hbars.length) return;
     function el(name, attrs, parent) {
       var e = document.createElementNS(SVG, name);
       for (var k in attrs) e.setAttribute(k, attrs[k]);
@@ -2137,14 +2138,81 @@
       });
     }
 
+    // Horizontal bars: names on the left (above the bar when narrow), one axis from zero, the
+    // value and its share at the tip. Square at zero, rounded at the end, never stretched.
+    function drawH(fig) {
+      var d = JSON.parse(fig.getAttribute('data-an-hbar'));
+      var W = fig.clientWidth;
+      if (!W || !d.items.length) return;
+      var items = d.items, narrow = W < 460;
+      fig.textContent = '';
+      var svg = el('svg', { width: W, height: 10, class: 'an-svg an-hsvg', role: 'img' }, fig);
+      svg.setAttribute('aria-label', items.map(function (i) { return i.label + ' ' + fmt(i.value) + (i.share ? ' (' + i.share + ')' : ''); }).join(', '));
+      function measure(text, cls) {
+        var t = el('text', { x: -9999, y: -9999, class: cls }, svg);
+        t.textContent = text;
+        var w = t.getComputedTextLength();
+        svg.removeChild(t);
+        return w;
+      }
+      var valText = function (i) { return narrow ? short(i.value) : fmt(i.value); };
+      var tipW = Math.max.apply(null, items.map(function (i) { return measure(valText(i) + (i.share ? '   ' + i.share : '') + (i.note ? '   ' + i.note : ''), 'an-hval'); })) + 14;
+      var labelW = narrow ? 0 : Math.min(Math.max.apply(null, items.map(function (i) { return measure(i.label, 'an-hlab'); })) + 20, Math.max(120, W * 0.3));
+      var plotX = labelW + (narrow ? 0 : 0.5), plotW = Math.max(40, W - labelW - tipW);
+      var rowH = narrow ? 44 : 32, barH = narrow ? 12 : 16, axisH = 22, bodyH = items.length * rowH;
+      var H = bodyH + axisH;
+      svg.setAttribute('height', H);
+      var ticks = niceTicks(Math.max.apply(null, items.map(function (i) { return i.value; }).concat([0])), narrow ? 2 : 4);
+      var top = ticks[ticks.length - 1] || 1;
+      var x = function (v) { return plotX + (v / top) * plotW; };
+      var grid = el('g', { class: 'an-gl' }, svg);
+      ticks.forEach(function (t) {
+        var gx = Math.round(x(t)) + 0.5;
+        el('line', { x1: gx, x2: gx, y1: 0, y2: bodyH }, grid);
+        var lab = el('text', { x: gx, y: H - 6, 'text-anchor': t === 0 ? 'start' : 'middle', class: 'an-axis' }, grid);
+        lab.textContent = short(t);
+      });
+      items.forEach(function (it, k) {
+        var y0 = k * rowH, by = narrow ? y0 + 24 : y0 + (rowH - barH) / 2;
+        var g = el('g', { class: 'an-hrow' }, svg);
+        var tt = el('title', {}, g);
+        tt.textContent = it.label + ': ' + fmt(it.value) + (it.share ? ' (' + it.share + ')' : '') + (it.note ? ', ' + it.note : '');
+        el('rect', { x: 0, y: y0 + 1, width: W, height: rowH - 2, rx: 4, class: 'an-hband' }, g);
+        var lab = el('text', { x: narrow ? plotX : 0, y: narrow ? y0 + 15 : y0 + rowH / 2 + 4, class: 'an-hlab' }, g);
+        lab.textContent = it.label;
+        var room = narrow ? W - 4 : labelW - 14;
+        if (lab.getComputedTextLength() > room) {
+          var base = it.label;
+          while (base.length > 2) {
+            base = base.slice(0, -1);
+            lab.textContent = base.replace(/\s+$/, '') + '…';
+            if (lab.getComputedTextLength() <= room) break;
+          }
+        }
+        var bw = it.value > 0 ? Math.max(2, x(it.value) - plotX) : 0;
+        if (bw > 0) {
+          var r = Math.min(4, bw / 2, barH / 2), xe = plotX + bw;
+          var path = 'M' + plotX + ',' + by + ' H' + (xe - r) + ' Q' + xe + ',' + by + ' ' + xe + ',' + (by + r) + ' V' + (by + barH - r) + ' Q' + xe + ',' + (by + barH) + ' ' + (xe - r) + ',' + (by + barH) + ' H' + plotX + ' Z';
+          el('path', { d: path, class: 'an-bar-s s' + (it.slot || 1) }, g);
+        }
+        var vt = el('text', { x: plotX + bw + 6, y: by + barH / 2 + 4, class: 'an-hval' }, g);
+        var v1 = el('tspan', {}, vt);
+        v1.textContent = valText(it);
+        if (it.share) { var s1 = el('tspan', { class: 'an-hpct', dx: 7 }, vt); s1.textContent = it.share; }
+        if (it.note) { var n1 = el('tspan', { class: it.up ? 'an-hup' : 'an-hpct', dx: 7 }, vt); n1.textContent = it.note; }
+      });
+      el('line', { x1: Math.round(plotX) + 0.5, x2: Math.round(plotX) + 0.5, y1: 0, y2: bodyH, class: 'an-base' }, svg);
+    }
+
     charts.forEach(draw);
+    hbars.forEach(drawH);
     var timer = null;
     var lastW = window.innerWidth;
     window.addEventListener('resize', function () {
       if (window.innerWidth === lastW) return;
       lastW = window.innerWidth;
       clearTimeout(timer);
-      timer = setTimeout(function () { charts.forEach(draw); }, 150);
+      timer = setTimeout(function () { charts.forEach(draw); hbars.forEach(drawH); }, 150);
     });
   })();
 })();

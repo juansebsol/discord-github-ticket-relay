@@ -1830,6 +1830,16 @@ a.rs-why:hover { border-color: currentColor; }
 .an-tv .table-wrap { margin-top: 8px; max-height: 280px; overflow: auto; border: 1px solid var(--border); border-radius: var(--r-sm); }
 .an-table { font-size: 13px; }
 .an-table th, .an-table td { height: 34px; padding: 0 12px; }
+.an-hb { margin: 0; }
+.an-hsvg { width: 100%; }
+.an-hlab { fill: var(--text); font: 13px var(--font); }
+.an-hval { fill: var(--text); font: 600 12px var(--font); font-variant-numeric: tabular-nums; }
+.an-hpct { fill: var(--muted); font-weight: 400; }
+.an-hup { fill: var(--ok-text); font-weight: 500; }
+.an-hband { fill: transparent; }
+.an-hrow:hover .an-hband { fill: var(--viz-hover); }
+.an-hb-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+.an-hb-list li { display: flex; justify-content: space-between; gap: 12px; }
 .an-bars { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
 .an-bars li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 12px; align-items: baseline; font-size: 13px; }
 .an-bl { display: inline-flex; align-items: center; gap: 8px; color: var(--text); min-width: 0; overflow-wrap: anywhere; }
