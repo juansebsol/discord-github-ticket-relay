@@ -198,6 +198,28 @@ describe('Analytics: the page', () => {
     expect(berlin.body).toContain('data-an-tz="Europe/Berlin"');
   });
 
+  it('All shows totals since the beginning: GitHub’s own download and star totals, no timeline', async () => {
+    await recorded();
+    await ticket('Export crashes');
+    const body = (await page('/analytics?range=all')).body;
+    // All comes first, before Today; the steps are greyed out.
+    expect(body).toMatch(/aria-label="Range"><a class="seg-item" href="[^"]*\/analytics\?range=all" aria-current="true">All<\/a><a class="seg-item" href="[^"]*\/analytics" >Today<\/a>/);
+    expect(body).toContain('class="seg an-steps off"');
+    expect(body).not.toMatch(/aria-label="Step"[^>]*>(?:(?!<\/nav>).)*<a class="seg-item"/s);
+    // Lifetime totals: every release file's GitHub total (v0.11.1 2,200 + v0.10.0 4,000), not only what was recorded.
+    expect(body).toContain('<div class="an-kl">Downloads</div><div class="an-kv">6,200</div><div class="an-d muted">All time</div>');
+    expect(body).toContain('<div class="an-kl">Stars</div><div class="an-kv">2</div>');
+    expect(body).toContain('<div class="an-kl">Discord tickets</div><div class="an-kv">1</div>');
+    // No timeline: the comparison by version (one app), no time chart and no Activity.
+    expect(body).toContain('all time · by version');
+    expect(body).not.toContain('data-an-chart');
+    expect(body).not.toContain('id="an-act-h"');
+    expect(body).toContain('id="an-pl-h"');
+    const starsAll = (await page('/analytics?range=all&metric=stars')).body;
+    expect(starsAll).toContain('all time · by app');
+    expect(starsAll).toMatch(/PhotoCraft<\/span>\s*<span class="an-bv num">2<\/span>/);
+  });
+
   it('switches the main chart to stars: new stars over time, and each app’s total', async () => {
     await recorded();
     const body = (await page('/analytics?range=7d&metric=stars')).body;

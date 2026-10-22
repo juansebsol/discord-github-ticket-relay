@@ -123,24 +123,27 @@ export async function analyticsData(q: Queryable, workspaceId: string, repos: Re
   const series: Series[] = single
     ? PLATFORM_SERIES.map((s) => ({ key: s.key, name: s.name, values: bucketed(w, inWindow.filter((r) => s.platforms.includes(r.a.platform)), knownFrom) }))
     : [{ key: 'all', name: 'Downloads', values: bucketed(w, inWindow, knownFrom) }];
-  const tally = (key: (r: (typeof inWindow)[number]) => string | null) => {
+  // All: GitHub's own lifetime totals for every release file, not only what was recorded.
+  const lifetime = w.range.id === 'all';
+  const counted = lifetime ? assets.filter((a) => a.kind !== 'meta').map((a) => ({ at: 0, n: Number(a.total), a })) : inWindow;
+  const tally = (key: (r: (typeof counted)[number]) => string | null) => {
     const m = new Map<string, number>();
-    for (const r of inWindow) {
+    for (const r of counted) {
       const k = key(r);
       if (k) m.set(k, (m.get(k) ?? 0) + r.n);
     }
     return [...m].map(([label, value]) => ({ label, value })).sort((a, b) => b.value - a.value);
   };
-  const platforms = PLATFORM_SERIES.map((s, i) => ({ label: s.name, value: inWindow.filter((r) => s.platforms.includes(r.a.platform)).reduce((t, r) => t + r.n, 0), slot: i + 1 })).filter((b) => b.value > 0);
+  const platforms = PLATFORM_SERIES.map((s, i) => ({ label: s.name, value: counted.filter((r) => s.platforms.includes(r.a.platform)).reduce((t, r) => t + r.n, 0), slot: i + 1 })).filter((b) => b.value > 0);
   const versionsAll = tally((r) => (single ? r.a.release : `${appNames.get(r.a.repo_id) ?? 'App'} ${r.a.release}`));
   const versions = versionsAll.length > 8 ? [...versionsAll.slice(0, 7), { label: 'Other versions', value: versionsAll.slice(7).reduce((t, v) => t + v.value, 0) }] : versionsAll;
-  const prevKnown = recordingSince !== null && knownFrom <= w.prevStart;
+  const prevKnown = !lifetime && recordingSince !== null && knownFrom <= w.prevStart;
   const downloads = {
-    total: sum(inWindow),
+    total: sum(counted),
     prev: prevKnown ? sum(inPrev) : null,
     values: bucketed(w, inWindow, knownFrom),
     series,
-    byApp: single ? [] : tally((r) => appNames.get(r.a.repo_id) ?? 'Other'),
+    byApp: single && !lifetime ? [] : tally((r) => appNames.get(r.a.repo_id) ?? 'Other'),
     platforms,
     archs: tally((r) => (r.a.arch ? ARCH_NAMES[r.a.arch] ?? r.a.arch : 'Any (web builds, scripts)')),
     formats: tally((r) => (r.a.kind === 'cli' ? 'Command line (zip)' : r.a.kind === 'web' ? 'Web (zip)' : r.a.format ?? 'Other')),
@@ -151,7 +154,7 @@ export async function analyticsData(q: Queryable, workspaceId: string, repos: Re
   const slot = (col: string) => `(${col} / ${SLOT_MS}) * ${SLOT_MS}`;
   const metric = async (rowsAll: { at: number; n: number }[]): Promise<Metric> => {
     const cur = rowsAll.filter((r) => r.at >= w.start && r.at < w.end);
-    return { total: sum(cur), prev: sum(rowsAll.filter((r) => r.at >= w.prevStart && r.at < w.prevEnd)), values: bucketed(w, cur) };
+    return { total: sum(cur), prev: lifetime ? null : sum(rowsAll.filter((r) => r.at >= w.prevStart && r.at < w.prevEnd)), values: bucketed(w, cur) };
   };
   const tickets = await metric(await perSlot(q,
     `SELECT ${slot('created_at')} AS at, count(*) AS n FROM submissions
@@ -220,7 +223,10 @@ export async function analyticsData(q: Queryable, workspaceId: string, repos: Re
   }
   releases.sort((a, b) => (b.publishedAt?.getTime() ?? 0) - (a.publishedAt?.getTime() ?? 0));
 
-  return { recordingSince, lastRead: lastReadMs ? new Date(lastReadMs) : null, downloads, tickets, issuesOpened: issuesOpenedAll, issuesClosed, pullsMerged, stars, starsByApp, releases: releases.slice(0, 15) };
+  // All: the star total is GitHub's own count (the history leaves out stars taken back).
+  const starTotal = starsByApp.reduce((t, r) => t + (r.total ?? 0), 0);
+  const starsOut = lifetime && starsByApp.some((r) => r.total !== null) ? { ...stars, total: starTotal } : stars;
+  return { recordingSince, lastRead: lastReadMs ? new Date(lastReadMs) : null, downloads, tickets, issuesOpened: issuesOpenedAll, issuesClosed, pullsMerged, stars: starsOut, starsByApp, releases: releases.slice(0, 15) };
 }
 
 export { PLATFORM_NAMES };

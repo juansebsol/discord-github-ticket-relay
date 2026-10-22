@@ -86,12 +86,12 @@ export function registerAnalyticsRoutes(app: FastifyInstance, web: Web): void {
   }
 
   /** Each app's star total (GitHub's count) and the stars it was given in the period. */
-  function starList(rows: AnalyticsData['starsByApp']): SafeHtml {
+  function starList(rows: AnalyticsData['starsByApp'], o: { gained?: boolean } = { gained: true }): SafeHtml {
     if (!rows.some((r) => r.total !== null || r.gained)) return html`<p class="small muted an-none">Star totals show up after the first read.</p>`;
     const max = Math.max(1, ...rows.map((r) => r.total ?? 0));
     return html`<ul class="an-bars">${rows.map((r) => html`<li>
       <span class="an-bl">${r.label}</span>
-      <span class="an-bv num">${r.total === null ? '—' : n(r.total)} <span class="${r.gained ? 'an-up' : 'muted'}">+${n(r.gained)}</span></span>
+      <span class="an-bv num">${r.total === null ? '—' : n(r.total)}${o.gained ? html` <span class="${r.gained ? 'an-up' : 'muted'}">+${n(r.gained)}</span>` : ''}</span>
       <svg class="an-bar" viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true"><rect class="track" x="0" y="0" width="100" height="6" rx="3"></rect><rect class="fill" x="0" y="0" width="${Math.max(1, ((r.total ?? 0) / max) * 100).toFixed(2)}" height="6" rx="3"></rect></svg>
     </li>`)}</ul>`;
   }
@@ -102,6 +102,9 @@ export function registerAnalyticsRoutes(app: FastifyInstance, web: Web): void {
 
   function body(ctx: WorkspaceRequestContext, w: Window, tz: string, d: AnalyticsData, repoChoice: string, apps: { id: number; name: string }[], metric: 'downloads' | 'stars'): SafeHtml {
     const compare = w.range.compare;
+    // All: totals since the beginning, no timeline and nothing to compare with.
+    const lifetime = w.range.id === 'all';
+    const vs = (total: number, prev: number | null, better: Better) => (lifetime ? html`<div class="an-d muted">All time</div>` : delta(total, prev, compare, better));
     const href = (o: { range?: string; step?: string | null; app?: string; metric?: string }) => {
       const p = new URLSearchParams();
       if ((o.metric ?? metric) === 'stars') p.set('metric', 'stars');
@@ -118,7 +121,7 @@ export function registerAnalyticsRoutes(app: FastifyInstance, web: Web): void {
     const prevPerK = d.downloads.prev ? (d.tickets.prev ?? 0) / d.downloads.prev * 1000 : null;
     // One repository (picked, or the only one): downloads by platform; several: all of them together.
     const single = d.downloads.series.length > 1;
-    const noDownloads = metric === 'downloads' && (!d.recordingSince || (d.downloads.total === 0 && d.recordingSince.getTime() > w.start));
+    const noDownloads = !lifetime && metric === 'downloads' && (!d.recordingSince || (d.downloads.total === 0 && d.recordingSince.getTime() > w.start));
     const per = `per ${w.step.id === '1d' ? 'day' : w.step.label}`;
     const switcher = html`<nav class="seg sm an-metric" aria-label="Chart">${([['downloads', 'Downloads'], ['stars', 'Stars']] as const).map(([id, label]) => html`<a class="seg-item" href="${href({ metric: id })}" ${id === metric ? raw('aria-current="true"') : ''}>${label}</a>`)}</nav>`;
     const appLabel = single ? apps.find((a) => String(a.id) === repoChoice)?.name ?? apps[0]?.name ?? 'this app' : 'all apps';
@@ -130,9 +133,9 @@ export function registerAnalyticsRoutes(app: FastifyInstance, web: Web): void {
         ${selectWrap(html`<select id="an-app" name="app" data-autosubmit><option value="all" ${repoChoice === 'all' ? raw('selected') : ''}>All apps</option>${apps.map((a) => html`<option value="${String(a.id)}" ${String(a.id) === repoChoice ? raw('selected') : ''}>${a.name}</option>`)}</select>`, { sm: true })}
         <noscript><button class="btn sm" type="submit">Apply</button></noscript>
         ${segLinks('Range', RANGES.map((r) => ({ href: href({ range: r.id }), label: r.label, current: r.id === w.range.id })))}
-        <nav class="seg an-steps" aria-label="Step">${w.steps.map((s) => s.ok
+        <nav class="seg an-steps${lifetime ? ' off' : ''}" aria-label="Step" ${lifetime ? raw('title="All shows totals, not a timeline: pick a range to see it over time"') : ''}>${w.steps.map((s) => s.ok
           ? html`<a class="seg-item" href="${href({ step: s.id })}" ${s.id === w.step.id ? raw('aria-current="true"') : ''}>${s.label}</a>`
-          : html`<span class="seg-item off" aria-disabled="true" title="${`Too fine for ${w.range.label.toLowerCase()}`}">${s.label}</span>`)}</nav>
+          : html`<span class="seg-item off" aria-disabled="true" ${lifetime ? '' : html`title="${`Too fine for ${w.range.label.toLowerCase()}`}"`}>${s.label}</span>`)}</nav>
       </form>
 
       ${noDownloads ? html`<div class="an-note">${notice('info', d.recordingSince ? 'Downloads are being recorded' : 'Downloads start recording in a minute', d.recordingSince
@@ -140,36 +143,42 @@ export function registerAnalyticsRoutes(app: FastifyInstance, web: Web): void {
         : 'The first read of each repository is a starting point; downloads show up from the half hour after.')}</div>` : ''}
 
       <div class="an-kpis">
-        ${tile('Downloads', compact(d.downloads.total), delta(d.downloads.total, d.downloads.prev, compare, 'up'), 'Release files downloaded from GitHub (checksums and update data left out)')}
-        ${tile('Discord tickets', compact(d.tickets.total), delta(d.tickets.total, d.tickets.prev, compare, null), 'Reports members filed through your Discord panel (each becomes a GitHub issue)')}
-        ${tile('Tickets per 1K downloads', perK === null ? '—' : perK.toFixed(perK < 10 ? 1 : 0), perK === null ? html`<div class="an-d muted">—<span class="an-vs">no downloads yet</span></div>` : delta(Math.round(perK * 10), prevPerK === null ? null : Math.round(prevPerK * 10), compare, 'down'), 'Discord tickets per 1,000 downloads. Fewer is better: a bad build shows up here first')}
-        ${tile('Issues opened', compact(d.issuesOpened.total), delta(d.issuesOpened.total, d.issuesOpened.prev, compare, null), 'Every new GitHub issue in these repositories: the ones filed from Discord tickets, and the ones opened on GitHub', `${n(d.issuesOpened.fromDiscord)} from Discord · ${n(Math.max(0, d.issuesOpened.total - d.issuesOpened.fromDiscord))} on GitHub`)}
-        ${tile('Issues closed', compact(d.issuesClosed.total), delta(d.issuesClosed.total, d.issuesClosed.prev, compare, 'up'))}
-        ${tile('PRs merged', compact(d.pullsMerged.total), delta(d.pullsMerged.total, d.pullsMerged.prev, compare, 'up'))}
-        ${tile('Stars', compact(d.stars.total), delta(d.stars.total, d.stars.prev, compare, 'up'))}
+        ${tile('Downloads', compact(d.downloads.total), vs(d.downloads.total, d.downloads.prev, 'up'), lifetime ? 'GitHub’s own totals for every release file (checksums and update data left out)' : 'Release files downloaded from GitHub (checksums and update data left out)')}
+        ${tile('Discord tickets', compact(d.tickets.total), vs(d.tickets.total, d.tickets.prev, null), 'Reports members filed through your Discord panel (each becomes a GitHub issue)')}
+        ${tile('Tickets per 1K downloads', perK === null ? '—' : perK.toFixed(perK < 10 ? 1 : 0), perK === null ? html`<div class="an-d muted">—<span class="an-vs">no downloads yet</span></div>` : lifetime ? vs(0, null, null) : delta(Math.round(perK * 10), prevPerK === null ? null : Math.round(prevPerK * 10), compare, 'down'), 'Discord tickets per 1,000 downloads. Fewer is better: a bad build shows up here first')}
+        ${tile('Issues opened', compact(d.issuesOpened.total), vs(d.issuesOpened.total, d.issuesOpened.prev, null), 'Every new GitHub issue in these repositories: the ones filed from Discord tickets, and the ones opened on GitHub', `${n(d.issuesOpened.fromDiscord)} from Discord · ${n(Math.max(0, d.issuesOpened.total - d.issuesOpened.fromDiscord))} on GitHub`)}
+        ${tile('Issues closed', compact(d.issuesClosed.total), vs(d.issuesClosed.total, d.issuesClosed.prev, 'up'))}
+        ${tile('PRs merged', compact(d.pullsMerged.total), vs(d.pullsMerged.total, d.pullsMerged.prev, 'up'))}
+        ${tile('Stars', compact(d.stars.total), vs(d.stars.total, d.stars.prev, 'up'), lifetime ? 'GitHub’s own star count' : undefined)}
       </div>
 
       <section class="card an-card" aria-labelledby="an-main-h">
-        <div class="an-ch"><h2 id="an-main-h" class="sr-only">${metric === 'stars' ? 'Stars' : 'Downloads'}</h2>${switcher}<span class="small muted">${metric === 'stars'
-          ? `new stars · ${appLabel} · ${per} · back to the first star`
-          : `${single ? 'by platform' : 'all apps'} · ${per}`}</span></div>
-        ${metric === 'stars'
-          ? chart(w, tz, { id: 'stars', title: 'New stars', unit: 'New stars', series: [{ key: 'stars', name: 'New stars', values: d.stars.values, slot: 1 }] })
-          : chart(w, tz, { id: 'downloads', title: 'Downloads', unit: 'Downloads', series: single ? d.downloads.series.map((s, i) => ({ ...s, slot: i + 1 })) : [{ ...d.downloads.series[0]!, slot: 1 }] })}
+        <div class="an-ch"><h2 id="an-main-h" class="sr-only">${metric === 'stars' ? 'Stars' : 'Downloads'}</h2>${switcher}<span class="small muted">${lifetime
+          ? metric === 'stars' ? 'all time · by app · GitHub’s count' : `all time · ${single ? 'by version' : 'by app'} · GitHub’s totals`
+          : metric === 'stars'
+            ? `new stars · ${appLabel} · ${per} · back to the first star`
+            : `${single ? 'by platform' : 'all apps'} · ${per}`}</span></div>
+        ${lifetime
+          ? metric === 'stars'
+            ? starList(d.starsByApp, { gained: false })
+            : bars(single ? d.downloads.versions : d.downloads.byApp, { empty: 'Downloads show up after the first read.' })
+          : metric === 'stars'
+            ? chart(w, tz, { id: 'stars', title: 'New stars', unit: 'New stars', series: [{ key: 'stars', name: 'New stars', values: d.stars.values, slot: 1 }] })
+            : chart(w, tz, { id: 'downloads', title: 'Downloads', unit: 'Downloads', series: single ? d.downloads.series.map((s, i) => ({ ...s, slot: i + 1 })) : [{ ...d.downloads.series[0]!, slot: 1 }] })}
       </section>
 
-      ${metric === 'stars' ? html`<div class="an-grid">
+      ${metric === 'stars' ? (lifetime ? '' : html`<div class="an-grid">
         <section class="card an-card" aria-labelledby="an-sb-h"><div class="an-ch"><h2 id="an-sb-h">Stars by app</h2><span class="small muted">total, and new in this period</span></div>${starList(d.starsByApp)}
           <p class="small muted an-foot">Totals are GitHub’s own count, read every 30 minutes with the downloads, so a star taken back is counted out. New stars are the ones given in this period.</p></section>
-      </div>` : html`<div class="an-grid">
-        ${single ? '' : html`<section class="card an-card" aria-labelledby="an-apps-h"><div class="an-ch"><h2 id="an-apps-h">By app</h2></div>${bars(d.downloads.byApp, { empty: 'No downloads in this period.' })}</section>`}
+      </div>`) : html`<div class="an-grid">
+        ${single || lifetime ? '' : html`<section class="card an-card" aria-labelledby="an-apps-h"><div class="an-ch"><h2 id="an-apps-h">By app</h2></div>${bars(d.downloads.byApp, { empty: 'No downloads in this period.' })}</section>`}
         <section class="card an-card" aria-labelledby="an-pl-h"><div class="an-ch"><h2 id="an-pl-h">Platforms</h2></div>${bars(d.downloads.platforms, { empty: 'No downloads in this period.', colored: true })}</section>
         <section class="card an-card" aria-labelledby="an-ar-h"><div class="an-ch"><h2 id="an-ar-h">Processor</h2></div>${bars(d.downloads.archs, { empty: 'No downloads in this period.' })}</section>
         <section class="card an-card" aria-labelledby="an-fo-h"><div class="an-ch"><h2 id="an-fo-h">Formats</h2></div>${bars(d.downloads.formats, { empty: 'No downloads in this period.' })}</section>
-        <section class="card an-card" aria-labelledby="an-ve-h"><div class="an-ch"><h2 id="an-ve-h">Versions</h2></div>${bars(d.downloads.versions, { empty: 'No downloads in this period.' })}</section>
+        ${single && lifetime ? '' : html`<section class="card an-card" aria-labelledby="an-ve-h"><div class="an-ch"><h2 id="an-ve-h">Versions</h2></div>${bars(d.downloads.versions, { empty: 'No downloads in this period.' })}</section>`}
       </div>`}
 
-      <section class="card an-card" aria-labelledby="an-act-h">
+      ${lifetime ? '' : html`<section class="card an-card" aria-labelledby="an-act-h">
         <div class="an-ch"><h2 id="an-act-h">Activity</h2><span class="small muted">per ${w.step.id === '1d' ? 'day' : w.step.label}</span></div>
         <div class="an-multi">
           ${([['Discord tickets', d.tickets], ['Issues opened (Discord + GitHub)', d.issuesOpened], ['Issues closed', d.issuesClosed], ['PRs merged', d.pullsMerged], ['Stars', d.stars]] as [string, Metric][]).map(([title, m]) => html`<div class="an-mini">
@@ -177,7 +186,7 @@ export function registerAnalyticsRoutes(app: FastifyInstance, web: Web): void {
             ${chart(w, tz, { id: title, title, unit: title, small: true, series: [{ key: title, name: title, values: m.values, slot: 1 }] })}
           </div>`)}
         </div>
-      </section>
+      </section>`}
 
       <section class="card an-card" aria-labelledby="an-rel-h">
         <div class="an-ch"><h2 id="an-rel-h">Release health</h2><span class="small muted">Discord tickets while each release was the latest, per 1,000 of its downloads</span></div>
@@ -195,7 +204,7 @@ export function registerAnalyticsRoutes(app: FastifyInstance, web: Web): void {
           : html`<p class="small muted an-none">Releases show up after the first read.</p>`}
       </section>
 
-      <p class="small muted an-foot">${d.recordingSince ? html`Downloads recorded every 30 minutes since ${localTime(d.recordingSince)}${d.lastRead ? html`, last read ${timeAgo(d.lastRead)}` : ''}.` : 'Downloads start recording within a minute.'} Times are in your time zone (${tz}). Tickets, issues and pull requests go back as far as they’re kept; stars go back to the first one.</p>`;
+      <p class="small muted an-foot">${lifetime ? html`All: GitHub’s own totals for downloads and stars, and every Discord ticket, issue and merged pull request kept. ` : ''}${d.recordingSince ? html`Downloads recorded every 30 minutes since ${localTime(d.recordingSince)}${d.lastRead ? html`, last read ${timeAgo(d.lastRead)}` : ''}.` : 'Downloads start recording within a minute.'} Times are in your time zone (${tz}). Tickets, issues and pull requests go back as far as they’re kept; stars go back to the first one.</p>`;
   }
 
   app.get('/w/:wid/analytics', async (req, reply) => {

@@ -21,6 +21,8 @@ export const STEPS = [
 export type StepId = (typeof STEPS)[number]['id'];
 
 export const RANGES = [
+  // Totals since the beginning: no timeline, so no step.
+  { id: 'all', label: 'All', days: 0, step: '1d', compare: '' },
   { id: 'today', label: 'Today', days: 1, step: '30m', compare: 'this time yesterday' },
   { id: 'yesterday', label: 'Yesterday', days: 1, step: '30m', compare: 'the day before' },
   { id: '7d', label: '7 days', days: 7, step: '3h', compare: 'the 7 days before' },
@@ -74,7 +76,7 @@ export function addDays(dayStart: number, n: number, tz: string): number {
 }
 
 export function rangeOf(id: string | undefined) {
-  return RANGES.find((r) => r.id === id) ?? RANGES[0];
+  return RANGES.find((r) => r.id === id) ?? RANGES.find((r) => r.id === 'today')!;
 }
 
 export function stepOf(id: string | undefined) {
@@ -99,11 +101,15 @@ export interface Window {
 
 /** A step fits a range when it makes at most MAX_BUCKETS buckets, and steps under a day stay within the 30-minute detail. */
 function fits(range: (typeof RANGES)[number], step: (typeof STEPS)[number]) {
-  return (range.days * 86_400_000) / step.ms <= MAX_BUCKETS && (step.id === '1d' || range.days <= DETAIL_DAYS - 2);
+  return range.id !== 'all' && (range.days * 86_400_000) / step.ms <= MAX_BUCKETS && (step.id === '1d' || range.days <= DETAIL_DAYS - 2);
 }
 
 export function windowOf(rangeId: string | undefined, stepId: string | undefined, tz: string, now = Date.now()): Window {
   const range = rangeOf(rangeId);
+  if (range.id === 'all') {
+    // Everything up to now, as totals: no buckets and no period before.
+    return { range, step: STEPS.find((s) => s.id === '1d')!, start: 0, end: now + 1, prevStart: 0, prevEnd: 0, buckets: [], until: now, steps: STEPS.map((s) => ({ id: s.id, label: s.label, ok: false })) };
+  }
   const asked = stepOf(stepId);
   const step = asked && fits(range, asked) ? asked : STEPS.find((s) => s.id === range.step)!;
   const today = startOfDay(now, tz);

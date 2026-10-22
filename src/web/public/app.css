@@ -1776,6 +1776,8 @@ a.rs-why:hover { border-color: currentColor; }
 .an-filters .select select { min-width: 160px; }
 .seg-item.off { color: var(--faint); cursor: not-allowed; }
 .seg-item.off:hover { color: var(--faint); }
+.an-steps.off { opacity: 0.5; cursor: not-allowed; }
+.an-steps.off .seg-item { cursor: not-allowed; }
 .an-note .notice { margin: 0; }
 .an-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(138px, 1fr)); gap: 12px; }
 .an-kpi { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); padding: 14px 16px; min-width: 0; }
