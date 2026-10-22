@@ -63,6 +63,8 @@ export interface DiscordRole {
   permissions: string;
   position: number;
   managed?: boolean;
+  /** Anyone can @mention it (otherwise only members allowed to mention every role can). */
+  mentionable?: boolean;
 }
 
 export interface DiscordUser {
@@ -265,6 +267,11 @@ export class DiscordClient {
 
   getMessage(channelId: string, messageId: string): Promise<{ id: string }> {
     return this.request('GET', `/channels/${channelId}/messages/${messageId}`);
+  }
+
+  /** Publishes a message in an announcement channel to the servers following it (fails in other channels). */
+  async crosspostMessage(channelId: string, messageId: string): Promise<void> {
+    await this.request('POST', `/channels/${channelId}/messages/${messageId}/crosspost`, { retryOn429: false });
   }
 
   async deleteMessage(channelId: string, messageId: string): Promise<void> {

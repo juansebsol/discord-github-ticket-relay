@@ -7,6 +7,7 @@ export const Permission = {
   SEND_MESSAGES: 1n << 11n,
   EMBED_LINKS: 1n << 14n,
   READ_MESSAGE_HISTORY: 1n << 16n,
+  MENTION_EVERYONE: 1n << 17n,
   MANAGE_ROLES: 1n << 28n,
 } as const;
 
@@ -66,6 +67,19 @@ export function computeChannelPermissions(
   if (!(perms & Permission.VIEW_CHANNEL)) return 0n;
   if (!(perms & Permission.SEND_MESSAGES)) perms &= ~Permission.EMBED_LINKS;
   return perms;
+}
+
+/** Permissions that make a role more than a label: a role members give themselves can't have any. */
+const ELEVATED: [number, string][] = [
+  [3, 'Administrator'], [5, 'Manage Server'], [28, 'Manage Roles'], [4, 'Manage Channels'], [1, 'Kick Members'], [2, 'Ban Members'],
+  [40, 'Timeout Members'], [13, 'Manage Messages'], [17, 'Mention @everyone'], [29, 'Manage Webhooks'], [27, 'Manage Nicknames'],
+  [30, 'Manage Expressions'], [7, 'View Audit Log'], [33, 'Manage Events'], [34, 'Manage Threads'], [22, 'Mute Members'], [23, 'Deafen Members'], [24, 'Move Members'],
+];
+
+/** The moderator-type permissions a role has (by name). */
+export function elevatedPermissions(perms: string | bigint): string[] {
+  const p = BigInt(perms);
+  return ELEVATED.filter(([bit]) => p & (1n << BigInt(bit))).map(([, name]) => name);
 }
 
 export function missingPermissions(perms: bigint): string[] {

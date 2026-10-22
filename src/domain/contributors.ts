@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { withTransaction, type Queryable } from '../db/database.js';
 import { DiscordApiError, DiscordErrorCode, type DiscordClient } from '../discord/client.js';
 import * as m from '../discord/messages.js';
-import { computeBasePermissions, Permission } from '../discord/permissions.js';
+import { computeBasePermissions, elevatedPermissions, Permission } from '../discord/permissions.js';
 import { GitHubApiError } from '../github/client.js';
 import { sha256 } from '../lib/crypto.js';
 import { consumeState, createState, type StateRow } from './oauth-state.js';
@@ -181,10 +181,14 @@ export interface RoleOption {
   position: number;
   assignable: boolean;
   reason: string | null;
+  /** Anyone can @mention it. */
+  mentionable: boolean;
+  /** Moderator-type permissions it gives (a role members give themselves can't have any). */
+  elevated: string[];
 }
 
 export type RoleInspection =
-  | { ok: true; canManageRoles: boolean; botRoleName: string | null; roles: RoleOption[] }
+  | { ok: true; canManageRoles: boolean; canMentionAll: boolean; botRoleName: string | null; roles: RoleOption[] }
   | { ok: false; message: string };
 
 /**
@@ -206,9 +210,9 @@ export async function inspectRoles(discord: DiscordClient, guildId: string): Pro
         let reason: string | null = null;
         if (r.managed) reason = 'Managed by an integration';
         else if (r.position >= botTop) reason = `Above the bot's role (${botRoles[0]?.name ?? 'none'})`;
-        return { id: r.id, name: r.name, position: r.position, assignable: reason === null, reason };
+        return { id: r.id, name: r.name, position: r.position, assignable: reason === null, reason, mentionable: Boolean(r.mentionable), elevated: elevatedPermissions(r.permissions) };
       });
-    return { ok: true, canManageRoles, botRoleName: botRoles[0]?.name ?? null, roles: options };
+    return { ok: true, canManageRoles, canMentionAll: Boolean(base & Permission.MENTION_EVERYONE), botRoleName: botRoles[0]?.name ?? null, roles: options };
   } catch {
     return { ok: false, message: 'Could not read the server roles from Discord. Check that the bot is still in the server.' };
   }

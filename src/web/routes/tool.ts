@@ -4,6 +4,7 @@
  * page of a tool shares. Addresses from before the tools had their own place still work.
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import { announcementCounts, getAnnouncementSettings } from '../../announcements/settings.js';
 import { checkContributorPanel, getContributorSettings } from '../../domain/contributors.js';
 import type { Queryable } from '../../db/database.js';
 import { checkPanel, type PanelState } from '../../domain/panel.js';
@@ -16,10 +17,10 @@ import type { Web, WorkspaceRequestContext } from '../server.js';
 import { chip, pageHeader, pill, plural, postBtn, tabs, timeAgo, viewOnlyTag, type IconName } from '../ui.js';
 
 /** The tools that have their own item in the sidebar, in order. */
-export type ToolName = 'tickets' | 'issues' | 'repos' | 'analytics' | 'triage' | 'contributors';
+export type ToolName = 'tickets' | 'issues' | 'repos' | 'analytics' | 'triage' | 'contributors' | 'announcements';
 
 /** Each tool's icon, in the sidebar, on the overview and on Members. */
-export const TOOL_ICONS: Record<Tool, IconName> = { tickets: 'ticket', issues: 'circle-dot', repos: 'chart-no-axes-column-increasing', analytics: 'chart-line', triage: 'sparkles', contributors: 'award', setup: 'boxes', workspace: 'activity' };
+export const TOOL_ICONS: Record<Tool, IconName> = { tickets: 'ticket', issues: 'circle-dot', repos: 'chart-no-axes-column-increasing', analytics: 'chart-line', triage: 'sparkles', contributors: 'award', announcements: 'megaphone', setup: 'boxes', workspace: 'activity' };
 
 /** Every page's address under /w/:wid. */
 export const AREA_PATHS: Record<Area, string> = {
@@ -43,6 +44,9 @@ export const AREA_PATHS: Record<Area, string> = {
   'verifications': '/contributors',
   'contributor-roles': '/contributors/roles',
   'contributor-panel': '/contributors/panel',
+  'announcements': '/announcements',
+  'announcement-settings': '/announcements/settings',
+  'announcement-pings': '/announcements/pings',
   'apps': '/apps',
   'health': '/health',
 };
@@ -134,6 +138,9 @@ const VIEW_ONLY: Partial<Record<Area, string>> = {
   'ticket-settings': 'You can see the spam and duplicate limits. Ask an admin if you need to change them.',
   'contributor-roles': 'You can see the roles and what counts. Ask an admin if you need to change them.',
   'contributor-panel': 'You can see the panel and its preview. Ask an admin if you need to change, publish or remove it.',
+  'announcements': 'You can see the releases and their posts. Posting, editing and skipping them need Edit on Posts. Ask an admin if you need it.',
+  'announcement-settings': 'You can see how announcements are set up. Ask an admin if you need to change it.',
+  'announcement-pings': 'You can see the pings message and its preview. Ask an admin if you need to change, publish or remove it.',
   'health': 'You can see how the server is doing. Switching Dev mode needs Edit on Server health. Ask an admin if you need it.',
 };
 
@@ -197,6 +204,15 @@ async function toolState(web: Web, ctx: WorkspaceRequestContext, tool: ToolName,
       actions: [chip(`${c.model} · ${usage.triaged.toLocaleString('en-US')} of ${c.monthlyLimit.toLocaleString('en-US')} this month`, { tone: anyOn && full ? 'warn' : null, title: 'Tickets and issues triaged this month, re-runs included, and the monthly limit' })],
       // Knowledge: questions Claude asked since each app's TRIAGE.md was last saved.
       counts: { 'triage.review': ctx.progress?.review ?? 0, 'triage.knowledge': [...(questions?.values() ?? [])].reduce((n, q) => n + q.fresh, 0) },
+    };
+  }
+  if (tool === 'announcements') {
+    const [s, counts] = await Promise.all([getAnnouncementSettings(db, wid), announcementCounts(db, wid)]);
+    return {
+      status: !s.enabled ? pill('Off', 'neutral') : s.mode === 'auto' ? pill('Automatic', 'ok') : pill('Review first', 'ok'),
+      description: `Posts each app’s new GitHub releases in Discord${s.channelName ? ` (#${s.channelName})` : ''}, with release notes Claude makes friendlier and an optional role ping.`,
+      actions: [],
+      counts: { announcements: counts.waiting + counts.failed },
     };
   }
   const [settings, conn] = await Promise.all([getContributorSettings(db, wid), getDiscordConnection(db, wid)]);

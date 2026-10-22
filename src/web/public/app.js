@@ -441,23 +441,71 @@
   function escapeHtml(s) {
     return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
-  // Tiny Discord-markdown renderer matching the server preview: headings, **bold**, role mentions.
+  // Tiny Discord-markdown renderer matching the server preview: headings, lists, **bold**, links, role mentions.
   function discordHtml(text, roles) {
-    return escapeHtml(text).split('\n').map(function (line) {
+    var parts = escapeHtml(text).split('\n').map(function (line) {
       var out = line
         .replace(/&lt;@&amp;(\d+)&gt;/g, function (_m, id) { return '<span class="dp-mention">@' + escapeHtml(roles[id] || 'unknown-role') + '</span>'; })
-        .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+        .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+        .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<span class="dp-a">$1</span>');
       var h = /^#{1,3} (.*)$/.exec(out);
-      return h ? '<span class="dp-h">' + h[1] + '</span>' : out;
-    }).join('<br>');
+      if (h) return { html: '<span class="dp-h">' + h[1] + '</span>', block: true };
+      var li = /^\s*[-*] (.*)$/.exec(out);
+      return li ? { html: '<span class="dp-li">' + li[1] + '</span>', block: true } : { html: out, block: false };
+    });
+    // Headings and list items are blocks: a line break only between two lines of text.
+    return parts.map(function (p, i) { return (i > 0 && !p.block && !parts[i - 1].block ? '<br>' : '') + p.html; }).join('');
   }
+  function roleNames() {
+    var rolesEl = document.getElementById('role-names');
+    return rolesEl ? JSON.parse(rolesEl.textContent || '{}') : {};
+  }
+
+  // Announcement previews: parts drawn from a template (data-tpl) and the release's values
+  // (data-tpl-vars), redrawn as the template, the notes or the role are edited.
+  function tplHost() { return document.querySelector('[data-tpl-vars]'); }
+  function renderTpl(el) {
+    var host = el.closest('[data-tpl-vars]');
+    if (!host) return;
+    var vars = JSON.parse(host.getAttribute('data-tpl-vars') || '{}');
+    var out = (el.getAttribute('data-tpl') || '').replace(/\{(\w+)\}/g, function (m, k) { return Object.prototype.hasOwnProperty.call(vars, k) ? vars[k] : m; })
+      .split('\n').map(function (l) { return l.replace(/[ \t]{2,}/g, ' ').trim(); }).join('\n').trim();
+    if (el.hasAttribute('data-tpl-plain')) (el.querySelector('.dp-a') || el).textContent = out.replace(/\n/g, ' ');
+    else el.innerHTML = discordHtml(out, roleNames());
+    el.hidden = !out;
+  }
+  function setTplVar(key, value) {
+    var host = tplHost();
+    if (!host) return;
+    var vars = JSON.parse(host.getAttribute('data-tpl-vars') || '{}');
+    vars[key] = value;
+    host.setAttribute('data-tpl-vars', JSON.stringify(vars));
+    $$('[data-tpl]', host).forEach(renderTpl);
+  }
+  $$('[data-tpl-var]').forEach(function (el) {
+    el.addEventListener('input', function () { setTplVar(el.getAttribute('data-tpl-var'), el.value.trim() ? el.value : (el.getAttribute('placeholder') || '')); });
+  });
+  var tplRole = document.querySelector('[data-tpl-role]');
+  var tplRoleOn = document.querySelector('[data-tpl-role-on]');
+  function syncTplRole() { setTplVar('role', tplRoleOn && tplRoleOn.checked && tplRole && tplRole.value ? '<@&' + tplRole.value + '>' : ''); }
+  if (tplRole) tplRole.addEventListener('change', syncTplRole);
+  if (tplRoleOn) tplRoleOn.addEventListener('change', syncTplRole);
+  $$('[data-toggle-show]').forEach(function (el) {
+    el.addEventListener('change', function () {
+      var t = document.getElementById(el.getAttribute('data-toggle-show'));
+      if (t) t.hidden = !el.checked;
+    });
+  });
   function syncField(el) {
     var counter = el.id && document.querySelector('[data-counter-for="' + el.id + '"]');
     if (counter) counter.textContent = el.value.length + ' / ' + el.getAttribute('maxlength');
     var target = el.getAttribute('data-preview') && document.getElementById(el.getAttribute('data-preview'));
     if (target) {
       var value = el.value.trim() ? el.value : (el.getAttribute('placeholder') || '');
-      if (el.hasAttribute('data-preview-md')) {
+      if (target.hasAttribute('data-tpl')) {
+        target.setAttribute('data-tpl', value);
+        renderTpl(target);
+      } else if (el.hasAttribute('data-preview-md')) {
         var rolesEl = document.getElementById('role-names');
         var roles = rolesEl ? JSON.parse(rolesEl.textContent || '{}') : {};
         target.innerHTML = discordHtml(value, roles);

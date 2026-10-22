@@ -161,11 +161,11 @@ export class FakeGitHub {
     });
     if (query.includes('stargazerCount') && !query.includes('openPrs')) return { repository: { stargazerCount: (r.stars ?? []).length } };
     if (query.includes('releases(')) {
-      const p = page(newestFirst(r.releases ?? [], (x) => x.published_at), v.after, 50);
+      const p = page(newestFirst(r.releases ?? [], (x) => x.published_at), v.after, Number(v.first ?? 50));
       return { repository: { releases: { pageInfo: p.pageInfo, nodes: p.nodes.map((x) => ({
-        tagName: x.tag, url: `https://github.com/${r.owner}/${r.name}/releases/tag/${x.tag}`, isDraft: Boolean(x.draft), isPrerelease: Boolean(x.prerelease),
+        tagName: x.tag, name: x.name ?? null, description: x.body ?? '', url: `https://github.com/${r.owner}/${r.name}/releases/tag/${x.tag}`, isDraft: Boolean(x.draft), isPrerelease: Boolean(x.prerelease),
         publishedAt: x.draft ? null : x.published_at ?? null, createdAt: x.published_at ?? null, tagCommit: { oid: `tag-${x.tag}`, committedDate: x.published_at ?? null },
-        releaseAssets: { nodes: (x.assets ?? []).map((a) => ({ name: a.name, downloadCount: a.downloads })) },
+        releaseAssets: { nodes: (x.assets ?? []).map((a) => ({ name: a.name, downloadCount: a.downloads, downloadUrl: `https://github.com/${r.owner}/${r.name}/releases/download/${x.tag}/${a.name}` })) },
       })) } } };
     }
     if (query.includes('compare(')) {
@@ -485,7 +485,7 @@ export interface FakeGuild {
   id: string;
   name: string;
   owner_id: string;
-  roles: { id: string; name: string; permissions: string; position: number }[];
+  roles: { id: string; name: string; permissions: string; position: number; mentionable?: boolean; managed?: boolean }[];
   channels: { id: string; type: number; name: string; position: number; parent_id?: string | null; permission_overwrites?: any[] }[];
   botRoles: string[];
 }
@@ -502,6 +502,8 @@ export class FakeDiscord {
   nextMessageId = 5000;
   failNextCreate: { status: number; code: number } | null = null;
   roleChanges: { method: string; guildId: string; userId: string; roleId: string }[] = [];
+  /** Messages published to an announcement channel's followers. */
+  crossposts: string[] = [];
   failRoleChange: { status: number; code: number } | null = null;
   /** Files on Discord's CDN, by path (e.g. /ephemeral-attachments/1/2/shot.png). */
   cdn = new Map<string, { status?: number; body: Buffer; type?: string }>();
@@ -577,6 +579,12 @@ export class FakeDiscord {
         return new Response(null, { status: 204 });
       }
     }
+    if ((m = /^\/channels\/(\d+)\/messages\/(\d+)\/crosspost$/.exec(path)) && method === 'POST') {
+      const channel = [...this.guilds.values()].flatMap((g) => g.channels).find((c) => c.id === m![1]);
+      if (channel?.type !== 5) return json(400, { message: 'Cannot execute action on this channel type', code: 50024 });
+      this.crossposts.push(m[2]!);
+      return json(200, { id: m[2] });
+    }
     if ((m = /^\/channels\/(\d+)\/messages(?:\/(\d+))?$/.exec(path))) {
       const channelId = m[1]!;
       const messageId = m[2];
@@ -637,6 +645,8 @@ export class FakeAnthropic {
   };
   /** The default answer to a request to write an app's TRIAGE.md (plain text). */
   knowledge: ClaudeBehavior = { text: '## What it is\n- A test app.' };
+  /** The default answer to a request to write a release's notes for Discord (plain text). */
+  announcement: ClaudeBehavior = { text: '- **Faster exports**\n- Fixed a crash when opening big files' };
   queue: ClaudeBehavior[] = [];
   requests: { key: string; body: Json }[] = [];
   models = [
@@ -659,8 +669,10 @@ export class FakeAnthropic {
     if (url.pathname === '/v1/messages' && init.method === 'POST') {
       const body = JSON.parse(String(init.body));
       this.requests.push({ key, body });
-      const writing = /^You (write|keep) TRIAGE\.md/.test(String(body.system?.[0]?.text ?? ''));
-      const behavior = this.queue.shift() ?? (writing ? this.knowledge : this.verdict);
+      const system = String(body.system?.[0]?.text ?? '');
+      const writing = /^You (write|keep) TRIAGE\.md/.test(system);
+      const announcing = /^You write release announcements/.test(system);
+      const behavior = this.queue.shift() ?? (announcing ? this.announcement : writing ? this.knowledge : this.verdict);
       if (typeof behavior === 'object' && 'status' in behavior && typeof behavior.status === 'number') {
         return this.error(behavior.status, String(behavior.type), String(behavior.message ?? 'error'));
       }

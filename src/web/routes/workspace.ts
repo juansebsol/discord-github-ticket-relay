@@ -13,6 +13,7 @@ import type { LogDetail, TriageAction } from '../../triage/engine.js';
 import { getTriageSettings, monthlyUsage } from '../../triage/settings.js';
 import { getStatusSettings, statusRepos, statusRows } from '../../repo-status/tracker.js';
 import { analyticsRepos, getAnalyticsSettings } from '../../analytics/recorder.js';
+import { announcedRepos, announcementCounts, appAnnounceSettings, getAnnouncementSettings } from '../../announcements/settings.js';
 import type { StepState } from '../layout.js';
 import { setFlash } from '../session.js';
 import type { Web, WorkspaceRequestContext } from '../server.js';
@@ -41,7 +42,7 @@ import { areaHref, canOpen, canOpenIssue, firstPage, panelPill, repoSyncState, T
 // ---- Overview -----------------------------------------------------------------------------------
 
 /** The tools with a card on the overview, in sidebar order. */
-const OVERVIEW_TOOLS: readonly ToolName[] = ['analytics', 'repos', 'tickets', 'issues', 'triage', 'contributors'];
+const OVERVIEW_TOOLS: readonly ToolName[] = ['analytics', 'repos', 'tickets', 'issues', 'triage', 'contributors', 'announcements'];
 
 const DAY_MS = 86_400_000;
 /** Latest goes back this far for issues opened on GitHub (the others are newest first by index). */
@@ -302,7 +303,29 @@ async function analyticsCard({ web, ctx }: Shared): Promise<ToolCard> {
   };
 }
 
-const CARDS: Record<ToolName, (s: Shared) => Promise<ToolCard>> = { tickets: ticketsCard, issues: issuesCard, repos: reposCard, analytics: analyticsCard, triage: triageCard, contributors: contributorsCard };
+async function announcementsCard({ web, ctx }: Shared): Promise<ToolCard> {
+  const { db } = web.deps;
+  const b = ctx.base;
+  const [s, counts, apps, appSettings] = await Promise.all([getAnnouncementSettings(db, ctx.workspace.id), announcementCounts(db, ctx.workspace.id), listApps(db, ctx.workspace.id), appAnnounceSettings(db, ctx.workspace.id)]);
+  const announced = announcedRepos(apps, appSettings).length;
+  return {
+    tool: 'announcements',
+    meta: s.enabled ? [s.channelName ? `#${s.channelName}` : 'No channel yet', plural(announced, 'app'), s.pingEnabled && s.roleName ? `pings @${s.roleName}` : 'no ping'].join(' · ') : 'Off',
+    status: !s.enabled ? pill('Off', 'neutral') : s.mode === 'auto' ? pill('Automatic', 'ok') : pill('Review first', 'ok'),
+    stats: [
+      { label: 'Waiting to post', value: counts.waiting, area: 'announcements', href: `${b}/announcements?show=waiting`, tone: counts.waiting ? 'accent' : undefined, title: 'New releases waiting for someone to post them' },
+      { label: 'Posted, 30 days', value: counts.posted30, area: 'announcements', href: `${b}/announcements?show=posted` },
+      { label: 'Failed', value: counts.failed, area: 'announcements', href: `${b}/announcements?show=waiting`, tone: counts.failed ? 'warn' : undefined, title: 'Posts Discord didn’t take' },
+    ],
+    go: [
+      ...(!s.enabled && can(ctx.membership, 'announcement-settings.edit') ? [{ area: 'announcement-settings' as const, label: 'Set up Announcements', primary: true }] : []),
+      { area: 'announcements', label: 'Posts' },
+      { area: 'announcement-settings', label: 'Settings' },
+    ],
+  };
+}
+
+const CARDS: Record<ToolName, (s: Shared) => Promise<ToolCard>> = { tickets: ticketsCard, issues: issuesCard, repos: reposCard, analytics: analyticsCard, triage: triageCard, contributors: contributorsCard, announcements: announcementsCard };
 
 // ---- Latest: what just happened, across the tools ------------------------------------------------
 

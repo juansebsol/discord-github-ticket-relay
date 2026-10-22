@@ -284,6 +284,14 @@ function reply(embed: Embed, components: unknown[] = []) {
   return { content: '', embeds: [embed], components, flags: EPHEMERAL, allowed_mentions: NO_MENTIONS };
 }
 
+/** After a member clicks an update-pings button (release announcements). */
+export function pingToggledMessage(on: boolean, apps: string[]) {
+  const names = apps.map(escapeMarkdown).join(', ');
+  return reply(on
+    ? { title: 'Update pings on', description: truncate(`You’ll get a ping when ${names} gets an update. Click the button again to stop.`, 4096), color: COLORS.success }
+    : { title: 'Update pings off', description: truncate(`You won’t get a ping for ${names} updates anymore. Click the button again to turn them back on.`, 4096), color: COLORS.brand });
+}
+
 /** The "Ticket submitted" reply with a note from triage underneath (for example "ask in #help"). */
 export function createdWithNoteMessage(s: { appName: string; ref: string; issueNumber: number; issueUrl: string; repoPrivate: boolean; files?: { stored: number; failed: number } }, note: string) {
   const base = createdMessage(s);

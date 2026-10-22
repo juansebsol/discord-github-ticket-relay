@@ -78,10 +78,10 @@ function buttons(body: string, tool: string): string[] {
 const latest = (body: string) => [...body.matchAll(/<span class="feed-t">([^<]+)<\/span>/g)].map((x) => x[1]);
 
 describe('Overview: a card per tool', () => {
-  it('admins see all six tools, with buttons to their pages', async () => {
+  it('admins see all seven tools, with buttons to their pages', async () => {
     const res = await page('', ws.owner);
     expect(res.statusCode).toBe(200);
-    expect(cards(res.body)).toEqual(['Analytics', 'Repo status', 'Discord tickets', 'GitHub issues', 'AI triage', 'Contributor roles']);
+    expect(cards(res.body)).toEqual(['Analytics', 'Repo status', 'Discord tickets', 'GitHub issues', 'AI triage', 'Contributor roles', 'Announcements']);
     // What needs doing comes first: the ticket panel isn't in Discord yet, triage and verification are off.
     expect(buttons(res.body, 'tickets')).toEqual(['/tickets/panel', '/tickets']);
     expect(res.body).toMatch(/<a class="btn primary sm" href="[^"]+\/tickets\/panel"[^>]*><span class="lbl">Publish panel<\/span>/);

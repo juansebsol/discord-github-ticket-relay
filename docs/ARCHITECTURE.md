@@ -137,6 +137,21 @@ Discord endpoint, OAuth), one or more queue workers, and an optional triage work
   viewer's time zone (a `tr_tz` cookie app.js sets): ranges from today to 12 months, steps from 30
   minutes to a day (a step that would make over 400 buckets, or finer than a day beyond the 30-minute
   detail, isn't offered). Charts are drawn by app.js from the numbers on the page.
+- **Announcements** (`src/announcements/`, off by default per workspace in `announcement_settings`):
+  the worker's index loop checks each announced repository's latest releases every 5 minutes
+  (GraphQL, strict) and adds the ones published after Announcements was turned on to
+  `announcements`, once per workspace, repository and tag (pre-releases only when included). Each
+  new one gets its notes first (`writing`): Claude, with the workspace's key and triage model,
+  rewrites GitHub's notes for users (the notes are data, never instructions; extra instructions
+  from the team are added), or GitHub's notes are cleaned up for Discord when that's the choice,
+  there's no key, or Claude fails after a few tries (`notes_error` says why). Then it `waiting`s
+  for someone (Review first, anything added by hand, rewrites) or is posted (Automatic). A post
+  goes to the app's channel (`announcement_apps` can override channel and role), with a nonce so
+  a retried post isn't doubled, `allowed_mentions` limited to the one role, and is crossposted in
+  an announcement channel; a busy Discord is retried with backoff, a refusal marks it `failed`.
+  The "Get update pings" message (`announcement_panels`) has a button per ping role
+  (`an:role:<id>`); the interaction is deferred, then the role is added or removed and the reply
+  filled in. Only roles announcements ping can be given this way.
 - **No Discord gateway.** The bot is driven entirely by Discord's HTTP interactions endpoint and
   REST API. It needs no privileged intents and no slash-command registration.
 - **GitHub App auth.** Short-lived installation tokens are minted from the app's private key
@@ -158,8 +173,9 @@ Discord endpoint, OAuth), one or more queue workers, and an optional triage work
   or *Edit* page by page (one access map per moderator, `AREAS` in `src/domain/permissions.ts`).
   Routes need `manage` unless they opt in to a lower permission such as `inbox.edit` or
   `triage.prompt.view`. Non-members receive 404 on workspace routes.
-- The console has four tools (Discord tickets `/tickets`, GitHub issues `/issues`, AI triage
-  `/triage`, Contributor roles `/contributors`), each with one tab per page in `AREAS` order and a
+- The console's tools (Analytics `/analytics`, Repo status `/repos`, Discord tickets `/tickets`,
+  GitHub issues `/issues`, AI triage `/triage`, Contributor roles `/contributors`, Announcements
+  `/announcements`) each have with one tab per page in `AREAS` order and a
   shared header (`src/web/routes/tool.ts`). A tool opens on the first page the person can see;
   pages they can't open show locked. Addresses from before (`/tickets/triage…`,
   `/tickets/issues…`) redirect: 301 for GET, 307 for forms.
@@ -238,6 +254,7 @@ stable user ID are recorded in the body.
 | `submissions` | Tickets, routing snapshot, queue state, lease, reconcile counters, encrypted payload |
 | `submission_events` | Append-only timeline for investigation |
 | `contributor_settings`, `contributor_panels`, `contributor_tiers` | On/off, panel channel, published panel, and role tiers (role + minimum contributions) per workspace |
+| `announcement_settings`, `announcement_apps`, `announcements`, `announcement_checks`, `announcement_panels` | Announcements: on/off, mode, channel, notes, templates and ping role; each app's on/off, channel and role; each release with its notes, status and post; when each repository was last checked; the "Get update pings" message |
 | `analytics_settings`, `download_assets`, `download_counts`, `download_days`, `download_sync`, `repo_star_changes` | Analytics: on/off; each release file and its total; downloads per 30 minutes (then per day); per repository, when recording began, the last slot read, the star count and any error; the change in the star count per 30 minutes |
 | `pull_index` | Pull requests of the indexed repositories (open, and closed for 90 days), with the issues each is for |
 | `repo_status_settings`, `repo_status` | Repo status: on/off, the repositories and how often per workspace; what was last read per repository (stats, the kept activity, the icon, the error and the GraphQL budget left) |

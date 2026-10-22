@@ -33,6 +33,8 @@ const NAMES = [
   'git-pull-request-draft',
   // Analytics
   'chart-line', 'star',
+  // Announcements
+  'megaphone', 'bell-off',
 ];
 
 const require = createRequire(import.meta.url);

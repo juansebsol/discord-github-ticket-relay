@@ -1,3 +1,4 @@
+import { handlePingComponent, PING_PREFIX } from '../announcements/pings.js';
 import { handleContributorComponent } from '../domain/contributors.js';
 import type { Processor } from '../domain/processor.js';
 import { enabledTicketTypes, getTicketTypeByPublicId, type TicketType } from '../domain/ticket-types.js';
@@ -17,7 +18,7 @@ export interface Interaction {
   token: string;
   guild_id?: string;
   channel_id?: string;
-  member?: { nick?: string | null; user: { id: string; username: string; global_name?: string | null } };
+  member?: { nick?: string | null; roles?: string[]; user: { id: string; username: string; global_name?: string | null } };
   user?: { id: string; username: string };
   data?: {
     custom_id?: string;
@@ -90,6 +91,8 @@ export async function handleInteraction(deps: Deps, processor: Processor, i: Int
   if (i.type === InteractionType.MessageComponent) {
     // Contributor-role panel (separate feature, separate custom_id prefix).
     if (customId.startsWith('cv:')) return handleContributorComponent(deps, i, workspace);
+    // Release announcements: a member turns update pings on or off.
+    if (customId.startsWith(PING_PREFIX)) return handlePingComponent(deps, i, workspace);
     if (customId.startsWith('tr:page:')) {
       const apps = (await listApps(deps.db, workspace.id)).filter((a) => a.enabled);
       const page = Number(customId.slice('tr:page:'.length)) || 0;
