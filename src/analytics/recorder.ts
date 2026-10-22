@@ -1,9 +1,10 @@
 /**
- * Analytics: records downloads every 30 minutes, and stars. GitHub only keeps each release file's
- * running total, so each read keeps how much every file grew since the read before, per 30-minute
- * slot; nothing is known from before recording began. Runs in the triage worker's polling loop
- * (next to the issue index and Repo status), with GitHub's GraphQL API: two small queries per
- * repository every 30 minutes (releases, and new stars), on the budget filing doesn't use.
+ * Analytics: records downloads and stars every 30 minutes. GitHub only keeps running totals (each
+ * release file's downloads, the repository's stars), so each read keeps how much they changed since
+ * the read before, per 30-minute slot; nothing is known from before recording began. Runs in the
+ * triage worker's polling loop (next to the issue index and Repo status), with GitHub's GraphQL
+ * API: two small queries per repository every 30 minutes (releases, and the star count), on the
+ * budget filing doesn't use.
  *
  * Which repositories: the ones Repo status watches (its own list, else every app's), for every
  * workspace with Analytics on.
@@ -23,7 +24,6 @@ const PER_ROUND = 4;
 /** Past this gap (the process was off, or Analytics was), growth isn't spread over the gap: recording starts again. */
 const MAX_GAP_MS = 24 * 3_600_000;
 const RELEASE_PAGES = 4;
-const STAR_PAGES = 100;
 const ROLLUP_EVERY_MS = 6 * 3_600_000;
 
 const RELEASES_QUERY = `
@@ -36,15 +36,10 @@ query AnalyticsReleases($owner: String!, $name: String!, $after: String) {
   }
 }`;
 
+// Only the count: who starred (stargazers) is more than the app's permissions let it read.
 const STARS_QUERY = `
-query AnalyticsStars($owner: String!, $name: String!, $after: String) {
-  repository(owner: $owner, name: $name) {
-    stargazerCount
-    stargazers(first: 100, after: $after, orderBy: {field: STARRED_AT, direction: DESC}) {
-      pageInfo { hasNextPage endCursor }
-      edges { starredAt node { login } }
-    }
-  }
+query AnalyticsStars($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) { stargazerCount }
 }`;
 
 export interface AnalyticsSettings {
@@ -81,8 +76,10 @@ export interface SyncRow {
   last_slot_at: Date | null;
   checked_at: Date | null;
   error: string | null;
-  stars_loaded_at: Date | null;
-  stars_until_at: Date | null;
+  stars_started_at: Date | null;
+  stars_slot_at: Date | null;
+  stars_total: number | null;
+  stars_error: string | null;
   lease_until_at: Date | null;
 }
 
@@ -162,20 +159,24 @@ export class AnalyticsRecorder {
         startedAt = now;
       }
       await this.recordDownloads(sync, lastSlot, slot, now);
-      await this.recordStars(sync, now);
       lastSlot = slot;
     } catch (err) {
-      const e = err as Error;
-      error = err instanceof GitHubApiError
-        ? err.isRateLimit ? 'GitHub’s hourly budget ran out: reading again when it resets.'
-          : err.status === 404 || err.status === 403 ? 'GitHub didn’t let the app read this repository’s releases.'
-            : `GitHub returned ${err.status}.`
-        : `GitHub couldn’t be reached (${e.message.slice(0, 120)}).`;
-      this.deps.log.warn({ repo: `${sync.owner}/${sync.name}`, err: e.message }, 'download recording failed');
+      error = readError(err, 'this repository’s releases');
+      this.deps.log.warn({ repo: `${sync.owner}/${sync.name}`, err: (err as Error).message }, 'download recording failed');
+    }
+    // Stars on their own: a refusal there doesn't stop the downloads (skipped when the budget ran out).
+    let starsError: string | null = null;
+    if (!error?.startsWith('GitHub’s hourly budget')) {
+      try {
+        await this.recordStars(sync, now);
+      } catch (err) {
+        starsError = readError(err, 'the star count');
+        this.deps.log.warn({ repo: `${sync.owner}/${sync.name}`, err: (err as Error).message }, 'star count read failed');
+      }
     }
     await db.query(
-      'UPDATE download_sync SET last_slot_at = $2, started_at = $3, checked_at = $4, error = $5, lease_until_at = NULL WHERE repo_id = $1',
-      [repoId, lastSlot === null ? null : new Date(lastSlot), new Date(startedAt), new Date(now), error],
+      'UPDATE download_sync SET last_slot_at = $2, started_at = $3, checked_at = $4, error = $5, stars_error = $6, lease_until_at = NULL WHERE repo_id = $1',
+      [repoId, lastSlot === null ? null : new Date(lastSlot), new Date(startedAt), new Date(now), error, starsError],
     );
   }
 
@@ -189,7 +190,7 @@ export class AnalyticsRecorder {
     const files: { release: string; name: string; publishedAt: Date | null; prerelease: boolean; downloads: number }[] = [];
     let after: string | null = null;
     for (let page = 0; page < RELEASE_PAGES; page++) {
-      const d: any = await github!.graphql(sync.installation_id, RELEASES_QUERY, { owner: sync.owner, name: sync.name, after });
+      const d: any = await github!.graphql(sync.installation_id, RELEASES_QUERY, { owner: sync.owner, name: sync.name, after }, { strict: true });
       if (!d?.repository) throw new GitHubApiError(404, 'Repository not found', null, false, null);
       const conn = d.repository.releases;
       for (const r of conn?.nodes ?? []) {
@@ -239,49 +240,50 @@ export class AnalyticsRecorder {
   }
 
   /**
-   * The star history once (back to the first), then each time the stars added since; and the
-   * repository's star total as GitHub counts it, kept per 30-minute slot like the downloads.
+   * The repository's star total as GitHub counts it, and how much it changed since the last read in
+   * the slots in between (like the downloads; a star taken back counts -1). The first read, and the
+   * first after a long gap, is only a starting point.
    */
   private async recordStars(sync: SyncRow, now: number): Promise<void> {
     const { db, github } = this.deps;
-    const since = sync.stars_loaded_at ? (sync.stars_until_at?.getTime() ?? 0) - 60_000 : null;
-    let newest = sync.stars_until_at?.getTime() ?? 0;
-    let after: string | null = null;
-    let complete = false;
-    let total: number | null = null;
-    for (let page = 0; page < (since === null ? STAR_PAGES : 5); page++) {
-      const d: any = await github!.graphql(sync.installation_id, STARS_QUERY, { owner: sync.owner, name: sync.name, after });
-      if (total === null && Number.isFinite(Number(d?.repository?.stargazerCount))) total = Number(d.repository.stargazerCount);
-      const conn = d?.repository?.stargazers;
-      let older = false;
-      for (const e of conn?.edges ?? []) {
-        const at = e?.starredAt ? new Date(e.starredAt).getTime() : NaN;
-        const login = e?.node?.login;
-        if (!Number.isFinite(at) || !login) continue;
-        if (since !== null && at < since) {
-          older = true;
-          continue;
+    const d: any = await github!.graphql(sync.installation_id, STARS_QUERY, { owner: sync.owner, name: sync.name }, { strict: true });
+    if (!d?.repository) throw new GitHubApiError(404, 'Repository not found', null, false, null);
+    const total = Number(d.repository.stargazerCount);
+    if (!Number.isInteger(total) || total < 0) throw new Error('GitHub gave no star count');
+    const slot = slotOf(now);
+    const last = sync.stars_slot_at?.getTime() ?? null;
+    if (last !== null && sync.stars_total !== null && slot - last <= MAX_GAP_MS && total !== Number(sync.stars_total)) {
+      // The slots since the last read (a second read in the same slot adds to that slot).
+      const slots: number[] = [];
+      for (let s = last; s < slot; s += SLOT_MS) slots.push(s);
+      if (!slots.length) slots.push(last);
+      const change = total - Number(sync.stars_total);
+      const each = Math.trunc(change / slots.length);
+      const rest = change - each * slots.length;
+      for (let i = 0; i < slots.length; i++) {
+        const n = each + (i >= slots.length - Math.abs(rest) ? Math.sign(rest) : 0);
+        if (n !== 0) {
+          await db.query(
+            `INSERT INTO repo_star_changes (repo_id, slot_at, change) VALUES ($1, $2, $3)
+             ON CONFLICT (repo_id, slot_at) DO UPDATE SET change = repo_star_changes.change + excluded.change`,
+            [sync.repo_id, new Date(slots[i]!), n],
+          );
         }
-        newest = Math.max(newest, at);
-        await db.query('INSERT INTO repo_stars (repo_id, login, starred_at) VALUES ($1, $2, $3) ON CONFLICT (repo_id, login) DO UPDATE SET starred_at = excluded.starred_at', [sync.repo_id, String(login), new Date(at)]);
       }
-      if (older || !conn?.pageInfo?.hasNextPage) {
-        complete = true;
-        break;
-      }
-      after = conn.pageInfo.endCursor;
     }
     await db.query(
-      'UPDATE download_sync SET stars_loaded_at = CASE WHEN $2 = 1 THEN COALESCE(stars_loaded_at, $4) ELSE stars_loaded_at END, stars_until_at = $3, stars_total = COALESCE($5, stars_total) WHERE repo_id = $1',
-      [sync.repo_id, complete ? 1 : 0, newest ? new Date(newest) : null, new Date(now), total],
+      'UPDATE download_sync SET stars_total = $2, stars_slot_at = $3, stars_started_at = COALESCE(stars_started_at, $4) WHERE repo_id = $1',
+      [sync.repo_id, total, new Date(slot), new Date(now)],
     );
-    if (total !== null) {
-      await db.query(
-        'INSERT INTO repo_star_counts (repo_id, slot_at, total) VALUES ($1, $2, $3) ON CONFLICT (repo_id, slot_at) DO UPDATE SET total = excluded.total',
-        [sync.repo_id, new Date(slotOf(now)), total],
-      );
-    }
   }
+}
+
+/** What went wrong reading something from GitHub, for the page. */
+function readError(err: unknown, what: string): string {
+  if (!(err instanceof GitHubApiError)) return `GitHub couldn’t be reached (${(err as Error).message.slice(0, 120)}).`;
+  if (err.isRateLimit) return 'GitHub’s hourly budget ran out: reading again when it resets.';
+  if (err.status === 404 || err.status === 403) return `GitHub didn’t let the app read ${what}.`;
+  return `GitHub returned ${err.status}.`;
 }
 
 /** 30-minute detail older than DETAIL_DAYS is added up per UTC day. */

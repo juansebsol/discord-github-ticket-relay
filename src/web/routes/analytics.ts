@@ -23,6 +23,8 @@ function compact(x: number): string {
   if (x < 1_000_000) return `${(x / 1000).toFixed(x < 100_000 ? 1 : 0).replace(/\.0$/, '')}K`;
   return `${(x / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`;
 }
+/** A change: +12 · −3 · 0 */
+const signed = (x: number) => (x > 0 ? `+${compact(x)}` : x < 0 ? `−${compact(-x)}` : '0');
 
 /** Up is good, down is good, or neither (the delta stays neutral). */
 type Better = 'up' | 'down' | null;
@@ -91,10 +93,10 @@ export function registerAnalyticsRoutes(app: FastifyInstance, web: Web): void {
     return hbars(items, o);
   }
 
-  /** Each app's star total (GitHub's count) and the stars it was given in the period. */
+  /** Each app's star total (GitHub's count) and how much it changed in the period. */
   function starList(rows: AnalyticsData['starsByApp'], o: { gained?: boolean } = { gained: true }): SafeHtml {
     if (!rows.some((r) => r.total !== null || r.gained)) return html`<p class="small muted an-none">Star totals show up after the first read.</p>`;
-    return hbars(rows.map((r) => ({ label: r.label, value: r.total ?? 0, note: o.gained ? `+${n(r.gained)}` : null, noteUp: r.gained > 0 })), { empty: 'No stars yet.', share: false, max: 30 });
+    return hbars(rows.map((r) => ({ label: r.label, value: r.total ?? 0, note: o.gained ? signed(r.gained) : null, noteUp: r.gained > 0 })), { empty: 'No stars yet.', share: false, max: 30 });
   }
 
   function tile(label: string, value: string, d: SafeHtml, title?: string, sub?: SafeHtml | string): SafeHtml {
@@ -123,6 +125,7 @@ export function registerAnalyticsRoutes(app: FastifyInstance, web: Web): void {
     // One repository (picked, or the only one): downloads by platform; several: all of them together.
     const single = d.downloads.series.length > 1;
     const noDownloads = !lifetime && metric === 'downloads' && (!d.recordingSince || (d.downloads.total === 0 && d.recordingSince.getTime() > w.start));
+    const noStars = !lifetime && metric === 'stars' && !d.starErrors.length && (!d.starsSince || (d.stars.total === 0 && d.starsSince.getTime() > w.start));
     const per = `per ${w.step.id === '1d' ? 'day' : w.step.label}`;
     const switcher = html`<nav class="seg sm an-metric" aria-label="Chart">${([['downloads', 'Downloads'], ['stars', 'Stars']] as const).map(([id, label]) => html`<a class="seg-item" href="${href({ metric: id })}" ${id === metric ? raw('aria-current="true"') : ''}>${label}</a>`)}</nav>`;
     const appLabel = single ? apps.find((a) => String(a.id) === repoChoice)?.name ?? apps[0]?.name ?? 'this app' : 'all apps';
@@ -142,6 +145,10 @@ export function registerAnalyticsRoutes(app: FastifyInstance, web: Web): void {
       ${noDownloads ? html`<div class="an-note">${notice('info', d.recordingSince ? 'Downloads are being recorded' : 'Downloads start recording in a minute', d.recordingSince
         ? html`Recording began ${localTime(d.recordingSince)}: GitHub only keeps running totals, so nothing is known from before. The first numbers show up after the next half hour.`
         : 'The first read of each repository is a starting point; downloads show up from the half hour after.')}</div>` : ''}
+      ${metric === 'stars' && d.starErrors.length ? html`<div class="an-note">${notice('warn', 'Stars couldn’t be read', html`${d.starErrors.length === 1 ? html`${d.starErrors[0]!.app}: ${d.starErrors[0]!.error}` : html`For ${d.starErrors.map((e) => e.app).join(', ')}. ${d.starErrors[0]!.error}`} Trying again every 30 minutes; downloads aren’t affected.`)}</div>` : ''}
+      ${noStars ? html`<div class="an-note">${notice('info', d.starsSince ? 'Stars are being recorded' : 'Stars start recording in a minute', d.starsSince
+        ? html`Counting began ${localTime(d.starsSince)}: GitHub gives the app each repository’s star count, so stars are counted from how it changes, every 30 minutes. Nothing is known from before.`
+        : 'The first read of each repository’s star count is a starting point; changes show up from the half hour after.')}</div>` : ''}
 
       <div class="an-kpis">
         ${tile('Downloads', compact(d.downloads.total), vs(d.downloads.total, d.downloads.prev, 'up'), lifetime ? 'GitHub’s own totals for every release file (checksums and update data left out)' : 'Release files downloaded from GitHub (checksums and update data left out)')}
@@ -150,27 +157,27 @@ export function registerAnalyticsRoutes(app: FastifyInstance, web: Web): void {
         ${tile('Issues opened', compact(d.issuesOpened.total), vs(d.issuesOpened.total, d.issuesOpened.prev, null), 'Every new GitHub issue in these repositories: the ones filed from Discord tickets, and the ones opened on GitHub', `${n(d.issuesOpened.fromDiscord)} from Discord · ${n(Math.max(0, d.issuesOpened.total - d.issuesOpened.fromDiscord))} on GitHub`)}
         ${tile('Issues closed', compact(d.issuesClosed.total), vs(d.issuesClosed.total, d.issuesClosed.prev, 'up'))}
         ${tile('PRs merged', compact(d.pullsMerged.total), vs(d.pullsMerged.total, d.pullsMerged.prev, 'up'))}
-        ${tile('Stars', compact(d.stars.total), vs(d.stars.total, d.stars.prev, 'up'), lifetime ? 'GitHub’s own star count' : undefined)}
+        ${tile('Stars', lifetime ? compact(d.stars.total) : signed(d.stars.total), vs(d.stars.total, d.stars.prev, 'up'), lifetime ? 'GitHub’s own star count' : 'How much GitHub’s star count changed: stars given, less stars taken back')}
       </div>
 
       <section class="card an-card" aria-labelledby="an-main-h">
         <div class="an-ch"><h2 id="an-main-h" class="sr-only">${metric === 'stars' ? 'Stars' : 'Downloads'}</h2>${switcher}<span class="small muted">${lifetime
           ? metric === 'stars' ? 'all time · by app · GitHub’s count' : `all time · ${single ? 'by version' : 'by app'} · GitHub’s totals`
           : metric === 'stars'
-            ? `new stars · ${appLabel} · ${per} · back to the first star`
+            ? `stars gained · ${appLabel} · ${per}`
             : `${single ? 'by platform' : 'all apps'} · ${per}`}</span></div>
         ${lifetime
           ? metric === 'stars'
             ? starList(d.starsByApp, { gained: false })
             : bars(single ? d.downloads.versions : d.downloads.byApp, { empty: 'Downloads show up after the first read.' })
           : metric === 'stars'
-            ? chart(w, tz, { id: 'stars', title: 'New stars', unit: 'New stars', series: [{ key: 'stars', name: 'New stars', values: d.stars.values, slot: 1 }] })
+            ? chart(w, tz, { id: 'stars', title: 'Stars gained', unit: 'Stars gained', series: [{ key: 'stars', name: 'Stars gained', values: d.stars.values, slot: 1 }] })
             : chart(w, tz, { id: 'downloads', title: 'Downloads', unit: 'Downloads', series: single ? d.downloads.series.map((s, i) => ({ ...s, slot: i + 1 })) : [{ ...d.downloads.series[0]!, slot: 1 }] })}
       </section>
 
       ${metric === 'stars' ? (lifetime ? '' : html`<div class="an-grid">
-        <section class="card an-card" aria-labelledby="an-sb-h"><div class="an-ch"><h2 id="an-sb-h">Stars by app</h2><span class="small muted">total, and new in this period</span></div>${starList(d.starsByApp)}
-          <p class="small muted an-foot">Totals are GitHub’s own count, read every 30 minutes with the downloads, so a star taken back is counted out. New stars are the ones given in this period.</p></section>
+        <section class="card an-card" aria-labelledby="an-sb-h"><div class="an-ch"><h2 id="an-sb-h">Stars by app</h2><span class="small muted">total, and change in this period</span></div>${starList(d.starsByApp, { gained: Boolean(d.starsSince) })}
+          <p class="small muted an-foot">Totals are GitHub’s own count, read every 30 minutes with the downloads. The change is how much each total moved in this period: a star taken back counts −1.</p></section>
       </div>`) : html`<div class="an-grid">
         ${single || lifetime ? '' : html`<section class="card an-card" aria-labelledby="an-apps-h"><div class="an-ch"><h2 id="an-apps-h">By app</h2></div>${bars(d.downloads.byApp, { empty: 'No downloads in this period.' })}</section>`}
         <section class="card an-card" aria-labelledby="an-pl-h"><div class="an-ch"><h2 id="an-pl-h">Platforms</h2></div>${bars(d.downloads.platforms, { empty: 'No downloads in this period.', colored: true })}</section>
@@ -205,7 +212,7 @@ export function registerAnalyticsRoutes(app: FastifyInstance, web: Web): void {
           : html`<p class="small muted an-none">Releases show up after the first read.</p>`}
       </section>
 
-      <p class="small muted an-foot">${lifetime ? html`All: GitHub’s own totals for downloads and stars, and every Discord ticket, issue and merged pull request kept. ` : ''}${d.recordingSince ? html`Downloads recorded every 30 minutes since ${localTime(d.recordingSince)}${d.lastRead ? html`, last read ${timeAgo(d.lastRead)}` : ''}.` : 'Downloads start recording within a minute.'} Times are in your time zone (${tz}). Tickets, issues and pull requests go back as far as they’re kept; stars go back to the first one.</p>`;
+      <p class="small muted an-foot">${lifetime ? html`All: GitHub’s own totals for downloads and stars, and every Discord ticket, issue and merged pull request kept. ` : ''}${d.recordingSince ? html`Downloads recorded every 30 minutes since ${localTime(d.recordingSince)}${d.lastRead ? html`, last read ${timeAgo(d.lastRead)}` : ''}.` : 'Downloads start recording within a minute.'} ${d.starsSince ? html` Stars counted since ${localTime(d.starsSince)}.` : ''} Times are in your time zone (${tz}). Tickets, issues and pull requests go back as far as they’re kept.</p>`;
   }
 
   app.get('/w/:wid/analytics', async (req, reply) => {
@@ -232,7 +239,7 @@ export function registerAnalyticsRoutes(app: FastifyInstance, web: Web): void {
         <div class="card-b">
           <h2>See downloads every half hour, and what comes with them</h2>
           <p class="muted">Downloads per app, platform, processor, format and version, from 30 minutes to 12 months at a time, next to tickets, issues, pull requests and stars. Release health shows tickets per 1,000 downloads, so a bad build stands out.</p>
-          <p class="small muted">GitHub only keeps running totals, so downloads are recorded from when you turn this on: every 30 minutes, for the ${plural(repos.length, 'repository', 'repositories')} Repo status watches. It reads releases and stars with GitHub’s GraphQL API (two small calls per repository each half hour); filing isn’t affected. Tickets, issues, pull requests and stars go back as far as they’re kept.</p>
+          <p class="small muted">GitHub only keeps running totals, so downloads are recorded from when you turn this on: every 30 minutes, for the ${plural(repos.length, 'repository', 'repositories')} Repo status watches. It reads releases and star counts with GitHub’s GraphQL API (two small calls per repository each half hour); filing isn’t affected. Stars are counted from then too; tickets, issues and pull requests go back as far as they’re kept.</p>
           ${edit ? html`<div class="row">${postBtn(`${base(ctx)}/enabled`, 'Turn on', ctx.csrf, { variant: 'primary', icon: 'chart-line', fields: { enabled: '1' } })}</div>` : html`<p class="small muted">An admin can turn it on.</p>`}
         </div>
       </section>`;

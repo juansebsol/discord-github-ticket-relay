@@ -121,14 +121,19 @@ Discord endpoint, OAuth), one or more queue workers, and an optional triage work
 - **Analytics** (`src/analytics/`, off by default per workspace in `analytics_settings`): GitHub
   only keeps each release file's running download total, so the worker's index loop reads every
   repository Repo status watches once per 30-minute slot (GraphQL: its releases and their files,
-  and new stars) and keeps how much each file grew since the read before (`download_counts`, per
+  and its star count) and keeps how much each file grew since the read before (`download_counts`, per
   slot; a short gap is spread evenly over its slots, a gap over a day starts recording again
   rather than inventing it; the first read is only a starting point, and a file that appears later
   counts from its release's publication). Files are classified by name (`assets.ts`: platform,
   architecture, format; checksums, signatures and update metadata aren't downloads). Detail is kept
-  32 days, then added up per UTC day (`download_days`). Stars come with when each was given, so
-  their history goes back to the first (`repo_stars`); the same read keeps GitHub's own star total
-  per 30-minute slot (`repo_star_counts`, exact even when a star is taken back). The page buckets everything in the
+  32 days, then added up per UTC day (`download_days`). Stars work the same way: GitHub won't list
+  who starred for the app (the stargazers need more than its permissions), so each read keeps the
+  repository's star count (`download_sync.stars_total`) and how much it changed since the read
+  before (`repo_star_changes`, per slot; a star taken back counts -1). A star count GitHub refuses
+  is kept per repository (`stars_error`) and said on the page; it doesn't stop the downloads. The
+  recorder's GraphQL reads are strict: an answer with data and errors together (a field the app
+  may not read comes back null) counts as a failure, where Repo status keeps the partial answer
+  and logs it. The page buckets everything in the
   viewer's time zone (a `tr_tz` cookie app.js sets): ranges from today to 12 months, steps from 30
   minutes to a day (a step that would make over 400 buckets, or finer than a day beyond the 30-minute
   detail, isn't offered). Charts are drawn by app.js from the numbers on the page.
@@ -233,7 +238,7 @@ stable user ID are recorded in the body.
 | `submissions` | Tickets, routing snapshot, queue state, lease, reconcile counters, encrypted payload |
 | `submission_events` | Append-only timeline for investigation |
 | `contributor_settings`, `contributor_panels`, `contributor_tiers` | On/off, panel channel, published panel, and role tiers (role + minimum contributions) per workspace |
-| `analytics_settings`, `download_assets`, `download_counts`, `download_days`, `download_sync`, `repo_stars`, `repo_star_counts` | Analytics: on/off; each release file and its total; downloads per 30 minutes (then per day); per repository, when recording began and the last slot read; stars with when each was given; star totals per 30 minutes |
+| `analytics_settings`, `download_assets`, `download_counts`, `download_days`, `download_sync`, `repo_star_changes` | Analytics: on/off; each release file and its total; downloads per 30 minutes (then per day); per repository, when recording began, the last slot read, the star count and any error; the change in the star count per 30 minutes |
 | `pull_index` | Pull requests of the indexed repositories (open, and closed for 90 days), with the issues each is for |
 | `repo_status_settings`, `repo_status` | Repo status: on/off, the repositories and how often per workspace; what was last read per repository (stats, the kept activity, the icon, the error and the GraphQL budget left) |
 | `contributor_links`, `contributor_verifications` | One GitHub account ↔ one Discord member per workspace; audit trail of every verification |

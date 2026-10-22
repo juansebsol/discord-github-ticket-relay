@@ -378,13 +378,20 @@ export class GitHubClient {
    * A GraphQL query as the installation. GraphQL has its own hourly budget, apart from the REST
    * one that filing uses. Missing objects come back as null; errors with no data throw.
    */
-  async graphql(installationId: number, query: string, variables: Record<string, unknown> = {}): Promise<any> {
+  /**
+   * A GraphQL query as the installation. GitHub can answer with data and errors together (a field
+   * the app may not read comes back null, and can take its parent with it): `strict` treats that
+   * as an error; otherwise `onErrors` hears about it and the partial data is returned.
+   */
+  async graphql(installationId: number, query: string, variables: Record<string, unknown> = {}, o: { strict?: boolean; onErrors?: (errors: any[]) => void } = {}): Promise<any> {
     const { data } = await this.request('POST', '/graphql', await this.asInstallation(installationId), { query, variables });
     const errors = Array.isArray(data?.errors) ? data.errors : [];
-    if (errors.length && !data?.data) {
+    if (errors.length && (!data?.data || o.strict)) {
       const limited = errors.some((e: any) => e?.type === 'RATE_LIMITED');
-      throw new GitHubApiError(limited ? 403 : 502, String(errors[0]?.message ?? 'GraphQL error'), limited ? 300 : null, limited, errors);
+      const refused = errors.some((e: any) => e?.type === 'FORBIDDEN' || /not accessible by integration/i.test(String(e?.message ?? '')));
+      throw new GitHubApiError(limited || refused ? 403 : 502, String(errors[0]?.message ?? 'GraphQL error'), limited ? 300 : null, limited, errors);
     }
+    if (errors.length) o.onErrors?.(errors);
     return data?.data ?? null;
   }
 

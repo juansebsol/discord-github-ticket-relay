@@ -1,8 +1,9 @@
 /**
  * Analytics: what the page shows for a window (a range, a step, a time zone) and a set of
  * repositories: downloads per bucket and their breakdowns (app, platform, architecture, format,
- * version), tickets, issues opened and closed, pull requests merged and stars over the same
- * buckets, each with the period before, and release health (tickets per 1,000 downloads).
+ * version), tickets, issues opened and closed, pull requests merged and stars (the change in each
+ * repository's star count) over the same buckets, each with the period before, and release health
+ * (tickets per 1,000 downloads).
  */
 import type { Queryable } from '../db/database.js';
 import type { RepoRef } from '../repo-status/tracker.js';
@@ -62,9 +63,13 @@ export interface AnalyticsData {
   issuesOpened: Metric & { fromDiscord: number };
   issuesClosed: Metric;
   pullsMerged: Metric;
+  /** The change in the star count (stars given less stars taken back), known from when the star count was first read. */
   stars: Metric;
-  /** Per app: its star total as GitHub last counted it (every 30 minutes), and the stars given in the period. */
+  starsSince: Date | null;
+  /** Per app: its star total as GitHub last counted it (every 30 minutes), and how much it changed in the period. */
   starsByApp: { label: string; total: number | null; gained: number }[];
+  /** Repositories whose star count couldn't be read last time, and why. */
+  starErrors: { app: string; error: string }[];
   releases: ReleaseHealth[];
 }
 
@@ -181,17 +186,31 @@ export async function analyticsData(q: Queryable, workspaceId: string, repos: Re
        SELECT repo_id, CAST(ref AS INTEGER), merged_at FROM repo_changes WHERE repo_id IN (SELECT value FROM json_each($1)) AND kind = 'pr' AND noise IS NULL AND merged_at >= $2 AND merged_at < $3
      ) GROUP BY 1`,
     [repoIds, span[0], span[1]]));
-  const stars = await metric(await perSlot(q,
-    `SELECT ${slot('starred_at')} AS at, count(*) AS n FROM repo_stars WHERE repo_id IN (SELECT value FROM json_each($1)) AND starred_at >= $2 AND starred_at < $3 GROUP BY 1`,
-    [repoIds, span[0], span[1]]));
-
-  const { rows: totals } = await q.query<{ repo_id: number; stars_total: number | null }>('SELECT repo_id, stars_total FROM download_sync WHERE repo_id IN (SELECT value FROM json_each($1))', [repoIds]);
-  const { rows: given } = await q.query<{ repo_id: number; n: number }>(
-    'SELECT repo_id, count(*) AS n FROM repo_stars WHERE repo_id IN (SELECT value FROM json_each($1)) AND starred_at >= $2 AND starred_at < $3 GROUP BY repo_id',
-    [repoIds, new Date(w.start), new Date(w.end)],
+  // Stars: the change in each repository's star count per 30-minute slot, known from the slot after the first read.
+  const { rows: starSync } = await q.query<{ repo_id: number; stars_total: number | null; stars_started_at: Date | null; stars_error: string | null }>(
+    'SELECT repo_id, stars_total, stars_started_at, stars_error FROM download_sync WHERE repo_id IN (SELECT value FROM json_each($1))',
+    [repoIds],
   );
-  const totalOf = new Map(totals.map((t) => [t.repo_id, t.stars_total === null ? null : Number(t.stars_total)]));
-  const gainedOf = new Map(given.map((g) => [g.repo_id, Number(g.n)]));
+  const starsStarted = starSync.map((r) => r.stars_started_at?.getTime()).filter((t): t is number => t !== undefined);
+  const starsSince = starsStarted.length ? new Date(Math.min(...starsStarted)) : null;
+  const starsKnownFrom = starsSince ? Math.floor(starsSince.getTime() / SLOT_MS) * SLOT_MS + SLOT_MS : Infinity;
+  const { rows: starRows } = await q.query<{ at: number; repo_id: number; n: number }>(
+    'SELECT slot_at AS at, repo_id, change AS n FROM repo_star_changes WHERE repo_id IN (SELECT value FROM json_each($1)) AND slot_at >= $2 AND slot_at < $3',
+    [repoIds, span[0], span[1]],
+  );
+  const starCur = starRows.map((r) => ({ at: Number(r.at), repo_id: r.repo_id, n: Number(r.n) })).filter((r) => r.at >= w.start && r.at < w.end);
+  const stars: Metric = {
+    total: sum(starCur),
+    prev: !lifetime && starsSince !== null && starsKnownFrom <= w.prevStart ? sum(starRows.filter((r) => Number(r.at) >= w.prevStart && Number(r.at) < w.prevEnd)) : null,
+    values: bucketed(w, starCur, starsKnownFrom),
+  };
+  const totalOf = new Map(starSync.map((t) => [t.repo_id, t.stars_total === null ? null : Number(t.stars_total)]));
+  const gainedOf = new Map<number, number>();
+  for (const r of starCur) gainedOf.set(r.repo_id, (gainedOf.get(r.repo_id) ?? 0) + r.n);
+  const starErrors = repos.flatMap((r) => {
+    const e = starSync.find((x) => x.repo_id === r.id)?.stars_error;
+    return e ? [{ app: appNames.get(r.id) ?? r.name, error: e }] : [];
+  });
   const starsByApp = repos
     .map((r) => ({ label: appNames.get(r.id) ?? r.name, total: totalOf.get(r.id) ?? null, gained: gainedOf.get(r.id) ?? 0 }))
     .sort((a, b) => (b.total ?? -1) - (a.total ?? -1) || b.gained - a.gained);
@@ -223,10 +242,10 @@ export async function analyticsData(q: Queryable, workspaceId: string, repos: Re
   }
   releases.sort((a, b) => (b.publishedAt?.getTime() ?? 0) - (a.publishedAt?.getTime() ?? 0));
 
-  // All: the star total is GitHub's own count (the history leaves out stars taken back).
+  // All: the star total is GitHub's own count.
   const starTotal = starsByApp.reduce((t, r) => t + (r.total ?? 0), 0);
   const starsOut = lifetime && starsByApp.some((r) => r.total !== null) ? { ...stars, total: starTotal } : stars;
-  return { recordingSince, lastRead: lastReadMs ? new Date(lastReadMs) : null, downloads, tickets, issuesOpened: issuesOpenedAll, issuesClosed, pullsMerged, stars: starsOut, starsByApp, releases: releases.slice(0, 15) };
+  return { recordingSince, lastRead: lastReadMs ? new Date(lastReadMs) : null, downloads, tickets, issuesOpened: issuesOpenedAll, issuesClosed, pullsMerged, stars: starsOut, starsSince, starsByApp, starErrors, releases: releases.slice(0, 15) };
 }
 
 export { PLATFORM_NAMES };

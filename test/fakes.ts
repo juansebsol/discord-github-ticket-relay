@@ -27,7 +27,7 @@ export interface FakeRepo {
   branchCommits?: { sha: string; message: string; user?: string | null; date: string; parents?: number }[];
   /** The app icon (a PNG under assets/app-icon/…), for Repo status. */
   icon?: Buffer;
-  /** Who starred it and when (Analytics). */
+  /** Who starred it (Analytics reads only the count: GitHub won't list them for the app). */
   stars?: { login: string; at: string }[];
 }
 
@@ -89,6 +89,8 @@ export class FakeGitHub {
   graphqlCalls = 0;
   graphqlBudget = 4800;
   graphqlLimited = false;
+  /** GitHub refuses the star count (answers with the repository nulled and a FORBIDDEN error, as it does for fields the app may not read). */
+  starCountForbidden = false;
   appSlug = 'ticket-relay';
 
   addInstallation(id: number, login: string, repos: Partial<FakeRepo>[], type = 'Organization') {
@@ -157,11 +159,7 @@ export class FakeGitHub {
       number: i.number, title: i.title, url: `https://github.com/${r.owner}/${r.name}/issues/${i.number}`, createdAt: i.created_at, updatedAt: i.updated_at ?? i.created_at,
       authorAssociation: i.association ?? 'NONE', comments: { totalCount: i.comments?.length ?? 0 }, reactions: { totalCount: i.reactions ?? 0 }, labels: { nodes: i.labels.map((name) => ({ name })) },
     });
-    if (query.includes('stargazers(')) {
-      const list = [...(r.stars ?? [])].sort((a, b) => at(b.at) - at(a.at));
-      const p = page(list, v.after, 100);
-      return { repository: { stargazerCount: list.length, stargazers: { pageInfo: p.pageInfo, edges: p.nodes.map((x) => ({ starredAt: x.at, node: { login: x.login } })) } } };
-    }
+    if (query.includes('stargazerCount') && !query.includes('openPrs')) return { repository: { stargazerCount: (r.stars ?? []).length } };
     if (query.includes('releases(')) {
       const p = page(newestFirst(r.releases ?? [], (x) => x.published_at), v.after, 50);
       return { repository: { releases: { pageInfo: p.pageInfo, nodes: p.nodes.map((x) => ({
@@ -285,6 +283,10 @@ export class FakeGitHub {
     if (path === '/graphql' && method === 'POST') {
       this.graphqlCalls++;
       if (this.graphqlLimited) return json(200, { errors: [{ type: 'RATE_LIMITED', message: 'API rate limit exceeded for installation.' }] });
+      // Who starred is more than the app may read; GitHub answers with data and errors together.
+      if (String(body.query).includes('stargazers(') || (this.starCountForbidden && String(body.query).includes('stargazerCount'))) {
+        return json(200, { data: { repository: null }, errors: [{ type: 'FORBIDDEN', path: ['repository', 'stargazers'], message: 'Resource not accessible by integration' }] });
+      }
       return json(200, { data: this.graphqlData(String(body.query), body.variables ?? {}, accessible) });
     }
     if ((m = /^\/repos\/([^/]+)\/([^/]+)\/contributors$/.exec(path)) && method === 'GET') {

@@ -124,20 +124,37 @@ describe('Analytics: recording downloads', () => {
     expect(sync.started_at.getTime()).toBe(later);
   });
 
-  it('reads the star history once, then only new stars; old detail is kept per day', async () => {
+  it('counts stars from how GitHub’s star count changes; a refused read shows and doesn’t stop downloads; old detail is kept per day', async () => {
     seed();
     await post('/analytics/enabled', { enabled: '1' });
-    const t0 = Date.now();
+    const t0 = slotOf(Date.now()) - 6 * SLOT_MS;
     await tick(t0);
-    const stars = async () => (await env.db.query('SELECT login FROM repo_stars ORDER BY login')).rows.map((r) => r.login);
-    expect(await stars()).toEqual(['ana', 'ben']);
-    // GitHub's own total, per 30-minute slot, with the downloads.
-    expect((await env.db.query('SELECT slot_at, total FROM repo_star_counts')).rows).toEqual([{ slot_at: new Date(slotOf(t0)), total: 2 }]);
+    const sync = async () => (await env.db.query('SELECT stars_total, stars_started_at, stars_error, last_slot_at, error FROM download_sync')).rows[0];
+    const changes = async () => (await env.db.query('SELECT slot_at, change FROM repo_star_changes ORDER BY slot_at')).rows.map((r) => [r.slot_at.getTime() - t0, r.change]);
+    // The first read is a starting point: GitHub's count, no change yet.
+    expect(await sync()).toMatchObject({ stars_total: 2, stars_started_at: new Date(t0), stars_error: null });
+    expect(await changes()).toEqual([]);
     repo().stars!.push({ login: 'cy', at: new Date().toISOString() });
     await tick(t0 + SLOT_MS);
-    expect(await stars()).toEqual(['ana', 'ben', 'cy']);
-    expect((await env.db.query('SELECT total FROM repo_star_counts ORDER BY slot_at')).rows.map((r) => r.total)).toEqual([2, 3]);
-    expect((await env.db.query('SELECT stars_total FROM download_sync')).rows[0].stars_total).toBe(3);
+    expect(await changes()).toEqual([[0, 1]]);
+    // Two taken back over a missed half hour: spread over both, each -1.
+    repo().stars = repo().stars!.filter((x) => x.login === 'cy');
+    await tick(t0 + 3 * SLOT_MS);
+    expect(await changes()).toEqual([[0, 1], [SLOT_MS, -1], [2 * SLOT_MS, -1]]);
+    expect((await sync()).stars_total).toBe(1);
+    // GitHub refuses the count: said on the page, and downloads still record.
+    env.github.starCountForbidden = true;
+    asset('photocraft-0.11.1-windows-x64.msi').downloads += 7;
+    await tick(t0 + 4 * SLOT_MS);
+    expect(await sync()).toMatchObject({ stars_total: 1, stars_error: 'GitHub didn’t let the app read the star count.', last_slot_at: new Date(t0 + 4 * SLOT_MS), error: null });
+    expect((await counts()).at(-1)).toMatchObject({ slot: t0 + 3 * SLOT_MS, n: 7 });
+    const refused = (await page('/analytics?range=7d&metric=stars')).body;
+    expect(refused).toContain('Stars couldn’t be read');
+    expect(refused).toContain('PhotoCraft: GitHub didn’t let the app read the star count.');
+    expect((await page('/analytics?range=7d')).body).not.toContain('Stars couldn’t be read');
+    env.github.starCountForbidden = false;
+    await tick(t0 + 5 * SLOT_MS);
+    expect((await sync()).stars_error).toBeNull();
     // 30-minute rows older than 32 days are added up per UTC day.
     const old = Date.parse('2026-08-01T10:30:00Z');
     const { rows } = await env.db.query('SELECT id FROM download_assets LIMIT 1');
@@ -149,7 +166,7 @@ describe('Analytics: recording downloads', () => {
 });
 
 describe('Analytics: the page', () => {
-  async function recorded() {
+  async function recorded(): Promise<number> {
     seed();
     await post('/analytics/enabled', { enabled: '1' });
     const t0 = slotOf(Date.now()) - 10 * SLOT_MS;
@@ -158,6 +175,7 @@ describe('Analytics: the page', () => {
     asset('photocraft-0.11.1-macos-universal.dmg').downloads += 100;
     asset('photocraft-0.11.1-linux-x86_64.AppImage').downloads += 100;
     await tick(t0 + SLOT_MS);
+    return t0;
   }
   async function ticket(title: string) {
     const r = await acceptSubmission(env.deps, {
@@ -222,14 +240,18 @@ describe('Analytics: the page', () => {
     expect(starsAll).toContain('data-an-hbar=\'{&quot;items&quot;:[{&quot;label&quot;:&quot;PhotoCraft&quot;,&quot;value&quot;:2,');
   });
 
-  it('switches the main chart to stars: new stars over time, and each app’s total', async () => {
-    await recorded();
+  it('switches the main chart to stars: stars gained over time, and each app’s total', async () => {
+    const t0 = await recorded();
+    repo().stars!.push({ login: 'cy', at: new Date().toISOString() });
+    await tick(t0 + 2 * SLOT_MS);
     const body = (await page('/analytics?range=7d&metric=stars')).body;
     expect(body).toMatch(/aria-label="Chart"><a class="seg-item" href="[^"]*\/analytics\?range=7d"\s*>Downloads<\/a><a class="seg-item" href="[^"]*\/analytics\?metric=stars&amp;range=7d" aria-current="true">Stars<\/a>/);
-    expect(body).toContain('new stars · PhotoCraft');
-    expect(body).toMatch(/data-an-chart='[^']*&quot;name&quot;:&quot;New stars&quot;/);
-    // Total 2 (GitHub's count), 1 given in the last 7 days.
-    expect(body).toMatch(/Stars by app[\s\S]*?<li><span>PhotoCraft<\/span><span class="num">2 <span class="an-up">\+1<\/span><\/span><\/li>/);
+    expect(body).toContain('stars gained · PhotoCraft');
+    expect(body).toMatch(/data-an-chart='[^']*&quot;name&quot;:&quot;Stars gained&quot;/);
+    expect(body).toContain('<div class="an-kl">Stars</div><div class="an-kv">+1</div>');
+    // Total 3 (GitHub's count), up 1 in the last 7 days.
+    expect(body).toMatch(/Stars by app[\s\S]*?<li><span>PhotoCraft<\/span><span class="num">3 <span class="an-up">\+1<\/span><\/span><\/li>/);
+    expect(body).not.toContain('Stars couldn’t be read');
     // The download breakdowns aren't shown; the app picker keeps the stars view.
     expect(body).not.toContain('id="an-pl-h"');
     expect(body).toContain('<input type="hidden" name="metric" value="stars">');

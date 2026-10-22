@@ -2016,9 +2016,18 @@
         d.series.forEach(function (s) { var v = s.values[i]; if (v !== null && v !== undefined) { known = true; t += v; } });
         return known ? t : null;
       });
-      var ticks = niceTicks(Math.max.apply(null, totals.map(function (t) { return t || 0; })), small ? 2 : 4);
-      var top = ticks[ticks.length - 1];
-      var y = function (v) { return padT + plotH - (v / top) * plotH; };
+      var hi = Math.max.apply(null, totals.map(function (t) { return t || 0; }));
+      var lo = Math.min(0, Math.min.apply(null, totals.map(function (t) { return t || 0; })));
+      var ticks = niceTicks(hi - lo, small ? 2 : 4);
+      if (lo < 0) {
+        // A change that can go down (stars taken back): the same round steps, below zero too.
+        var st = ticks[1] - ticks[0], from = Math.floor(lo / st) * st;
+        ticks = [];
+        for (var tv = from; tv <= Math.max(hi, 0) + st * 0.999; tv += st) ticks.push(tv);
+        if (ticks[ticks.length - 1] < hi) ticks.push(ticks[ticks.length - 1] + st);
+      }
+      var top = ticks[ticks.length - 1], bot = ticks[0];
+      var y = function (v) { return padT + plotH - ((v - bot) / (top - bot)) * plotH; };
       var band = plotW / n;
       var barW = band >= 6 ? Math.min(24, Math.max(2, band * 0.7)) : Math.max(1, band - 1);
       box.textContent = '';
@@ -2055,6 +2064,11 @@
           var path = 'M' + x + ',' + (yTop + h) + ' V' + (yTop + r) + (r ? ' Q' + x + ',' + yTop + ' ' + (x + r) + ',' + yTop : '') + ' H' + (x + barW - r) + (r ? ' Q' + (x + barW) + ',' + yTop + ' ' + (x + barW) + ',' + (yTop + r) : '') + ' V' + (yTop + h) + ' Z';
           el('path', { d: path, class: 'an-bar-s s' + p.s.slot }, marks);
         });
+        if (totals[i] !== null && totals[i] < 0 && d.series.length === 1) {
+          // Below zero: hangs from the baseline, rounded at the bottom.
+          var nh = Math.max(1, y(totals[i]) - base), nr = Math.min(4, barW / 2, nh);
+          el('path', { d: 'M' + x + ',' + base + ' V' + (base + nh - nr) + (nr ? ' Q' + x + ',' + (base + nh) + ' ' + (x + nr) + ',' + (base + nh) : '') + ' H' + (x + barW - nr) + (nr ? ' Q' + (x + barW) + ',' + (base + nh) + ' ' + (x + barW) + ',' + (base + nh - nr) : '') + ' V' + base + ' Z', class: 'an-bar-s s' + d.series[0].slot }, marks);
+        }
         if (totals[i] === null && i * band + padL < W) {
           // Nothing known (before recording, or still to come): a faint baseline only.
           el('line', { x1: x, x2: x + barW, y1: base - 0.5, y2: base - 0.5, class: 'an-unknown' }, marks);
@@ -2115,7 +2129,7 @@
         var cx = padL + i * band + band / 2;
         var left = Math.min(Math.max(cx - tip.offsetWidth / 2, 0), W - tip.offsetWidth);
         tip.style.left = left + 'px';
-        tip.style.top = Math.max(0, y(totals[i] || 0) - tip.offsetHeight - 10) + 'px';
+        tip.style.top = Math.max(0, y(Math.max(0, totals[i] || 0)) - tip.offsetHeight - 10) + 'px';
       }
       function hide() { active = -1; tip.hidden = true; hover.setAttribute('visibility', 'hidden'); }
       svg.addEventListener('pointermove', function (e) {

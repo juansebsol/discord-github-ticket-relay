@@ -287,15 +287,16 @@ async function analyticsCard({ web, ctx }: Shared): Promise<ToolCard> {
       WHERE a.repo_id IN (SELECT value FROM json_each($1)) AND a.kind <> 'meta' AND c.slot_at >= $2`, [ids, since(ms)])).rows[0]?.n ?? 0);
   const day = s.enabled ? await downloads(86_400_000) : 0;
   const week = s.enabled ? await downloads(7 * 86_400_000) : 0;
-  const stars = s.enabled ? Number((await db.query<{ n: number }>('SELECT count(*) AS n FROM repo_stars WHERE repo_id IN (SELECT value FROM json_each($1)) AND starred_at >= $2', [ids, since(7 * 86_400_000)])).rows[0]?.n ?? 0) : 0;
+  // Stars gained: the change in GitHub's star count (a star taken back counts -1).
+  const stars = s.enabled ? Number((await db.query<{ n: number }>('SELECT COALESCE(sum(change), 0) AS n FROM repo_star_changes WHERE repo_id IN (SELECT value FROM json_each($1)) AND slot_at >= $2', [ids, since(7 * 86_400_000)])).rows[0]?.n ?? 0) : 0;
   return {
     tool: 'analytics',
-    meta: s.enabled ? `Downloads every 30 minutes${s.enabledAt ? ` · started ${timeAgo(s.enabledAt)}` : ''}` : 'Off',
+    meta: s.enabled ? `Downloads and stars every 30 minutes${s.enabledAt ? ` · started ${timeAgo(s.enabledAt)}` : ''}` : 'Off',
     status: s.enabled ? pill('Recording', 'ok') : pill('Off', 'neutral'),
     stats: [
       { label: 'Downloads, last 24 h', value: day, area: 'analytics', href: `${b}/analytics` },
       { label: 'Last 7 days', value: week, area: 'analytics', href: `${b}/analytics?range=7d` },
-      { label: 'Stars, last 7 days', value: stars, area: 'analytics', href: `${b}/analytics?range=7d` },
+      { label: 'Stars gained, last 7 days', value: stars, area: 'analytics', href: `${b}/analytics?range=7d&metric=stars` },
     ],
     go: [{ area: 'analytics', label: s.enabled ? 'Open Analytics' : 'Set up Analytics', primary: !s.enabled && can(ctx.membership, 'analytics.edit') }],
   };

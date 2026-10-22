@@ -393,13 +393,16 @@ export class RepoStatusTracker {
   /** Reads one repository (exposed for tests through tick). */
   private async fetch(installationId: number, repo: RepoRef, prev: Raw | null, iconOid: string | null, now: number) {
     const gh = this.deps.github!;
+    // A partial answer (a field GitHub won't give the app) is kept, but logged.
+    const onErrors = (errors: any[]) => this.deps.log.warn({ repo: `${repo.owner}/${repo.name}`, errors: errors.slice(0, 3).map((e) => String(e?.message ?? e)) }, 'repo status: GitHub left part of the answer out');
+    const ask = (query: string, variables: Record<string, unknown>) => gh.graphql(installationId, query, variables, { onErrors });
     const vars = { owner: repo.owner, name: repo.name };
 
     // Releases and their downloads.
     const releases: Release[] = [];
     let after: string | null = null;
     for (let page = 0; page < 4; page++) {
-      const d: any = await gh.graphql(installationId, RELEASES_QUERY, { ...vars, after });
+      const d: any = await ask(RELEASES_QUERY, { ...vars, after });
       if (!d?.repository) throw new GitHubApiError(404, 'Repository not found', null, false, null);
       const conn = d.repository.releases;
       for (const r of conn?.nodes ?? []) {
@@ -418,7 +421,7 @@ export class RepoStatusTracker {
     // Counts, dates, each window's commits and the open issues to score.
     const starts = windowStarts(now, buildAt);
     const history = starts.map((w) => `${w.key}: history(since: "${iso(w.since)}") { totalCount }`).join('\n          ');
-    const main: any = await gh.graphql(installationId, MAIN_QUERY.replace('{HISTORY}', history), vars);
+    const main: any = await ask(MAIN_QUERY.replace('{HISTORY}', history), vars);
     const r = main?.repository;
     if (!r) throw new GitHubApiError(404, 'Repository not found', null, false, null);
     const budget = main?.rateLimit ? { remaining: Number(main.rateLimit.remaining), resetAt: new Date(main.rateLimit.resetAt) } : null;
@@ -432,7 +435,7 @@ export class RepoStatusTracker {
     const latest = rel.latest;
     if (latest && branch) {
       const at = latest.commitAt ?? buildAt ?? new Date(now);
-      const b: any = await gh.graphql(installationId, BUILD_QUERY, { ...vars, tag: `refs/tags/${latest.tag}`, branch, at: iso(at) });
+      const b: any = await ask(BUILD_QUERY, { ...vars, tag: `refs/tags/${latest.tag}`, branch, at: iso(at) });
       const cmp = b?.repository?.ref?.compare;
       if (cmp && typeof cmp.aheadBy === 'number') {
         unreleased = cmp.aheadBy;
@@ -453,7 +456,7 @@ export class RepoStatusTracker {
     if (head) {
       after = null;
       for (let page = 0; page < MAX_PAGES; page++) {
-        const d: any = await gh.graphql(installationId, AUTHORS_QUERY, { ...vars, since: iso(since), after });
+        const d: any = await ask(AUTHORS_QUERY, { ...vars, since: iso(since), after });
         const conn = d?.repository?.defaultBranchRef?.target?.history;
         for (const c of conn?.nodes ?? []) {
           const who = c.author?.user?.login ?? c.author?.email ?? c.author?.name ?? 'someone';
@@ -466,7 +469,7 @@ export class RepoStatusTracker {
     const cursors: Record<'opened' | 'merged' | 'issues', string | null> = { opened: null, merged: null, issues: null };
     const walking = { opened: true, merged: true, issues: true };
     for (let page = 0; page < MAX_PAGES && (walking.opened || walking.merged || walking.issues); page++) {
-      const d: any = await gh.graphql(installationId, EVENTS_QUERY, {
+      const d: any = await ask(EVENTS_QUERY, {
         ...vars, opened: walking.opened, merged: walking.merged, issues: walking.issues,
         openedAfter: cursors.opened, mergedAfter: cursors.merged, issuesAfter: cursors.issues,
       });
