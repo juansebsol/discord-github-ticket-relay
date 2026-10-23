@@ -5,6 +5,7 @@
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { announcementCounts, getAnnouncementSettings } from '../../announcements/settings.js';
+import { checkBoard, getKnownIssuesSettings } from '../../bot-features/known-issues.js';
 import { checkContributorPanel, getContributorSettings } from '../../domain/contributors.js';
 import type { Queryable } from '../../db/database.js';
 import { checkPanel, type PanelState } from '../../domain/panel.js';
@@ -17,10 +18,10 @@ import type { Web, WorkspaceRequestContext } from '../server.js';
 import { chip, pageHeader, pill, plural, postBtn, tabs, timeAgo, viewOnlyTag, type IconName } from '../ui.js';
 
 /** The tools that have their own item in the sidebar, in order. */
-export type ToolName = 'tickets' | 'issues' | 'repos' | 'analytics' | 'triage' | 'contributors' | 'announcements';
+export type ToolName = 'tickets' | 'issues' | 'repos' | 'analytics' | 'triage' | 'contributors' | 'announcements' | 'bot';
 
 /** Each tool's icon, in the sidebar, on the overview and on Members. */
-export const TOOL_ICONS: Record<Tool, IconName> = { tickets: 'ticket', issues: 'circle-dot', repos: 'chart-no-axes-column-increasing', analytics: 'chart-line', triage: 'sparkles', contributors: 'award', announcements: 'megaphone', setup: 'boxes', workspace: 'activity' };
+export const TOOL_ICONS: Record<Tool, IconName> = { tickets: 'ticket', issues: 'circle-dot', repos: 'chart-no-axes-column-increasing', analytics: 'chart-line', triage: 'sparkles', contributors: 'award', announcements: 'megaphone', bot: 'bot', setup: 'boxes', workspace: 'activity' };
 
 /** Every page's address under /w/:wid. */
 export const AREA_PATHS: Record<Area, string> = {
@@ -47,6 +48,7 @@ export const AREA_PATHS: Record<Area, string> = {
   'announcements': '/announcements',
   'announcement-settings': '/announcements/settings',
   'announcement-pings': '/announcements/pings',
+  'known-issues': '/bot/known-issues',
   'apps': '/apps',
   'health': '/health',
 };
@@ -141,6 +143,7 @@ const VIEW_ONLY: Partial<Record<Area, string>> = {
   'announcements': 'You can see the releases and their posts. Posting, editing and skipping them need Edit on Posts. Ask an admin if you need it.',
   'announcement-settings': 'You can see how announcements are set up. Ask an admin if you need to change it.',
   'announcement-pings': 'You can see the pings message and its preview. Ask an admin if you need to change, publish or remove it.',
+  'known-issues': 'You can see the known-issues board and its settings. Changing them, pinning or hiding issues, and publishing need Edit on Known issues. Ask an admin if you need it.',
   'health': 'You can see how the server is doing. Switching Dev mode needs Edit on Server health. Ask an admin if you need it.',
 };
 
@@ -204,6 +207,16 @@ async function toolState(web: Web, ctx: WorkspaceRequestContext, tool: ToolName,
       actions: [chip(`${c.model} · ${usage.triaged.toLocaleString('en-US')} of ${c.monthlyLimit.toLocaleString('en-US')} this month`, { tone: anyOn && full ? 'warn' : null, title: 'Tickets and issues triaged this month, re-runs included, and the monthly limit' })],
       // Knowledge: questions Claude asked since each app's TRIAGE.md was last saved.
       counts: { 'triage.review': ctx.progress?.review ?? 0, 'triage.knowledge': [...(questions?.values() ?? [])].reduce((n, q) => n + q.fresh, 0) },
+    };
+  }
+  if (tool === 'bot') {
+    const [ki, conn] = await Promise.all([getKnownIssuesSettings(db, wid), getDiscordConnection(db, wid)]);
+    const board = await checkBoard(web.deps, wid, conn, { live: false });
+    return {
+      status: !ki.enabled ? pill('Off', 'neutral') : board.state === 'published' ? pill('Live', 'ok') : board.state === 'missing' ? pill('Board deleted', 'warn') : pill('Not published', 'neutral'),
+      description: 'Extra things the bot does in your Discord, each turned on when you want it. First: a known-issues board.',
+      actions: [],
+      counts: {},
     };
   }
   if (tool === 'announcements') {

@@ -24,6 +24,7 @@ import { ChangeTracker, recentChanges, type AppChange } from './knowledge-change
 import { RepoStatusTracker } from '../repo-status/tracker.js';
 import { AnalyticsRecorder } from '../analytics/recorder.js';
 import { Announcer } from '../announcements/announcer.js';
+import { KnownIssuesUpdater } from '../bot-features/known-issues.js';
 import { actionMatcher } from './state.js';
 import { buildKnowledgeBlock, buildSystemPrompt, buildUserPrompt, extractDescription, searchTerms, type Candidate } from './prompt.js';
 import { findWork, type WorkItem, type WorkRef } from './work.js';
@@ -839,6 +840,8 @@ export class TriageEngine {
   readonly analytics: AnalyticsRecorder;
   /** Release announcements: new releases, their notes and their posts in Discord. */
   readonly announcer: Announcer;
+  /** Bot features › Known issues: keeps each posted board up to date. */
+  readonly knownIssues: KnownIssuesUpdater;
 
   constructor(
     readonly deps: Deps,
@@ -850,6 +853,7 @@ export class TriageEngine {
     this.repoStatus = new RepoStatusTracker(deps);
     this.analytics = new AnalyticsRecorder(deps);
     this.announcer = new Announcer(deps, ai);
+    this.knownIssues = new KnownIssuesUpdater(deps);
   }
 
   /** Queues newly filed tickets, and new issues opened on GitHub, where triage is on for them (only those after it was switched on). */

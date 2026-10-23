@@ -54,6 +54,7 @@ const CAPABILITIES: [string, string, string, string][] = [
   ['AI triage: review suggestions and change its pages', 'yes', 'yes', 'maybe'],
   ['Contributor roles', 'yes', 'yes', 'maybe'],
   ['Announcements: post releases and change their settings', 'yes', 'yes', 'maybe'],
+  ['Bot features: the known-issues board', 'yes', 'yes', 'maybe'],
   ['Apps & repositories', 'yes', 'yes', 'maybe'],
   ['Server health', 'yes', 'yes', 'maybe'],
   ['File cleanup rules and storage limit', 'yes', 'yes', 'no'],
@@ -63,7 +64,7 @@ const CAPABILITIES: [string, string, string, string][] = [
 ];
 
 /** Short tool names for the access tags in the members table. */
-const TOOL_TAGS: Record<Tool, string> = { tickets: 'Tickets', issues: 'Issues', repos: 'Repos', analytics: 'Analytics', triage: 'Triage', contributors: 'Roles', announcements: 'Announce', setup: 'Apps', workspace: 'Health' };
+const TOOL_TAGS: Record<Tool, string> = { tickets: 'Tickets', issues: 'Issues', repos: 'Repos', analytics: 'Analytics', triage: 'Triage', contributors: 'Roles', announcements: 'Announce', bot: 'Bot', setup: 'Apps', workspace: 'Health' };
 const LEVEL_NAMES: Record<AccessLevel, string> = { none: 'No access', view: 'View', edit: 'Edit' };
 const SET_NAMES: Record<AccessLevel, string> = { none: 'No access', view: 'View all', edit: 'Edit all' };
 

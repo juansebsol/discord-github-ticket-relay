@@ -1,7 +1,7 @@
 import type { Role } from './types.js';
 
 /** The tools in the sidebar, in order. Each one has pages (areas) an admin can open to moderators. */
-export const TOOLS = ['analytics', 'repos', 'tickets', 'issues', 'triage', 'contributors', 'announcements', 'setup', 'workspace'] as const;
+export const TOOLS = ['analytics', 'repos', 'tickets', 'issues', 'triage', 'contributors', 'announcements', 'bot', 'setup', 'workspace'] as const;
 export type Tool = (typeof TOOLS)[number];
 export type AccessLevel = 'none' | 'view' | 'edit';
 
@@ -44,13 +44,14 @@ export const AREAS = {
   'announcements': { tool: 'announcements', name: 'Posts', desc: 'New releases and their posts in Discord. Edit: post, edit, rewrite and skip them, and announce a release by hand.', levels: ['view', 'edit'] },
   'announcement-settings': { tool: 'announcements', name: 'Settings', desc: 'On or off, review first or automatic, the channel, the notes, the message and pings.', levels: ['view', 'edit'] },
   'announcement-pings': { tool: 'announcements', name: 'Pings panel', desc: 'The “Get update pings” message in Discord. Edit: change, publish or remove it.', levels: ['view', 'edit'] },
+  'known-issues': { tool: 'bot', name: 'Known issues', desc: 'The known-issues board in Discord. Edit: its settings, pinning, hiding and notes on issues, and publishing or removing it.', levels: ['view', 'edit'] },
   'apps': { tool: 'setup', name: 'Apps & repositories', desc: 'Apps and their repositories.', levels: ['view', 'edit'] },
   'health': { tool: 'workspace', name: 'Server health', desc: 'Processes, memory and alerts. Edit: Dev mode.', levels: ['view', 'edit'] },
 } as const satisfies Record<string, AreaDef>;
 export type Area = keyof typeof AREAS;
 export const AREA_KEYS = Object.keys(AREAS) as Area[];
 
-export const TOOL_NAMES: Record<Tool, string> = { tickets: 'Discord tickets', issues: 'GitHub issues', repos: 'Repo status', analytics: 'Analytics', triage: 'AI triage', contributors: 'Contributor roles', announcements: 'Announcements', setup: 'Setup', workspace: 'Workspace' };
+export const TOOL_NAMES: Record<Tool, string> = { tickets: 'Discord tickets', issues: 'GitHub issues', repos: 'Repo status', analytics: 'Analytics', triage: 'AI triage', contributors: 'Contributor roles', announcements: 'Announcements', bot: 'Bot features', setup: 'Setup', workspace: 'Workspace' };
 
 /** A tool's pages, in order. */
 export function areasOf(tool: Tool): Area[] {

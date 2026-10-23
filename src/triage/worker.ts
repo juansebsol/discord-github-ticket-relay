@@ -65,6 +65,12 @@ export class TriageWorker {
       } catch (err) {
         this.engine.deps.log.error({ err: (err as Error).message }, 'announcements loop error');
       }
+      // Bot features › Known issues: each posted board, every 10 minutes (edited only when it changed).
+      try {
+        await this.engine.knownIssues.tick();
+      } catch (err) {
+        this.engine.deps.log.error({ err: (err as Error).message }, 'known issues loop error');
+      }
       await new Promise<void>((resolve) => {
         const timer = setTimeout(resolve, this.opts.indexMs ?? 15_000);
         this.wakeIndex = () => {

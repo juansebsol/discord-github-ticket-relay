@@ -137,6 +137,7 @@ export function layout(ctx: PageContext, opts: { title: string; active: string; 
         ${tool(access, 'triage', review)}
         ${tool(access, 'contributors')}
         ${tool(access, 'announcements')}
+        ${tool(access, 'bot')}
         <div class="nav-label">Workspace</div>
         ${manage ? navItem(`${base}/members`, 'Members & permissions', 'users', a === 'members') : lockedNavItem('Members & permissions', 'users')}
         ${manage ? navItem(`${base}/settings`, 'Settings', 'settings', a === 'settings') : lockedNavItem('Settings', 'settings')}

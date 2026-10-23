@@ -14,6 +14,7 @@ import { getTriageSettings, monthlyUsage } from '../../triage/settings.js';
 import { getStatusSettings, statusRepos, statusRows } from '../../repo-status/tracker.js';
 import { analyticsRepos, getAnalyticsSettings } from '../../analytics/recorder.js';
 import { announcedRepos, announcementCounts, appAnnounceSettings, getAnnouncementSettings } from '../../announcements/settings.js';
+import { checkBoard, getBoardRow, getKnownIssuesSettings, issueOverrides } from '../../bot-features/known-issues.js';
 import type { StepState } from '../layout.js';
 import { setFlash } from '../session.js';
 import type { Web, WorkspaceRequestContext } from '../server.js';
@@ -42,7 +43,7 @@ import { areaHref, canOpen, canOpenIssue, firstPage, panelPill, repoSyncState, T
 // ---- Overview -----------------------------------------------------------------------------------
 
 /** The tools with a card on the overview, in sidebar order. */
-const OVERVIEW_TOOLS: readonly ToolName[] = ['analytics', 'repos', 'tickets', 'issues', 'triage', 'contributors', 'announcements'];
+const OVERVIEW_TOOLS: readonly ToolName[] = ['analytics', 'repos', 'tickets', 'issues', 'triage', 'contributors', 'announcements', 'bot'];
 
 const DAY_MS = 86_400_000;
 /** Latest goes back this far for issues opened on GitHub (the others are newest first by index). */
@@ -325,7 +326,29 @@ async function announcementsCard({ web, ctx }: Shared): Promise<ToolCard> {
   };
 }
 
-const CARDS: Record<ToolName, (s: Shared) => Promise<ToolCard>> = { tickets: ticketsCard, issues: issuesCard, repos: reposCard, analytics: analyticsCard, triage: triageCard, contributors: contributorsCard, announcements: announcementsCard };
+async function botCard({ web, ctx, dc }: Shared): Promise<ToolCard> {
+  const { db } = web.deps;
+  const b = ctx.base;
+  const [s, row, overrides] = await Promise.all([getKnownIssuesSettings(db, ctx.workspace.id), getBoardRow(db, ctx.workspace.id), issueOverrides(db, ctx.workspace.id)]);
+  const board = await checkBoard(web.deps, ctx.workspace.id, dc, { live: false });
+  const kept = [...overrides.values()];
+  return {
+    tool: 'bot',
+    meta: s.enabled ? `Known issues${s.channelName ? ` in #${s.channelName}` : ''}${board.state === 'published' ? ` · changed ${timeAgo(board.changedAt)}` : ''}` : 'Known issues board: off',
+    status: !s.enabled ? pill('Off', 'neutral') : board.state === 'published' ? pill('Live', 'ok') : board.state === 'missing' ? pill('Board deleted', 'warn') : pill('Not published', 'neutral'),
+    stats: [
+      { label: 'On the board', value: board.state === 'published' ? row?.issue_count ?? 0 : 0, area: 'known-issues', href: `${b}/bot/known-issues` },
+      { label: 'Pinned', value: kept.filter((o) => o.pinned).length, area: 'known-issues', href: `${b}/bot/known-issues` },
+      { label: 'Hidden', value: kept.filter((o) => o.hidden).length, area: 'known-issues', href: `${b}/bot/known-issues#hidden` },
+    ],
+    go: [
+      ...(!s.enabled && can(ctx.membership, 'known-issues.edit') ? [{ area: 'known-issues' as const, label: 'Set up the board', href: `${b}/bot/known-issues?view=settings`, primary: true }] : []),
+      { area: 'known-issues', label: 'Known issues' },
+    ],
+  };
+}
+
+const CARDS: Record<ToolName, (s: Shared) => Promise<ToolCard>> = { tickets: ticketsCard, issues: issuesCard, repos: reposCard, analytics: analyticsCard, triage: triageCard, contributors: contributorsCard, announcements: announcementsCard, bot: botCard };
 
 // ---- Latest: what just happened, across the tools ------------------------------------------------
 

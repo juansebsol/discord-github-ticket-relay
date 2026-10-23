@@ -45,7 +45,7 @@
   --discord-bg: #313338; --discord-embed: #2b2d31; --discord-text: #dbdee1; --discord-head: #f2f3f5;
   --discord-muted: #949ba4; --discord-select: #1e1f22; --discord-blurple: #5865f2; --discord-green-btn: #248046;
   --discord-embed-green: #2e9e5b; --discord-mention-bg: rgba(88, 101, 242, 0.3); --discord-mention: #c9cdfb; --discord-on: #ffffff; --discord-red: #f23f43;
-  --discord-link: #00a8fc; --discord-grey-btn: #4e5058;
+  --discord-link: #00a8fc; --discord-grey-btn: #4e5058; --discord-embed-amber: #d99a1e;
   /* data colors (dots only) */
   --dot-0: #d73a4a; --dot-1: #1a9fa8; --dot-2: #8250df; --dot-3: #0e8a16; --dot-4: #d97706; --dot-5: #3498db; --dot-6: #e4609b; --dot-7: #6b7280;
   --role-0: #2ecc71; --role-1: #3498db; --role-2: #9b59b6; --role-3: #e67e22; --role-4: #e91e63; --role-5: #1abc9c;
@@ -666,6 +666,7 @@ dl.props dd .ic { color: var(--muted); }
 .dp-tag { background: var(--discord-blurple); color: var(--discord-on); font-size: 10px; font-weight: 600; padding: 0 4px; border-radius: 3px; margin-left: 4px; vertical-align: 1px; }
 .dp-embed { margin-top: 6px; background: var(--discord-embed); border-left: 4px solid var(--discord-blurple); border-radius: 4px; padding: 10px 14px 12px; }
 .dp-embed.green { border-left-color: var(--discord-embed-green); }
+.dp-embed.amber { border-left-color: var(--discord-embed-amber); }
 .dp-embed h4 { color: var(--discord-head); font-size: 15px; line-height: 22px; margin: 0 0 4px; }
 .dp-embed p { margin: 0; font-size: 13px; line-height: 19px; }
 .dp-h { display: block; color: var(--discord-head); font-weight: 600; font-size: 14px; margin-top: 6px; }
@@ -1896,3 +1897,12 @@ a.rs-why:hover { border-color: currentColor; }
   .ann-btn { grid-template-columns: minmax(0, 1fr) 32px; }
   .ann-btn > input[name="btn_url"], .ann-btn > .select { grid-column: 1 / 2; }
 }
+
+/* ---- Bot features › Known issues --------------------------------------------------------------- */
+
+.ki-views { margin: 0 0 16px; }
+.ki-meta { gap: 6px; flex-wrap: wrap; }
+.ki-table td { vertical-align: top; }
+.ki-status { font-size: 13px; line-height: 18px; color: var(--text); }
+.ki-status.ok { color: var(--ok-text); }
+.ki-status.warn { color: var(--warn-text); }

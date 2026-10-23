@@ -37,6 +37,7 @@ import { registerTriageActivityRoutes } from './routes/triage-activity.js';
 import { registerTriageBulkRoutes } from './routes/triage-bulk.js';
 import { registerContributorRoutes } from './routes/contributors.js';
 import { registerAnnouncementRoutes } from './routes/announcements.js';
+import { registerBotFeatureRoutes } from './routes/bot-features.js';
 import { registerTicketTypeRoutes } from './routes/ticket-types.js';
 import { registerFileRoutes, UPLOAD_ROUTE } from './routes/files.js';
 import { registerIssueRoutes } from './routes/issues.js';
@@ -282,6 +283,7 @@ export async function buildServer(deps: Deps, processor: Processor, opts: { logg
   registerMemberRoutes(app, web);
   registerContributorRoutes(app, web);
   registerAnnouncementRoutes(app, web);
+  registerBotFeatureRoutes(app, web);
   registerTicketTypeRoutes(app, web);
   registerFileRoutes(app, web);
   registerIssueRoutes(app, web);

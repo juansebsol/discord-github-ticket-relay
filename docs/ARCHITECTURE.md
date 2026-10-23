@@ -154,6 +154,16 @@ Discord endpoint, OAuth), one or more queue workers, and an optional triage work
   The "Get update pings" message (`announcement_panels`) has a button per ping role
   (`an:role:<id>`); the interaction is deferred, then the role is added or removed and the reply
   filled in. Only roles announcements ping can be given this way.
+- **Bot features › Known issues** (`src/bot-features/known-issues.ts`, off by default per
+  workspace in `known_issues_settings`): the board is computed from the database alone: issues
+  ranked by Discord tickets as Repo status › Most reported counts them, each one's status from the
+  pull request index (`fixesFor`) and the releases the issue sync keeps (an open pull request:
+  being worked on; merged and not in a release: coming; in one: fixed in it; closed with no pull
+  request known: the first release after it closed). Closed as not planned is left off, fixed
+  ones stay `fixed_days`, and `known_issue_overrides` holds the team's pins, hides, titles and
+  notes. The posted message (`known_issue_boards`) is looked at every 10 minutes by the worker's
+  index loop, and right after a change in the console, and edited only when its content (all but
+  the "Updated" time) changed; deleted in Discord, it's marked so and posted again on request.
 - **No Discord gateway.** The bot is driven entirely by Discord's HTTP interactions endpoint and
   REST API. It needs no privileged intents and no slash-command registration.
 - **GitHub App auth.** Short-lived installation tokens are minted from the app's private key
@@ -177,7 +187,7 @@ Discord endpoint, OAuth), one or more queue workers, and an optional triage work
   `triage.prompt.view`. Non-members receive 404 on workspace routes.
 - The console's tools (Analytics `/analytics`, Repo status `/repos`, Discord tickets `/tickets`,
   GitHub issues `/issues`, AI triage `/triage`, Contributor roles `/contributors`, Announcements
-  `/announcements`) each have with one tab per page in `AREAS` order and a
+  `/announcements`, Bot features `/bot`) each have with one tab per page in `AREAS` order and a
   shared header (`src/web/routes/tool.ts`). A tool opens on the first page the person can see;
   pages they can't open show locked. Addresses from before (`/tickets/triage…`,
   `/tickets/issues…`) redirect: 301 for GET, 307 for forms.
@@ -257,6 +267,7 @@ stable user ID are recorded in the body.
 | `submission_events` | Append-only timeline for investigation |
 | `contributor_settings`, `contributor_panels`, `contributor_tiers` | On/off, panel channel, published panel, and role tiers (role + minimum contributions) per workspace |
 | `announcement_settings`, `announcement_apps`, `announcements`, `announcement_checks`, `announcement_panels` | Announcements: on/off, mode, channel, notes, templates and ping role; each app's on/off, channel and role; each release with its notes, status and post; when each repository was last checked; the "Get update pings" message |
+| `known_issues_settings`, `known_issue_overrides`, `known_issue_boards` | Bot features › Known issues: on/off, channel, what goes on the board and its texts; pins, hides, titles and notes per issue; the posted board and when it last changed |
 | `analytics_settings`, `download_assets`, `download_counts`, `download_days`, `download_sync`, `repo_star_changes` | Analytics: on/off; each release file and its total; downloads per 30 minutes (then per day); per repository, when recording began, the last slot read, the star count and any error; the change in the star count per 30 minutes |
 | `pull_index` | Pull requests of the indexed repositories (open, and closed for 90 days), with the issues each is for |
 | `repo_status_settings`, `repo_status` | Repo status: on/off, the repositories and how often per workspace; what was last read per repository (stats, the kept activity, the icon, the error and the GraphQL budget left) |
