@@ -490,12 +490,110 @@
   function syncTplRole() { setTplVar('role', tplRoleOn && tplRoleOn.checked && tplRole && tplRole.value ? '<@&' + tplRole.value + '>' : ''); }
   if (tplRole) tplRole.addEventListener('change', syncTplRole);
   if (tplRoleOn) tplRoleOn.addEventListener('change', syncTplRole);
-  $$('[data-toggle-show]').forEach(function (el) {
-    el.addEventListener('change', function () {
-      var t = document.getElementById(el.getAttribute('data-toggle-show'));
-      if (t) t.hidden = !el.checked;
+
+  // Announcements › Settings: the buttons under a post. Rows can be added (empty, or for one of the
+  // preview release's files), removed and edited; each says what its link finds in that release,
+  // and the preview's buttons follow. Mirrors resolveLink() in src/announcements/message.ts.
+  (function () {
+    var editor = document.querySelector('[data-btn-editor]');
+    if (!editor) return;
+    var rowsBox = editor.querySelector('[data-btn-rows]');
+    var tpl = document.getElementById('ann-btn-row');
+    var max = Number(editor.getAttribute('data-btn-max')) || 10;
+    var addBtn = editor.querySelector('[data-btn-add]');
+    var suggest = editor.querySelector('[data-btn-suggest]');
+    var host = tplHost();
+    var rel = host && host.getAttribute('data-tpl-release') ? JSON.parse(host.getAttribute('data-tpl-release')) : null;
+    var notesOn = document.getElementById('ann-notes-btn');
+    var notesLabel = document.getElementById('notes_button_label');
+    function vars() { return rel ? { app: rel.appName, version: rel.tag, number: rel.tag.replace(/^v(?=\d)/i, ''), link: rel.releaseUrl } : {}; }
+    function matchFile(pattern) {
+      var p = pattern.trim();
+      if (!p || !rel) return null;
+      var re = new RegExp('^' + p.split('*').map(function (x) { return x.replace(/[.+?^${}()|[\]\\]/g, '\\$&'); }).join('.*') + '$', 'i');
+      for (var i = 0; i < rel.files.length; i++) if (re.test(rel.files[i].name)) return rel.files[i];
+      return null;
+    }
+    function resolve(template) {
+      var v = vars(), file = null, missing = null;
+      var out = template.trim().replace(/\{(\w+)(?::([^}]*))?\}/g, function (m, k, arg) {
+        if (k === 'file') {
+          var f = matchFile(arg || '');
+          if (!f) missing = (arg || '').trim(); else file = f.name;
+          return f ? f.url : '';
+        }
+        if (k === 'link') return rel ? rel.releaseUrl : m;
+        return Object.prototype.hasOwnProperty.call(v, k) && arg === undefined ? encodeURIComponent(v[k]) : m;
+      });
+      if (missing !== null) return { url: null, file: null, missing: missing };
+      var ok = false;
+      try { var u = new URL(out); ok = (u.protocol === 'https:' || u.protocol === 'http:') && out.length <= 512; } catch (e) { ok = false; }
+      return { url: ok ? out : null, file: file, missing: null };
+    }
+    function label(text) {
+      var v = vars();
+      return text.replace(/\{(app|version|number)\}/g, function (m, k) { return v[k] !== undefined ? v[k] : m; }).trim().slice(0, 80);
+    }
+    function sync() {
+      var rows = $$('[data-btn-row]', rowsBox);
+      var shown = [];
+      rows.forEach(function (row) {
+        var l = row.querySelector('[name="btn_label"]').value;
+        var url = row.querySelector('[name="btn_url"]').value;
+        var sel = row.querySelector('[name="btn_app"]');
+        var st = row.querySelector('[data-btn-status]');
+        if (!l.trim() && !url.trim()) { st.textContent = ''; return; }
+        if (sel.value && rel && rel.appId && sel.value !== rel.appId) { st.textContent = 'Only for ' + sel.options[sel.selectedIndex].text; return; }
+        var r = resolve(url);
+        if (r.missing !== null) st.textContent = rel && rel.files.length ? 'Left out for ' + rel.tag + ': no file matches ' + (r.missing || 'the pattern') : 'Shown when a release has a matching file';
+        else if (!r.url) st.textContent = 'Not a web address yet: left out';
+        else st.textContent = r.file ? rel.tag + ': ' + r.file : r.url;
+        if (r.url && label(l)) shown.push(label(l));
+      });
+      if (notesOn && notesOn.checked) shown.push(label(notesLabel && notesLabel.value.trim() ? notesLabel.value : 'Release notes') || 'Release notes');
+      var pv = document.getElementById('pv-buttons');
+      if (pv) {
+        var arrow = pv.getAttribute('data-arrow') || '';
+        pv.innerHTML = shown.slice(0, 25).map(function (t) { return '<span class="dp-button grey">' + escapeHtml(t) + arrow + '</span>'; }).join('');
+        pv.hidden = !shown.length;
+      }
+      if (addBtn) addBtn.disabled = rows.length >= max;
+      if (suggest) suggest.disabled = rows.length >= max;
+    }
+    function changed() { rowsBox.dispatchEvent(new Event('input', { bubbles: true })); }
+    function addRow(l, url) {
+      if (!tpl || $$('[data-btn-row]', rowsBox).length >= max) return;
+      var row = tpl.content.firstElementChild.cloneNode(true);
+      row.querySelector('[name="btn_label"]').value = l || '';
+      row.querySelector('[name="btn_url"]').value = url || '';
+      rowsBox.appendChild(row);
+      changed();
+      row.querySelector(l ? '[name="btn_url"]' : '[name="btn_label"]').focus();
+    }
+    editor.addEventListener('input', sync);
+    editor.addEventListener('change', sync);
+    [notesOn, notesLabel].forEach(function (el) { if (el) { el.addEventListener('input', sync); el.addEventListener('change', sync); } });
+    if (addBtn) addBtn.addEventListener('click', function () { addRow('', ''); });
+    if (suggest) suggest.addEventListener('change', function () {
+      var o = suggest.options[suggest.selectedIndex];
+      if (o && o.value) addRow(o.getAttribute('data-label') || '', o.value);
+      suggest.value = '';
     });
-  });
+    rowsBox.addEventListener('click', function (e) {
+      var b = e.target.closest('[data-btn-remove]');
+      if (!b) return;
+      var row = b.closest('[data-btn-row]');
+      var next = row.nextElementSibling || row.previousElementSibling;
+      row.remove();
+      changed();
+      var focus = next ? next.querySelector('[data-btn-remove]') : addBtn;
+      if (focus) focus.focus();
+    });
+    // Discard puts the rows back as they were saved.
+    var form = editor.closest('form');
+    if (form) $$('[data-discard]', form).forEach(function (b) { b.addEventListener('click', function () { location.reload(); }); });
+    sync();
+  })();
   function syncField(el) {
     var counter = el.id && document.querySelector('[data-counter-for="' + el.id + '"]');
     if (counter) counter.textContent = el.value.length + ' / ' + el.getAttribute('maxlength');

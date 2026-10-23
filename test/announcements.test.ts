@@ -1,5 +1,5 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
-import { announcementPayload, downloadLinks, fill, githubNotes } from '../src/announcements/message.js';
+import { announcementPayload, fill, githubNotes, resolveButtons, suggestButton } from '../src/announcements/message.js';
 import { EPHEMERAL } from '../src/discord/messages.js';
 import { createInvite } from '../src/domain/workspaces.js';
 import { eventually, form, get, grant, makeAdmin, makeApp, makeWorkspace, member, nextInteractionId, resetDb, sendInteraction, testDb, type Admin, type ConfiguredWorkspace, type TestEnv } from './helpers.js';
@@ -32,13 +32,16 @@ function release(tag: string, publishedAt: string, o: { body?: string; prereleas
   };
 }
 
+/** A download button per desktop platform, found by file name in every release. */
+const DOWNLOADS = { buttons: '1', btn_label: ['Windows', 'macOS', 'Linux'], btn_url: ['{file:*-windows-x64.msi}', '{file:*-macos-universal.dmg}', '{file:*-linux-x86_64.AppImage}'], btn_app: ['', '', ''], notes_button: '1' };
+
 /** Announcements on, posting in #releases (an announcement channel). */
-async function turnOn(fields: Record<string, string> = {}) {
-  const res = await post('/announcements/settings', {
-    enabled: '1', mode: 'review', channel_id: releasesChannel, notes_source: 'claude', download_buttons: '1', apps: '1',
+async function turnOn(fields: Record<string, string | string[]> = {}) {
+  const res = await env.server.inject({ method: 'POST', url: `${w()}/announcements/settings`, ...form(ws.owner, {
+    enabled: '1', mode: 'review', channel_id: releasesChannel, notes_source: 'claude', apps: '1', ...DOWNLOADS,
     ...Object.fromEntries(ws.apps.map((a) => [`app_${a.id}_on`, '1'])),
     ...fields,
-  });
+  }) });
   expect(res.statusCode).toBe(302);
 }
 
@@ -57,24 +60,46 @@ afterAll(async () => {
 });
 
 describe('Announcements: the message', () => {
-  it('fills the templates, links one download per platform and pings only the chosen role', () => {
-    const r = { appName: 'PhotoCraft', tag: 'v1.1.0', releaseName: null, releaseUrl: 'https://github.com/o/r/releases/tag/v1.1.0', publishedAt: new Date('2026-10-20T10:00:00Z'), notes: '- Faster', files: release('v1.1.0', '').assets.map((a) => ({ name: a.name, url: `https://dl/${a.name}` })) };
-    expect(downloadLinks(r.files)).toEqual([
-      { label: 'Windows', url: 'https://dl/app-v1.1.0-windows-x64.msi' },
-      { label: 'macOS', url: 'https://dl/app-v1.1.0-macos-universal.dmg' },
-      { label: 'Linux', url: 'https://dl/app-v1.1.0-linux-x86_64.AppImage' },
-    ]);
-    const s = { messageText: null, titleText: null, bodyText: 'Update now!\n{notes}\n{unknown}', downloadButtons: true };
+  const r = { appId: 'app-photo', appName: 'PhotoCraft', tag: 'v1.1.0', releaseName: null, releaseUrl: 'https://github.com/o/r/releases/tag/v1.1.0', publishedAt: new Date('2026-10-20T10:00:00Z'), notes: '- Faster', files: release('v1.1.0', '').assets.map((a) => ({ name: a.name, url: `https://dl/${a.name}` })) };
+
+  it('fills the templates and pings only the chosen role', () => {
+    const s = { messageText: null, titleText: null, bodyText: 'Update now!\n{notes}\n{unknown}', buttons: [], notesButton: true, notesButtonLabel: null };
     const pinged = announcementPayload(r, s, ROLE_ALL);
     expect(pinged.content).toBe(`<@&${ROLE_ALL}> **PhotoCraft v1.1.0** is out!`);
     expect(pinged.allowed_mentions).toEqual({ parse: [], roles: [ROLE_ALL] });
     expect(pinged.embeds[0]).toMatchObject({ title: 'What’s new in v1.1.0', url: r.releaseUrl, description: 'Update now!\n- Faster\n{unknown}', timestamp: '2026-10-20T10:00:00.000Z' });
-    expect(pinged.components[0]!.components.map((b) => b.label)).toEqual(['Windows', 'macOS', 'Linux', 'Release notes']);
-    const quiet = announcementPayload(r, { ...s, downloadButtons: false }, null);
+    expect(pinged.components).toEqual([{ type: 1, components: [{ type: 2, style: 5, label: 'Release notes', url: r.releaseUrl }] }]);
+    const quiet = announcementPayload(r, { ...s, notesButton: false }, null);
     expect(quiet.content).toBe('**PhotoCraft v1.1.0** is out!');
     expect(quiet.allowed_mentions).toEqual({ parse: [] });
-    expect(quiet.components[0]!.components.map((b) => b.label)).toEqual(['Release notes']);
+    expect(quiet.components).toEqual([]);
     expect(fill('{app} {nope}', { app: 'A', version: '', name: '', notes: '', link: '', role: '' })).toBe('A {nope}');
+  });
+
+  it('builds the buttons you set: a file of the release by name, a web address with the version, or a button for one app', () => {
+    const buttons = [
+      { label: 'Windows', url: '{file:*-WINDOWS-x64.msi}', appId: null },
+      { label: 'Windows ARM', url: '{file:*-windows-arm64.exe}', appId: null },
+      { label: 'Website {number}', url: 'https://photocraft.app/download/{number}?app={app}', appId: null },
+      { label: 'Changelog', url: '{link}#changes', appId: null },
+      { label: 'Vector only', url: 'https://vector.app', appId: 'app-vector' },
+      { label: 'Broken', url: 'not a link', appId: null },
+    ];
+    expect(resolveButtons(buttons, r)).toEqual({
+      shown: [
+        { label: 'Windows', url: 'https://dl/app-v1.1.0-windows-x64.msi', file: 'app-v1.1.0-windows-x64.msi' },
+        { label: 'Website 1.1.0', url: 'https://photocraft.app/download/1.1.0?app=PhotoCraft', file: null },
+        { label: 'Changelog', url: `${r.releaseUrl}#changes`, file: null },
+      ],
+      left: [{ label: 'Windows ARM', why: 'no file matches *-windows-arm64.exe' }, { label: 'Broken', why: 'its link isn’t a web address' }],
+    });
+    // More than five go on more rows; the release notes button keeps its own label.
+    const many = Array.from({ length: 6 }, (_, i) => ({ label: `B${i}`, url: `https://x.y/${i}`, appId: null }));
+    const payload = announcementPayload(r, { messageText: null, titleText: null, bodyText: null, buttons: many, notesButton: true, notesButtonLabel: 'All the changes' }, null);
+    expect(payload.components.map((row) => row.components.map((b) => b.label))).toEqual([['B0', 'B1', 'B2', 'B3', 'B4'], ['B5', 'All the changes']]);
+    // Ready-made from a file: the name from the version on, so it finds the same file next time.
+    expect(suggestButton('photocraft-0.12.0-windows-arm64.msi', 'v0.12.0')).toEqual({ label: 'Windows ARM (MSI)', url: '{file:*-windows-arm64.msi}', appId: null });
+    expect(suggestButton('PhotoCraft.dmg', 'v0.12.0')).toEqual({ label: 'macOS (DMG)', url: '{file:PhotoCraft.dmg}', appId: null });
   });
 
   it('makes GitHub’s notes fit Discord: no comments, images or pings', () => {
@@ -207,6 +232,31 @@ describe('Announcements: new releases', () => {
     expect((await page('/announcements?show=waiting')).body).toContain('Failed');
     await post(`/announcements/${row.id}`, { intent: 'post' });
     expect((await rows())[0].status).toBe('posted');
+  });
+});
+
+describe('Announcements: buttons in Settings', () => {
+  it('shows what each link finds in the latest release, offers its files, and refuses a link that can’t work', async () => {
+    repo().releases = [release('v1.0.0', ago(60))];
+    await turnOn({ buttons: '1', btn_label: ['Windows', 'Store'], btn_url: ['{file:*-windows-x64.msi}', '{file:*.msix}'], btn_app: ['', ws.apps[0]!.id], notes_button_label: 'Full changelog' });
+    const page1 = (await page('/announcements/settings')).body;
+    // The preview uses PhotoCraft's latest release, read from GitHub.
+    expect(page1).toContain('v1.0.0: app-v1.0.0-windows-x64.msi');
+    expect(page1).toContain('Left out for v1.0.0: no file matches *.msix');
+    expect(page1).toContain('data-label="Linux (AppImage)"');
+    expect(page1).toContain('value="{file:*-linux-x86_64.AppImage}"');
+    expect(page1).toMatch(/id="pv-buttons"[^>]*>.*Windows.*Full changelog/s);
+    const s = (await env.db.query('SELECT buttons, notes_button_label FROM announcement_settings')).rows[0];
+    expect(s.buttons).toEqual([{ label: 'Windows', url: '{file:*-windows-x64.msi}', appId: null }, { label: 'Store', url: '{file:*.msix}', appId: ws.apps[0]!.id }]);
+    expect(s.notes_button_label).toBe('Full changelog');
+
+    // Half filled in, or a link that isn't one: nothing is saved.
+    await turnOn({ buttons: '1', btn_label: ['Windows'], btn_url: ['ftp://x'], btn_app: [''] });
+    await turnOn({ buttons: '1', btn_label: [''], btn_url: ['https://x.y'], btn_app: [''] });
+    expect((await env.db.query('SELECT buttons FROM announcement_settings')).rows[0].buttons).toHaveLength(2);
+    // Release notes button off, no buttons of your own: no buttons at all.
+    await turnOn({ buttons: '1', btn_label: [], btn_url: [], btn_app: [], notes_button: [] });
+    expect((await env.db.query('SELECT buttons, notes_button FROM announcement_settings')).rows[0]).toEqual({ buttons: [], notes_button: false });
   });
 });
 

@@ -148,7 +148,9 @@ Discord endpoint, OAuth), one or more queue workers, and an optional triage work
   for someone (Review first, anything added by hand, rewrites) or is posted (Automatic). A post
   goes to the app's channel (`announcement_apps` can override channel and role), with a nonce so
   a retried post isn't doubled, `allowed_mentions` limited to the one role, and is crossposted in
-  an announcement channel; a busy Discord is retried with backoff, a refusal marks it `failed`.
+  an announcement channel. Its buttons are the workspace's own (`announcement_settings.buttons`:
+  label, link and app); a link's `{file:pattern}` is resolved against the release's files when it's
+  posted (no match: the button is left out), and the release notes button is optional; a busy Discord is retried with backoff, a refusal marks it `failed`.
   The "Get update pings" message (`announcement_panels`) has a button per ping role
   (`an:role:<id>`); the interaction is deferred, then the role is added or removed and the reply
   filled in. Only roles announcements ping can be given this way.

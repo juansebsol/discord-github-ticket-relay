@@ -89,7 +89,7 @@ export async function addAnnouncement(q: Queryable, workspaceId: string, app: Ap
 /** A release as the message builder takes it (the notes GitHub wrote, until there are others). */
 export function viewOf(row: AnnouncementRow): ReleaseView {
   return {
-    appName: row.app_name, tag: row.tag, releaseName: row.release_name, releaseUrl: row.release_url, publishedAt: row.published_at,
+    appId: row.app_id, appName: row.app_name, tag: row.tag, releaseName: row.release_name, releaseUrl: row.release_url, publishedAt: row.published_at,
     notes: row.notes ?? (githubNotes(row.github_notes) || EMPTY_NOTES), files: row.release_files ?? [],
   };
 }

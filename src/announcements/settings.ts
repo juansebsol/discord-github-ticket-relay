@@ -20,6 +20,19 @@ export const TEMPLATE_DEFAULTS = {
 export const TEMPLATE_LIMITS = { message: 500, title: 200, body: 1500 } as const;
 export const PLACEHOLDERS = ['app', 'version', 'name', 'notes', 'link', 'role'] as const;
 
+/**
+ * A button under a post: its label, and its link (a web address, or {file:pattern} for a file of
+ * the release). appId: only for that app's releases (null: every app).
+ */
+export interface AnnounceButton {
+  label: string;
+  url: string;
+  appId: string | null;
+}
+export const BUTTONS_MAX = 10;
+export const BUTTON_LIMITS = { label: 80, url: 512 } as const;
+export const NOTES_BUTTON_DEFAULT = 'Release notes';
+
 export const PANEL_DEFAULTS = {
   title: 'Get update pings',
   intro: 'Pick the apps you want a ping for when a new version comes out. Click again to stop.',
@@ -41,7 +54,11 @@ export interface AnnouncementSettings {
   messageText: string | null;
   titleText: string | null;
   bodyText: string | null;
-  downloadButtons: boolean;
+  /** The workspace's own buttons, in order. */
+  buttons: AnnounceButton[];
+  /** A button to the release on GitHub, and its label (null: "Release notes"). */
+  notesButton: boolean;
+  notesButtonLabel: string | null;
   /** Off until a role is picked: posts ping nobody. */
   pingEnabled: boolean;
   roleId: string | null;
@@ -62,7 +79,9 @@ interface SettingsRow {
   message_text: string | null;
   title_text: string | null;
   body_text: string | null;
-  download_buttons: boolean;
+  buttons: unknown;
+  notes_button: boolean;
+  notes_button_label: string | null;
   ping_enabled: boolean;
   role_id: string | null;
   role_name: string | null;
@@ -85,7 +104,9 @@ export async function getAnnouncementSettings(q: Queryable, workspaceId: string)
     messageText: r?.message_text ?? null,
     titleText: r?.title_text ?? null,
     bodyText: r?.body_text ?? null,
-    downloadButtons: r ? Boolean(r.download_buttons) : true,
+    buttons: cleanButtons(r?.buttons),
+    notesButton: r ? Boolean(r.notes_button) : true,
+    notesButtonLabel: r?.notes_button_label ?? null,
     pingEnabled: Boolean(r?.ping_enabled),
     roleId: r?.role_id ?? null,
     roleName: r?.role_name ?? null,
@@ -98,18 +119,29 @@ export async function getAnnouncementSettings(q: Queryable, workspaceId: string)
 export async function saveAnnouncementSettings(q: Queryable, workspaceId: string, s: AnnouncementSettings): Promise<void> {
   await q.query(
     `INSERT INTO announcement_settings (workspace_id, enabled, enabled_at, mode, channel_id, channel_name, include_prereleases, notes_source, notes_instructions,
-       message_text, title_text, body_text, download_buttons, ping_enabled, role_id, role_name, panel_title, panel_intro, updated_at)
-     VALUES ($1, $2, CASE WHEN $2 = 1 THEN now_ms() END, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, now_ms())
+       message_text, title_text, body_text, buttons, notes_button, notes_button_label, ping_enabled, role_id, role_name, panel_title, panel_intro, updated_at)
+     VALUES ($1, $2, CASE WHEN $2 = 1 THEN now_ms() END, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, now_ms())
      ON CONFLICT (workspace_id) DO UPDATE SET
        enabled_at = CASE WHEN excluded.enabled = 1 THEN COALESCE(CASE WHEN announcement_settings.enabled = 1 THEN announcement_settings.enabled_at END, now_ms()) ELSE announcement_settings.enabled_at END,
        enabled = excluded.enabled, mode = excluded.mode, channel_id = excluded.channel_id, channel_name = excluded.channel_name,
        include_prereleases = excluded.include_prereleases, notes_source = excluded.notes_source, notes_instructions = excluded.notes_instructions,
-       message_text = excluded.message_text, title_text = excluded.title_text, body_text = excluded.body_text, download_buttons = excluded.download_buttons,
+       message_text = excluded.message_text, title_text = excluded.title_text, body_text = excluded.body_text,
+       buttons = excluded.buttons, notes_button = excluded.notes_button, notes_button_label = excluded.notes_button_label,
        ping_enabled = excluded.ping_enabled, role_id = excluded.role_id, role_name = excluded.role_name,
        panel_title = excluded.panel_title, panel_intro = excluded.panel_intro, updated_at = now_ms()`,
     [workspaceId, s.enabled ? 1 : 0, s.mode, s.channelId, s.channelName, s.includePrereleases ? 1 : 0, s.notesSource, s.notesInstructions,
-      s.messageText, s.titleText, s.bodyText, s.downloadButtons ? 1 : 0, s.pingEnabled ? 1 : 0, s.roleId, s.roleName, s.panelTitle, s.panelIntro],
+      s.messageText, s.titleText, s.bodyText, JSON.stringify(s.buttons), s.notesButton ? 1 : 0, s.notesButtonLabel, s.pingEnabled ? 1 : 0, s.roleId, s.roleName, s.panelTitle, s.panelIntro],
   );
+}
+
+/** Stored buttons, kept only when they have a label and a link. */
+function cleanButtons(v: unknown): AnnounceButton[] {
+  if (!Array.isArray(v)) return [];
+  return v
+    .filter((b): b is Record<string, unknown> => Boolean(b) && typeof b === 'object')
+    .map((b) => ({ label: String(b.label ?? '').slice(0, BUTTON_LIMITS.label), url: String(b.url ?? '').slice(0, BUTTON_LIMITS.url), appId: typeof b.appId === 'string' && b.appId ? b.appId : null }))
+    .filter((b) => b.label.trim() && b.url.trim())
+    .slice(0, BUTTONS_MAX);
 }
 
 // ---- Each app ------------------------------------------------------------------------------------

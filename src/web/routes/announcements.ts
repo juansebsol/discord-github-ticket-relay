@@ -16,16 +16,20 @@ import {
   viewOf,
   type GitHubRelease,
 } from '../../announcements/announcer.js';
-import { announcementPayload, downloadLinks, EMPTY_NOTES, githubNotes, NOTES_MAX, templates, varsFor, type ReleaseView } from '../../announcements/message.js';
+import { announcementPayload, EMPTY_NOTES, githubNotes, NOTES_MAX, resolveButtons, resolveLink, suggestButton, templates, varsFor, type ReleaseView } from '../../announcements/message.js';
+import { classifyAsset } from '../../analytics/assets.js';
 import { checkPingPanel, publishPingPanel, unpublishPingPanel, workspacePingRoles, type PingRole } from '../../announcements/pings.js';
 import {
   announcedRepos,
   appAnnounceSettings,
   APP_DEFAULTS,
+  BUTTON_LIMITS,
+  BUTTONS_MAX,
   getAnnouncement,
   getAnnouncementSettings,
   INSTRUCTIONS_MAX,
   listAnnouncements,
+  NOTES_BUTTON_DEFAULT,
   PANEL_DEFAULTS,
   PANEL_LIMITS,
   PLACEHOLDERS,
@@ -34,6 +38,7 @@ import {
   targetFor,
   TEMPLATE_DEFAULTS,
   TEMPLATE_LIMITS,
+  type AnnounceButton,
   type AnnouncementRow,
   type AnnouncementSettings,
   type AnnouncementStatus,
@@ -105,47 +110,69 @@ const json = (v: unknown) => JSON.stringify(v);
 
 /**
  * An announcement as members will see it. The template parts carry their template and the values
- * (data-tpl, data-tpl-vars) so app.js redraws them while the fields are edited.
+ * (data-tpl, data-tpl-vars), and the buttons the release (data-tpl-release), so app.js redraws them
+ * while the fields are edited.
  */
-function announcementPreview(bot: BotIdentity, r: ReleaseView, s: Pick<AnnouncementSettings, 'messageText' | 'titleText' | 'bodyText' | 'downloadButtons'>, roleId: string | null, roleNames: Map<string, string>): SafeHtml {
+function announcementPreview(bot: BotIdentity, r: ReleaseView, s: Pick<AnnouncementSettings, 'messageText' | 'titleText' | 'bodyText' | 'buttons' | 'notesButton' | 'notesButtonLabel'>, roleId: string | null, roleNames: Map<string, string>): SafeHtml {
   const t = templates(s);
   const vars = varsFor(r, roleId);
   const payload = announcementPayload(r, s, roleId);
   const embed = payload.embeds[0]!;
-  const downloads = downloadLinks(r.files);
-  const button = (label: string) => html`<span class="dp-button grey">${label}${icon('arrow-up-right', 14)}</span>`;
-  return html`<div data-tpl-vars="${json(vars)}">${botMessage(bot, html`
+  const labels = payload.components.flatMap((row) => row.components.map((b) => b.label));
+  const arrow = icon('arrow-up-right', 14);
+  return html`<div data-tpl-vars="${json(vars)}" data-tpl-release="${json({ appId: r.appId, appName: r.appName, tag: r.tag, releaseUrl: r.releaseUrl, files: r.files })}">${botMessage(bot, html`
     <div class="dp-content" id="pv-message" data-tpl="${t.message}" ${payload.content ? '' : raw('hidden')}>${discordMd(payload.content, roleNames)}</div>
     <div class="dp-embed">
       <h4 id="pv-title" data-tpl="${t.title}" data-tpl-plain ${'title' in embed ? '' : raw('hidden')}><span class="dp-a">${'title' in embed ? embed.title : ''}</span></h4>
       <p id="pv-body" data-tpl="${t.body}">${discordMd('description' in embed ? String(embed.description) : '', roleNames)}</p>
       ${r.publishedAt ? html`<div class="dp-time">${r.publishedAt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' })}</div>` : ''}
     </div>
-    <div class="dp-buttons">${downloads.length ? html`<span id="pv-downloads" class="dp-buttons-in" ${s.downloadButtons ? '' : raw('hidden')}>${downloads.map((d) => button(d.label))}</span>` : ''}${button('Release notes')}</div>`, 'Preview of the announcement in Discord')}</div>`;
+    <div class="dp-buttons" id="pv-buttons" data-arrow="${arrow.toString()}" ${labels.length ? '' : raw('hidden')}>${labels.map((l) => html`<span class="dp-button grey">${l}${arrow}</span>`)}</div>`, 'Preview of the announcement in Discord')}</div>`;
 }
 
-/**
- * The newest release announced (or a sample) to preview the settings with: one of an app that
- * uses the workspace's channel and role when there is one, so the preview follows those fields.
- */
-function sampleRelease(rows: AnnouncementRow[], apps: AppRow[], appSettings: Map<string, AppAnnounceSettings>): ReleaseView & { appId: string | null } {
-  const ready = rows.filter((r) => r.status !== 'writing');
-  const plain = (appId: string | null) => !appId || (appSettings.get(appId)?.roleMode ?? 'default') === 'default';
-  const latest = ready.find((r) => plain(r.app_id)) ?? ready[0];
-  if (latest) return { ...viewOf(latest), appId: latest.app_id };
-  const app = apps.find((a) => plain(a.id)) ?? apps[0];
-  return {
-    appId: app?.id ?? null,
-    appName: app?.name ?? 'PhotoCraft', tag: 'v1.2.0', releaseName: null,
-    releaseUrl: app ? `https://github.com/${app.repo_owner}/${app.repo_name}/releases` : 'https://github.com',
-    publishedAt: new Date(), notes: SAMPLE_NOTES,
-    files: [{ name: 'app-1.2.0-windows-x64.msi', url: 'https://github.com' }, { name: 'app-1.2.0-macos-universal.dmg', url: 'https://github.com' }, { name: 'app-1.2.0-linux-x86_64.AppImage', url: 'https://github.com' }],
-  };
+/** The buttons as sent from Settings (rows left empty are dropped). Throws when one is half filled in or its link can't work. */
+function buttonsFrom(body: Record<string, unknown>, apps: AppRow[]): AnnounceButton[] {
+  const list = (v: unknown) => (v === undefined ? [] : Array.isArray(v) ? v.map(String) : [String(v)]);
+  const urls = list(body.btn_url);
+  const appIds = list(body.btn_app);
+  const buttons = list(body.btn_label)
+    .map((label, i) => ({ label: label.trim().slice(0, BUTTON_LIMITS.label), url: (urls[i] ?? '').trim().slice(0, BUTTON_LIMITS.url), appId: apps.some((a) => a.id === appIds[i]) ? appIds[i]! : null }))
+    .filter((b) => b.label || b.url);
+  for (const b of buttons) {
+    if (!b.label) throw new UserFacingError('Give every button a label.');
+    if (!b.url) throw new UserFacingError(`Give the “${b.label}” button a link.`);
+    if (!/^(https?:\/\/|\{(file:|link\}))/i.test(b.url)) throw new UserFacingError(`The “${b.label}” button’s link must start with https://, {link} or {file:…}.`);
+  }
+  if (buttons.length > BUTTONS_MAX) throw new UserFacingError(`Up to ${BUTTONS_MAX} buttons.`);
+  return buttons;
 }
 
 export function registerAnnouncementRoutes(app: FastifyInstance, web: Web): void {
   const { deps } = web;
   const base = (ctx: WorkspaceRequestContext) => `${ctx.base}/announcements`;
+
+  /**
+   * A release to preview the settings with: the newest one announced, preferably of an app that uses
+   * the workspace's channel and role (so the preview follows those fields), else that app's latest
+   * release on GitHub, else a made-up one. `real`: it has the release's actual files.
+   */
+  async function sampleRelease(wid: string, rows: AnnouncementRow[], apps: AppRow[], appSettings: Map<string, AppAnnounceSettings>): Promise<ReleaseView & { real: boolean }> {
+    const ready = rows.filter((r) => r.status !== 'writing');
+    const plain = (appId: string | null) => !appId || (appSettings.get(appId)?.roleMode ?? 'default') === 'default';
+    const latest = ready.find((r) => plain(r.app_id)) ?? ready[0];
+    if (latest) return { ...viewOf(latest), real: true };
+    const app = announcedRepos(apps, appSettings).find((a) => plain(a.id)) ?? apps[0];
+    const gh = app ? await getGitHubConnection(deps.db, wid) : null;
+    if (app && gh?.status === 'active' && deps.github) {
+      const r = await readReleases(deps.github, gh.installation_id, app.repo_owner, app.repo_name, 5).then((list) => list.find((x) => !x.draft && !x.prerelease)).catch(() => undefined);
+      if (r) return { appId: app.id, appName: app.name, tag: r.tag, releaseName: r.name, releaseUrl: r.url, publishedAt: r.publishedAt, notes: SAMPLE_NOTES, files: r.files, real: true };
+    }
+    return {
+      appId: app?.id ?? null, appName: app?.name ?? 'PhotoCraft', tag: 'v1.2.0', releaseName: null,
+      releaseUrl: app ? `https://github.com/${app.repo_owner}/${app.repo_name}/releases` : 'https://github.com',
+      publishedAt: new Date(), notes: SAMPLE_NOTES, files: [], real: false,
+    };
+  }
 
   // ---- Posts ------------------------------------------------------------------------------------
 
@@ -293,6 +320,8 @@ export function registerAnnouncementRoutes(app: FastifyInstance, web: Web): void
     const channelName = posted ? (row.channel_id === target.channelId ? target.channelName : null) : target.channelName;
     const link = posted && conn && row.channel_id && row.message_id ? `https://discord.com/channels/${conn.guild_id}/${row.channel_id}/${row.message_id}` : null;
     const view = viewOf(row);
+    const buttons = resolveButtons(s.buttons, view);
+    const buttonLabels = announcementPayload(view, s, null).components.flatMap((r) => r.components.map((b) => b.label));
     const roleNames = new Map(target.roleId ? [[target.roleId, target.roleName ?? 'role']] : []);
     const notesValue = row.notes ?? '';
     const canEditNotes = edit && !busy;
@@ -323,6 +352,7 @@ export function registerAnnouncementRoutes(app: FastifyInstance, web: Web): void
       <dt>Published</dt><dd>${row.published_at ? when(row.published_at) : html`<span class="em">—</span>`}</dd>
       <dt>Channel</dt><dd>${channelName ? `#${channelName}` : html`<span class="em">None chosen</span>`}</dd>
       <dt>Ping</dt><dd>${target.roleId ? tag(`@${target.roleName ?? 'role'}`, { cls: 'role' }) : html`<span class="em">${s.pingEnabled ? 'No ping for this app' : 'Off'}</span>`}</dd>
+      <dt>Buttons</dt><dd>${buttonLabels.length ? buttonLabels.map((l) => tag(l)) : html`<span class="em">None</span>`}${buttons.left.length ? html`<span class="small muted">Left out: ${buttons.left.map((l) => `${l.label} (${l.why})`).join(', ')}</span>` : ''}</dd>
     </dl>`;
 
     const body = html`
@@ -475,7 +505,28 @@ export function registerAnnouncementRoutes(app: FastifyInstance, web: Web): void
     const sorted = [...apps].sort((x, y) => x.position - y.position);
     const [guild, roles] = conn && deps.discord ? await Promise.all([inspectGuild(deps.discord, conn.guild_id), inspectRoles(deps.discord, conn.guild_id)]) : [null, null];
     const checks = await healthChecks(ctx, s, guild, roles, apps, appSettings);
-    const sample = sampleRelease(rows, sorted, appSettings);
+    const sample = await sampleRelease(wid, rows, sorted, appSettings);
+    const appName = new Map(sorted.map((a) => [a.id, a.name]));
+    // What a button's link finds in the preview's release, under its row (app.js keeps it current).
+    const btnStatus = (b: AnnounceButton): string => {
+      if (!b.label.trim() && !b.url.trim()) return '';
+      if (b.appId && sample.appId && b.appId !== sample.appId) return `Only for ${appName.get(b.appId) ?? 'another app'}`;
+      const link = resolveLink(b.url, sample);
+      if (link.missing !== null) return sample.real ? `Left out for ${sample.tag}: no file matches ${link.missing || 'the pattern'}` : 'Shown when a release has a matching file';
+      if (!link.url) return 'Not a web address yet: left out';
+      return link.file ? `${sample.tag}: ${link.file}` : link.url;
+    };
+    const btnRow = (b: AnnounceButton) => html`<div class="ann-btn" data-btn-row>
+      <input type="text" name="btn_label" value="${b.label}" maxlength="${String(BUTTON_LIMITS.label)}" placeholder="Label" aria-label="Button label">
+      <input type="text" name="btn_url" value="${b.url}" maxlength="${String(BUTTON_LIMITS.url)}" placeholder="https://… or {file:*-windows-x64.msi}" aria-label="Button link" class="mono" spellcheck="false" autocomplete="off">
+      ${selectWrap(html`<select name="btn_app" aria-label="Which apps"><option value="" ${b.appId ? '' : raw('selected')}>All apps</option>${sorted.map((a) => html`<option value="${a.id}" ${a.id === b.appId ? raw('selected') : ''}>${a.name}</option>`)}</select>`, { sm: true })}
+      ${edit ? html`<button type="button" class="icon-btn sm" data-btn-remove aria-label="Remove button" title="Remove button">${icon('x', 16)}</button>` : html`<span></span>`}
+      <div class="ann-btn-st small muted" data-btn-status>${btnStatus(b)}</div>
+    </div>`;
+    // Ready-made buttons for the preview release's files (each one's label and link can be changed).
+    const suggestions = sample.real
+      ? [...new Map(sample.files.filter((f) => classifyAsset(f.name).kind !== 'meta').map((f) => [f.name, { file: f.name, ...suggestButton(f.name, sample.tag) }])).values()].slice(0, 40)
+      : [];
     const sampleTarget = targetFor(s, sample.appId ? appSettings.get(sample.appId) : undefined);
     const previewRole = sampleTarget.roleId;
     // The ping and role fields redraw the preview only when the sample uses the workspace's role.
@@ -545,7 +596,23 @@ export function registerAnnouncementRoutes(app: FastifyInstance, web: Web): void
           ${textField({ id: 'title_text', label: 'Title', value: t.title, max: TEMPLATE_LIMITS.title, placeholder: TEMPLATE_DEFAULTS.title, defaultValue: TEMPLATE_DEFAULTS.title, preview: 'pv-title', hint: 'Links to the release on GitHub.' })}
           ${textField({ id: 'body_text', label: 'Text', value: t.body, max: TEMPLATE_LIMITS.body, rows: 3, placeholder: TEMPLATE_DEFAULTS.body, defaultValue: TEMPLATE_DEFAULTS.body, preview: 'pv-body' })}
         </div>
-        ${setting('Download buttons', 'A button for Windows, macOS and Linux, linking straight to each one’s download. The release notes button is always there.', switchInput({ name: 'download_buttons', checked: s.downloadButtons, label: 'Download buttons', id: 'ann-downloads', attrs: html`data-toggle-show="pv-downloads"` }), { flat: true, switchRow: true })}
+      </div>
+      <div class="section">
+        <div class="section-h"><div><h3>Buttons</h3><div class="desc">Under the post, in this order. A link is a web address, <code>{link}</code> (the release on GitHub) or <code>{file:pattern}</code>: one of the release’s files, with * for anything, so <code>{file:*-windows-x64.msi}</code> finds it in every release. A release without that file just doesn’t get the button. Labels and links can use <code>{app}</code>, <code>{version}</code> and <code>{number}</code> (the version without its v).</div></div></div>
+        <div class="ann-btns" data-btn-editor data-btn-max="${String(BUTTONS_MAX)}">
+          <input type="hidden" name="buttons" value="1">
+          ${s.buttons.length || edit ? html`<div class="ann-btn-head" aria-hidden="true"><span>Label</span><span>Link</span><span>For</span></div>` : ''}
+          <div data-btn-rows>${s.buttons.map(btnRow)}</div>
+          ${edit ? html`<noscript>${btnRow({ label: '', url: '', appId: null })}</noscript>
+            <div class="row ann-btn-add">
+              <button type="button" class="btn sm" data-btn-add ${s.buttons.length >= BUTTONS_MAX ? raw('disabled') : ''}><span class="lead">${icon('plus', 14)}</span><span class="lbl">Add button</span></button>
+              ${suggestions.length ? selectWrap(html`<select data-btn-suggest aria-label="${`Add a button for one of ${sample.appName} ${sample.tag}’s files`}"><option value="">Add one for a file in ${sample.appName} ${sample.tag}…</option>${suggestions.map((x) => html`<option value="${x.url}" data-label="${x.label}">${x.file}</option>`)}</select>`, { sm: true }) : ''}
+            </div>
+            <template id="ann-btn-row">${btnRow({ label: '', url: '', appId: null })}</template>`
+          : s.buttons.length ? '' : html`<p class="small muted">No buttons of your own.</p>`}
+        </div>
+        ${setting('Release notes button', 'A button to the release on GitHub, after your own.', switchInput({ name: 'notes_button', checked: s.notesButton, label: 'Release notes button', id: 'ann-notes-btn' }), { flat: true, switchRow: true })}
+        <div class="fields ann-notes-label">${textField({ id: 'notes_button_label', label: 'Its label', value: s.notesButtonLabel ?? NOTES_BUTTON_DEFAULT, max: BUTTON_LIMITS.label, placeholder: NOTES_BUTTON_DEFAULT, defaultValue: NOTES_BUTTON_DEFAULT })}</div>
       </div>
       <div class="section">
         <div class="section-h"><div><h3>Pings</h3><div class="desc">Off until you have a role for it. Members can give themselves the role from the ${pageLink(ctx, 'announcement-pings', 'Pings panel')}.</div></div></div>
@@ -647,7 +714,9 @@ export function registerAnnouncementRoutes(app: FastifyInstance, web: Web): void
         messageText: body.message_text !== undefined ? text('message_text', TEMPLATE_LIMITS.message, TEMPLATE_DEFAULTS.message) : current.messageText,
         titleText: body.title_text !== undefined ? text('title_text', TEMPLATE_LIMITS.title, TEMPLATE_DEFAULTS.title) : current.titleText,
         bodyText: body.body_text !== undefined ? text('body_text', TEMPLATE_LIMITS.body, TEMPLATE_DEFAULTS.body) : current.bodyText,
-        downloadButtons: body.download_buttons !== undefined,
+        buttons: body.buttons === '1' ? buttonsFrom(req.body as Record<string, unknown>, apps) : current.buttons,
+        notesButton: body.notes_button !== undefined,
+        notesButtonLabel: body.notes_button_label !== undefined ? text('notes_button_label', BUTTON_LIMITS.label, NOTES_BUTTON_DEFAULT) : current.notesButtonLabel,
         pingEnabled: body.ping_enabled !== undefined,
         roleId: role.id,
         roleName: role.name,
@@ -685,7 +754,7 @@ export function registerAnnouncementRoutes(app: FastifyInstance, web: Web): void
       const s = await getAnnouncementSettings(deps.db, wid);
       if (!deps.discord) throw new UserFacingError('Discord is not configured on this deployment.');
       if (!s.channelId) throw new UserFacingError('Choose a channel and save first.');
-      const sample = sampleRelease(await listAnnouncements(deps.db, wid, 20), await listApps(deps.db, wid), await appAnnounceSettings(deps.db, wid));
+      const sample = await sampleRelease(wid, await listAnnouncements(deps.db, wid, 20), await listApps(deps.db, wid), await appAnnounceSettings(deps.db, wid));
       const payload = announcementPayload(sample, s, null);
       await deps.discord.createMessage(s.channelId, { ...payload, content: `*Test post: no one was pinged.*${payload.content ? `\n${payload.content}` : ''}` });
       setFlash(reply, 'success', `Test post sent to #${s.channelName ?? ''}`);

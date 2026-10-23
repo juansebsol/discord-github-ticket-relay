@@ -692,11 +692,9 @@ dl.props dd .ic { color: var(--muted); }
 .dp-li::before { content: '•'; position: absolute; left: 4px; }
 .dp-time { margin-top: 8px; color: var(--discord-muted); font-size: 12px; line-height: 16px; }
 .dp-buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
-.dp-buttons-in { display: contents; }
-.dp-buttons-in[hidden] { display: none; }
 .dp-buttons .dp-button { margin-top: 0; }
 .dp-button.grey { background: var(--discord-grey-btn); gap: 6px; }
-.dp-content[hidden], .dp-embed h4[hidden] { display: none; }
+.dp-content[hidden], .dp-embed h4[hidden], .dp-buttons[hidden] { display: none; }
 
 /* ---- Page grids ---------------------------------------------------------------------------- */
 
@@ -1882,3 +1880,19 @@ a.rs-why:hover { border-color: currentColor; }
 .ann-apps td { vertical-align: middle; }
 .ann-apps .select select { min-width: 150px; }
 @media (prefers-reduced-motion: reduce) { .ann-spin { animation: none; } }
+/* Settings › Buttons: a row per button (label, link, which apps, remove), what its link finds underneath. */
+.ann-btns { display: flex; flex-direction: column; gap: 10px; margin-bottom: 20px; padding-bottom: 20px; border-bottom: 1px solid var(--border); }
+.ann-notes-label { margin-top: 12px; }
+.ann-btn-head, .ann-btn { display: grid; grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.4fr) minmax(0, 0.7fr) 32px; gap: 8px; align-items: center; }
+.ann-btn-head { font: 500 12px/16px var(--font); color: var(--muted); }
+.ann-btn > input { width: 100%; min-width: 0; }
+.ann-btn > .select select { width: 100%; min-width: 0; }
+.ann-btn-st { grid-column: 1 / -1; margin-top: -4px; overflow-wrap: anywhere; }
+.ann-btn-st:empty { display: none; }
+[data-btn-rows] { display: flex; flex-direction: column; gap: 12px; }
+.ann-btn-add { flex-wrap: wrap; gap: 8px; }
+@media (max-width: 640px) {
+  .ann-btn-head { display: none; }
+  .ann-btn { grid-template-columns: minmax(0, 1fr) 32px; }
+  .ann-btn > input[name="btn_url"], .ann-btn > .select { grid-column: 1 / 2; }
+}
