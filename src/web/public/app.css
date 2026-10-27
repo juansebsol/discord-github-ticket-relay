@@ -2048,3 +2048,11 @@ a.ov-bar:hover { background: var(--surface-2); text-decoration: none; }
   .ov-cols { grid-template-columns: minmax(0, 1fr); }
   .ov-ch-a { margin-left: 0; }
 }
+
+/* Re-run: what a run will cost, by Start; and on a running one, what it cost so far. */
+.run-est { align-items: center; }
+.run-est-b { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.run-est-m { display: flex; align-items: baseline; gap: 6px 12px; flex-wrap: wrap; font-size: 13px; }
+.run-est-cost { font: 600 20px/26px var(--font); font-variant-numeric: tabular-nums; color: var(--text); }
+.run-prog { justify-content: space-between; flex-wrap: wrap; gap: 4px 16px; }
+.run-cost { font-variant-numeric: tabular-nums; }

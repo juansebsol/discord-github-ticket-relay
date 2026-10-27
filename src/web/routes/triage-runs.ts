@@ -31,6 +31,7 @@ import {
   autoChecked,
   FLAGS,
   forGitHub,
+  exactCost,
   formatCost,
   getTriageSettings,
   monthlyUsage,
@@ -70,9 +71,13 @@ import {
 import { areaHref, canOpen, canOpenIssue, toolHeader, toolHref } from './tool.js';
 import { FLAG_COPY, MODE_NAMES } from './triage.js';
 
-/** Tokens and seconds per ticket when there's no history to go by (a custom-labels pass is much smaller). */
-const TYPICAL_TOKENS = { input: 6000, output: 500 };
-const TYPICAL_LABEL_TOKENS = { input: 3500, output: 250 };
+/**
+ * Tokens and seconds per ticket when there's no history to go by (a custom-labels pass is much
+ * smaller). Most of the input is the instructions and the app's TRIAGE.md, read from Claude's
+ * prompt cache after the first ticket of each app.
+ */
+const TYPICAL_TOKENS = { input: 6000, output: 500, cacheRead: 3500, cacheWrite: 0 };
+const TYPICAL_LABEL_TOKENS = { input: 3500, output: 300, cacheRead: 2800, cacheWrite: 0 };
 const TYPICAL_SECONDS = 5;
 /** Applying a result: a few GitHub calls. */
 const APPLY_SECONDS = 2;
@@ -211,22 +216,22 @@ export function registerTriageRunRoutes(app: FastifyInstance, web: Web): void {
   const { deps } = web;
   const runsUrl = (ctx: WorkspaceRequestContext) => areaHref(ctx, 'triage.runs');
 
-  /** Average tokens per ticket recently, for the cost estimate: of full triage, or of custom-labels passes. */
-  async function tokensPerTicket(workspaceId: string, labels: boolean): Promise<{ input: number; output: number; measured: boolean }> {
-    const { rows } = await deps.db.query<{ n: number; i: number | null; o: number | null }>(
-      labels
-        ? `SELECT count(*) AS n, avg(input_tokens) AS i, avg(output_tokens) AS o FROM (
-             SELECT input_tokens, output_tokens FROM triage_run_items i JOIN triage_runs r ON r.id = i.run_id
-             WHERE r.workspace_id = $1 AND i.input_tokens IS NOT NULL AND json_extract(r.scope, '$.labels') IS NOT NULL LIMIT 500)`
-        : `SELECT count(*) AS n, avg(input_tokens) AS i, avg(output_tokens) AS o FROM (
-             SELECT input_tokens, output_tokens FROM triage_run_items i JOIN triage_runs r ON r.id = i.run_id WHERE r.workspace_id = $1 AND i.input_tokens IS NOT NULL AND json_extract(r.scope, '$.labels') IS NULL
-             UNION ALL SELECT input_tokens, output_tokens FROM triage_results WHERE workspace_id = $1 AND input_tokens IS NOT NULL
-             LIMIT 500)`,
+  /**
+   * Average tokens per ticket lately, for the cost estimate: of full triage, or of custom-labels
+   * passes. Only calls whose cached tokens were kept count (older ones would price the cache in full).
+   */
+  async function tokensPerTicket(workspaceId: string, labels: boolean): Promise<{ input: number; output: number; cacheRead: number; cacheWrite: number; measured: number }> {
+    const { rows } = await deps.db.query<{ n: number; i: number | null; o: number | null; r: number | null; w: number | null }>(
+      `SELECT count(*) AS n, avg(input_tokens) AS i, avg(output_tokens) AS o, avg(cache_read_tokens) AS r, avg(cache_write_tokens) AS w FROM (
+         SELECT i.input_tokens, i.output_tokens, i.cache_read_tokens, i.cache_write_tokens FROM triage_run_items i JOIN triage_runs r ON r.id = i.run_id
+         WHERE r.workspace_id = $1 AND i.cache_read_tokens IS NOT NULL AND json_extract(r.scope, '$.labels') IS ${labels ? 'NOT NULL' : 'NULL'}
+         ${labels ? '' : 'UNION ALL SELECT input_tokens, output_tokens, cache_read_tokens, cache_write_tokens FROM triage_results WHERE workspace_id = $1 AND cache_read_tokens IS NOT NULL'}
+         LIMIT 500)`,
       [workspaceId],
     );
     const r = rows[0];
     const typical = labels ? TYPICAL_LABEL_TOKENS : TYPICAL_TOKENS;
-    return r?.n && r.i ? { input: Math.round(r.i), output: Math.round(r.o ?? 0), measured: true } : { ...typical, measured: false };
+    return r?.n && r.i ? { input: Math.round(r.i), output: Math.round(r.o ?? 0), cacheRead: Math.round(r.r ?? 0), cacheWrite: Math.round(r.w ?? 0), measured: Number(r.n) } : { ...typical, measured: 0 };
   }
 
   /** Seconds per ticket in recent runs (rate-limit waits included), for the time estimate. */
@@ -260,14 +265,21 @@ export function registerTriageRunRoutes(app: FastifyInstance, web: Web): void {
     const c = settings.config;
     const left = Math.max(0, c.monthlyLimit - usage.triaged);
     const picked = Math.min(matched, scope.limit, MAX_RERUN, left);
-    const cost = tokenCost(c.model, perTicket.input * picked, perTicket.output * picked);
+    const each = tokenCost(c.model, perTicket.input, perTicket.output, { read: perTicket.cacheRead, write: perTicket.cacheWrite });
+    const cost = each === null ? null : each * picked;
     const nextMonth = new Date(Date.UTC(usage.since.getUTCFullYear(), usage.since.getUTCMonth() + 1, 1)).toISOString().slice(0, 10);
     const refused = l && !l.groups.length ? 'Choose at least one category.' : l?.only && !l.only.length ? 'Choose at least one label to add.' : null;
     const noun = l ? 'tickets and issues' : 'tickets';
     const text = refused
       ?? (!matched
         ? l?.which === 'missing' ? 'Every open ticket and issue here has those labels already.' : 'No open tickets match.'
-        : `${picked < matched ? `The newest ${n(picked)} of ${n(matched)} matching ${noun}` : sentence(plural(picked, 'ticket', noun).replace(/^\d+/, n(picked)))} · ${cost !== null ? `${formatCost(cost)}${perTicket.measured ? '' : ' (estimated)'} · ` : ''}${duration(picked * pace)}`);
+        : `${picked < matched ? `The newest ${n(picked)} of ${n(matched)} matching ${noun}` : sentence(plural(picked, 'ticket', noun).replace(/^\d+/, n(picked)))} · ${duration(picked * pace)}`);
+    // What it costs: the total, then what it's based on.
+    const costText = refused || !picked || cost === null ? '' : cost < 0.01 ? 'under $0.01' : `about ${exactCost(cost)}`;
+    const basis = refused || !picked ? '' : each === null
+      ? `${c.model} has no known price here.`
+      : `About ${exactCost(each)} a ticket with ${c.model}, ${perTicket.measured >= 20 ? `from your last ${n(perTicket.measured)} ${l ? 'custom-label passes' : 'tickets'}` : 'estimated until a run has measured it'}. Most of each ticket is read from Claude’s cache at a tenth of the price.`;
+    const confirm = refused || !picked ? '' : `Claude reads ${plural(picked, 'ticket', noun).replace(/^\d+/, n(picked))}${l ? ' and picks custom labels for them' : ''}: ${costText ? `${costText} with ${c.model}` : 'at your model’s price'}, ${duration(picked * pace)}. Each counts toward this month’s limit (${n(left)} left).`;
     const warn = refused || !matched || !picked
       ? null
       : picked < matched && picked === left
@@ -278,7 +290,7 @@ export function registerTriageRunRoutes(app: FastifyInstance, web: Web): void {
             ? `A run can have up to ${n(MAX_RERUN)} tickets; start another one for the rest.`
             : null;
     return {
-      matched, picked, left, text, warn, allLabel: `All matching (${n(matched)})`, untouched: `Triaged, nothing applied yet (${n(untouched)})`, never: `Never triaged (${n(never)})`,
+      matched, picked, left, text, warn, cost: costText, basis, confirm, allLabel: `All matching (${n(matched)})`, untouched: `Triaged, nothing applied yet (${n(untouched)})`, never: `Never triaged (${n(never)})`,
       missing: `Missing these labels (${n(missing)})`, open: `Every open one (${n(open)})`,
     };
   }
@@ -335,7 +347,7 @@ export function registerTriageRunRoutes(app: FastifyInstance, web: Web): void {
 
     const form = !est
       ? html`<div class="card-b tight">${notice('info', 'View only', 'You can see the runs below and their results. Starting, stopping and applying a re-run needs Edit on Re-run; ask an admin if you need it.')}</div>`
-      : html`<form method="post" action="${b}" data-estimate="${b}/estimate">
+      : html`<form method="post" action="${b}" data-estimate="${b}/estimate" data-confirm-title="Start this run?" data-confirm-body="${first!.confirm}" data-confirm-label="Start">
       ${csrfField(ctx.csrf)}
       ${setting('What to re-run', null, html`<div class="choices what-pick" role="radiogroup">
         ${whatCard('labels', 'tags', 'Custom labels only', groups.length
@@ -382,7 +394,11 @@ export function registerTriageRunRoutes(app: FastifyInstance, web: Web): void {
           <span class="d" ${shown('labels')}>Adds the labels Claude is at least ${String(c.threshold)}% sure of as it goes. The ones it’s less sure of wait in the results, to add if you agree.</span></span></label>
       </div>`, { stacked: true })}
       ${setting('Name (optional)', 'To tell runs apart later.', html`<input id="run-name" type="text" name="name" maxlength="60" placeholder="${what === 'labels' ? 'Backfill Kind' : 'Stricter duplicates'}">`, { for: 'run-name' })}
-      <div class="card-f"><div class="small"><div data-estimate-text>${first!.text}</div><div class="warn-text" data-estimate-warn ${first!.warn ? '' : raw('hidden')}>${first!.warn ?? ''}</div></div><div class="end">
+      <div class="card-f run-est"><div class="run-est-b">
+        <div class="run-est-m"><span class="run-est-cost" data-estimate-cost ${first!.cost ? '' : raw('hidden')}>${first!.cost}</span><span data-estimate-text>${first!.text}</span></div>
+        <div class="xs muted" data-estimate-basis ${first!.basis ? '' : raw('hidden')}>${first!.basis}</div>
+        <div class="warn-text small" data-estimate-warn ${first!.warn ? '' : raw('hidden')}>${first!.warn ?? ''}</div>
+      </div><div class="end">
         ${submitBtn('Start', { variant: 'primary', icon: 'play', loading: 'Starting…', disabled: Boolean(blocked) })}
       </div></div>
     </form>`;
@@ -392,13 +408,13 @@ export function registerTriageRunRoutes(app: FastifyInstance, web: Web): void {
           <thead><tr><th>Run</th><th>Mode</th><th>Tickets</th><th>Cost</th><th>Status</th><th class="num">Started</th></tr></thead>
           <tbody>${runs.map((r) => {
             const finished = r.done + r.skipped + r.failed;
-            const cost = r.input_tokens ? tokenCost(r.config_used.model, r.input_tokens, r.output_tokens ?? 0) : null;
+            const cost = r.input_tokens ? tokenCost(r.config_used.model, r.input_tokens, r.output_tokens ?? 0, { read: r.cache_read_tokens, write: r.cache_write_tokens }) : null;
             const waiting = r.status === 'running' ? (settings.paused ? 'paused' : waitingText(r)) : null;
             return html`<tr class="click">
               <td><a class="cell-title" href="${b}/${r.id}">${runName(r)}</a><div class="sub">${r.created_by ? names.get(r.created_by) ?? 'An admin' : 'An admin'} · ${r.config_used.model}</div></td>
               <td><div class="tags">${r.scope.labels ? tag('Custom labels', { icon: 'tags', title: `Custom labels only: ${categoryNames(r.config_used, r.scope.labels.groups)}` }) : ''}${r.mode === 'preview' ? tag('Preview', { icon: 'flask-conical' }) : tag('Applied', { icon: 'play' })}</div>${r.mode === 'preview' && r.applied ? html`<div class="sub">${n(r.applied)} applied</div>` : ''}</td>
               <td class="num">${r.status === 'running' ? html`${n(finished)} of ${n(r.total)}<progress class="bar" max="${String(r.total || 1)}" value="${String(finished)}"></progress>` : html`${n(r.done)} triaged${r.skipped + r.failed ? html`<div class="sub">${n(r.skipped + r.failed)} skipped</div>` : ''}`}</td>
-              <td>${cost !== null ? formatCost(cost) : html`<span class="em">—</span>`}</td>
+              <td>${cost !== null ? exactCost(cost) : html`<span class="em">—</span>`}${r.status === 'running' && cost !== null ? html`<div class="sub">so far</div>` : ''}</td>
               <td>${pill(...STATUS_PILL[r.status])}${waiting === 'paused' ? html`<div class="sub warn-text">Paused: triage is paused</div>` : waiting ? html`<div class="sub">Waiting for ${r.waiting_reason === 'github' ? 'GitHub' : 'Claude'}</div>` : r.applying ? html`<div class="sub">Applying ${n(r.applying)}…</div>` : ''}</td>
               <td class="num">${when(r.created_at)}</td>
             </tr>`;
@@ -428,7 +444,7 @@ export function registerTriageRunRoutes(app: FastifyInstance, web: Web): void {
     if (!ctx) return reply;
     const c = (await getTriageSettings(deps.db, ctx.workspace.id)).config;
     const e = await estimate(ctx.workspace.id, parseScope(req.query as FormFields, c));
-    return reply.header('Cache-Control', 'no-store').send({ text: e.text, warn: e.warn, allLabel: e.allLabel, untouched: e.untouched, never: e.never, missing: e.missing, open: e.open });
+    return reply.header('Cache-Control', 'no-store').send({ text: e.text, warn: e.warn, cost: e.cost, basis: e.basis, confirm: e.confirm, allLabel: e.allLabel, untouched: e.untouched, never: e.never, missing: e.missing, open: e.open });
   });
 
   app.post('/w/:wid/triage/runs', async (req, reply) => {
@@ -521,7 +537,9 @@ export function registerTriageRunRoutes(app: FastifyInstance, web: Web): void {
       return qs ? `${b}?${qs}` : b;
     };
     const finished = counts.total - counts.pending;
-    const cost = counts.inputTokens ? tokenCost(run.config_used.model, counts.inputTokens, counts.outputTokens) : null;
+    const cost = counts.inputTokens ? tokenCost(run.config_used.model, counts.inputTokens, counts.outputTokens, { read: counts.cacheReadTokens, write: counts.cacheWriteTokens }) : null;
+    // While it runs: what it cost so far, and what it will once every ticket is read (at the pace of the ones read).
+    const projected = cost !== null && counts.readCount >= 1 ? cost + (cost / counts.readCount) * counts.pending : null;
     const repoOf = (i: { repo_owner: string; repo_name: string }) => ({ owner: i.repo_owner, name: i.repo_name });
     const waiting = live ? (settings.paused ? pausedText(settings.paused) : waitingText(run)) : null;
 
@@ -642,7 +660,8 @@ export function registerTriageRunRoutes(app: FastifyInstance, web: Web): void {
 
     const progress = live ? html`<div class="card-b tight">
         ${run.status === 'running'
-          ? html`<div class="row"><span class="small"><strong>${n(finished)}</strong> of ${n(counts.total)} tickets done${waiting ? '' : ` · ${duration(counts.pending * evalPace)} left`}</span></div>
+          ? html`<div class="row run-prog"><span class="small"><strong>${n(finished)}</strong> of ${n(counts.total)} tickets done${waiting ? '' : ` · ${duration(counts.pending * evalPace)} left`}</span>
+              ${cost !== null ? html`<span class="small run-cost" title="What Claude has cost for this run so far, and what it will at the same average once every ticket is read"><strong>${exactCost(cost)}</strong> so far${projected !== null ? html` · about <strong>${exactCost(projected)}</strong> when done` : ''}</span>` : ''}</div>
             <progress class="bar wide" max="${String(counts.total || 1)}" value="${String(finished)}"></progress>`
           : html`<div class="row"><span class="small">Applying results: <strong>${n(counts.applying)}</strong> to go${waiting ? '' : ` · ${duration(counts.applying * applyPace)} left`}</span></div>
             <progress class="bar wide" max="${String(counts.applying + counts.appliedSince || 1)}" value="${String(counts.appliedSince)}"></progress>`}
@@ -702,7 +721,7 @@ export function registerTriageRunRoutes(app: FastifyInstance, web: Web): void {
         title: runName(run),
         crumbs: [{ href: toolHref(ctx, 'triage') ?? undefined, label: 'AI triage' }, { href: runsUrl(ctx), label: 'Re-run' }, { label: runName(run) }],
         after: [lr ? tag('Custom labels', { icon: 'tags' }) : '', run.mode === 'preview' ? tag('Preview', { icon: 'flask-conical' }) : tag('Applied', { icon: 'play' }), pill(...STATUS_PILL[run.status]), edit ? '' : viewOnlyTag('You can see this run and its results. Ask an admin if you need to stop or apply it.')],
-        description: `${lr ? `${categoryNames(run.config_used, lr.groups)}${lr.only ? ` (only ${lr.only.join(', ')})` : ''} · ` : ''}${matched > counts.total ? `The newest ${n(counts.total)} of ${n(matched)} matching tickets` : sentence(plural(counts.total, 'ticket').replace(/^\d+/, n(counts.total)))} · ${run.config_used.model} · started by ${run.created_by ? names.get(run.created_by) ?? 'an admin' : 'an admin'} ${timeAgo(run.created_at)}${cost !== null ? ` · ${formatCost(cost)}` : ''}${run.applied_at ? ` · applied by ${run.applied_by ? names.get(run.applied_by) ?? 'an admin' : 'an admin'} ${timeAgo(run.applied_at)}` : ''}`,
+        description: `${lr ? `${categoryNames(run.config_used, lr.groups)}${lr.only ? ` (only ${lr.only.join(', ')})` : ''} · ` : ''}${matched > counts.total ? `The newest ${n(counts.total)} of ${n(matched)} matching tickets` : sentence(plural(counts.total, 'ticket').replace(/^\d+/, n(counts.total)))} · ${run.config_used.model} · started by ${run.created_by ? names.get(run.created_by) ?? 'an admin' : 'an admin'} ${timeAgo(run.created_at)}${cost !== null ? ` · ${exactCost(cost)}${counts.pending ? ' so far' : ''}` : ''}${run.applied_at ? ` · applied by ${run.applied_by ? names.get(run.applied_by) ?? 'an admin' : 'an admin'} ${timeAgo(run.applied_at)}` : ''}`,
         actions: [
           canOpen(ctx.membership, 'triage.activity') ? linkBtn(`${areaHref(ctx, 'triage.activity')}?run=${run.id}`, 'Activity log', { icon: 'history' }) : null,
           !edit ? null : run.status === 'running' ? postBtn(`${b}/cancel`, 'Stop', ctx.csrf, { icon: 'circle-x', confirm: { title: 'Stop this re-run?', body: 'Tickets not reached yet are skipped. Results so far are kept, and you can apply them.', label: 'Stop' } }) : null,

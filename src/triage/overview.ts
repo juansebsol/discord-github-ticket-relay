@@ -25,6 +25,8 @@ export interface TriageOverview {
   skipped: { reason: string; n: number }[];
   inputTokens: number;
   outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
   /** Waiting in Review now. */
   review: number;
   /** Per app (by repository for issues opened on GitHub): read in the window, actions applied. */
@@ -48,10 +50,10 @@ const BANDS = [
 /** Every triage result in scope, tickets and issues opened on GitHub, as one list (aliased x). */
 function results(s: OverviewScope, $: (v: unknown) => string): string {
   const w = $(s.workspaceId);
-  return `(SELECT 'ticket' AS src, r.completed_at AS at, r.status, r.applied_actions AS applied, r.suggestions AS sugg, r.verdict, r.input_tokens, r.output_tokens, r.skip_reason, r.suggestion_count, s.repo_id
+  return `(SELECT 'ticket' AS src, r.completed_at AS at, r.status, r.applied_actions AS applied, r.suggestions AS sugg, r.verdict, r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_write_tokens, r.skip_reason, r.suggestion_count, s.repo_id
       FROM triage_results r JOIN submissions s ON s.id = r.submission_id WHERE r.workspace_id = ${w}${s.appId ? ` AND s.app_id = ${$(s.appId)}` : ''}
     UNION ALL
-    SELECT 'issue', t.completed_at, t.status, t.applied_actions, t.suggestions, t.verdict, t.input_tokens, t.output_tokens, t.skip_reason, t.suggestion_count, t.repo_id
+    SELECT 'issue', t.completed_at, t.status, t.applied_actions, t.suggestions, t.verdict, t.input_tokens, t.output_tokens, t.cache_read_tokens, t.cache_write_tokens, t.skip_reason, t.suggestion_count, t.repo_id
       FROM issue_triage t WHERE t.workspace_id = ${w}${s.repoId !== null ? ` AND t.repo_id = ${$(s.repoId)}` : ''}
         AND EXISTS (SELECT 1 FROM apps a WHERE a.workspace_id = t.workspace_id AND a.repo_id = t.repo_id))`;
 }
@@ -110,7 +112,7 @@ export async function triageOverview(db: Queryable, s: OverviewScope, w: Window)
     query<{ priority: string; n: number }>((x, $) => `SELECT json_extract(x.verdict, '$.priority') AS priority, count(*) AS n FROM ${x} x WHERE x.status = 'done' AND ${inWindow('x', $)} AND x.verdict IS NOT NULL GROUP BY priority`),
     query<{ c: number | null }>((x, $) => `SELECT json_extract(x.verdict, '$.priority_confidence') AS c FROM ${x} x WHERE x.status = 'done' AND ${inWindow('x', $)} AND x.verdict IS NOT NULL`),
     query<{ reason: string; n: number }>((x, $) => `SELECT COALESCE(x.skip_reason, 'No reason given') AS reason, count(*) AS n FROM ${x} x WHERE x.status = 'skipped' AND ${inWindow('x', $)} GROUP BY reason ORDER BY n DESC LIMIT 8`),
-    query<{ i: number | null; o: number | null }>((x, $) => `SELECT sum(x.input_tokens) AS i, sum(x.output_tokens) AS o FROM ${x} x WHERE ${inWindow('x', $)}`),
+    query<{ i: number | null; o: number | null; r: number | null; w: number | null }>((x, $) => `SELECT sum(x.input_tokens) AS i, sum(x.output_tokens) AS o, sum(x.cache_read_tokens) AS r, sum(x.cache_write_tokens) AS w FROM ${x} x WHERE ${inWindow('x', $)}`),
     query<{ n: number }>((x) => `SELECT count(*) AS n FROM ${x} x WHERE x.status = 'done' AND x.suggestion_count > 0`),
     query<{ repo_id: number; triaged: number; applied: number }>((x, $) => `SELECT x.repo_id, count(*) AS triaged, sum(json_array_length(COALESCE(x.applied, '[]'))) AS applied FROM ${x} x WHERE x.status = 'done' AND ${inWindow('x', $)} GROUP BY x.repo_id`),
     backfilled(),
@@ -142,6 +144,8 @@ export async function triageOverview(db: Queryable, s: OverviewScope, w: Window)
     skipped: skipped.map((r) => ({ reason: r.reason, n: Number(r.n) })),
     inputTokens: Number(tokens[0]?.i ?? 0),
     outputTokens: Number(tokens[0]?.o ?? 0),
+    cacheReadTokens: Number(tokens[0]?.r ?? 0),
+    cacheWriteTokens: Number(tokens[0]?.w ?? 0),
     review: Number(review[0]?.n ?? 0),
     byRepo: new Map(byRepo.map((r) => [r.repo_id, { triaged: Number(r.triaged), applied: Number(r.applied ?? 0) }])),
   };

@@ -649,6 +649,8 @@ export class FakeAnthropic {
   announcement: ClaudeBehavior = { text: '- **Faster exports**\n- Fixed a crash when opening big files' };
   queue: ClaudeBehavior[] = [];
   requests: { key: string; body: Json }[] = [];
+  /** What each answer reports it used (input_tokens is the uncached part, as the API reports it). */
+  usage: Json = { input_tokens: 1200, output_tokens: 90 };
   models = [
     { id: 'claude-haiku-5-5', display_name: 'Claude Haiku 5.5', lifecycle: 'active' },
     { id: 'claude-sonnet-5-5', display_name: 'Claude Sonnet 5.5', lifecycle: 'active' },
@@ -682,7 +684,7 @@ export class FakeAnthropic {
         id: 'msg_test', type: 'message', role: 'assistant', model: body.model,
         content: behavior === 'refusal' ? [] : [{ type: 'text', text }],
         stop_reason: behavior === 'refusal' ? 'refusal' : plain?.stop ?? 'end_turn', stop_sequence: null,
-        usage: { input_tokens: 1200, output_tokens: 90 },
+        usage: { ...this.usage },
       };
       return body.stream ? sse(message) : json(200, message, { 'request-id': 'req_test' });
     }

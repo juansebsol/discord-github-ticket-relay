@@ -1445,6 +1445,10 @@
           if (!d || mine !== seq) return;
           if (text) text.textContent = d.text;
           if (warn) { warn.textContent = d.warn || ''; warn.hidden = !d.warn; }
+          // The price, what it's based on, and the confirmation Start shows.
+          $$('[data-estimate-cost]', form).forEach(function (el) { el.textContent = d.cost || ''; el.hidden = !d.cost; });
+          $$('[data-estimate-basis]', form).forEach(function (el) { el.textContent = d.basis || ''; el.hidden = !d.basis; });
+          if (d.confirm !== undefined && form.hasAttribute('data-confirm-title')) form.setAttribute('data-confirm-body', d.confirm);
           $$('[data-count-all]', form).forEach(function (el) { el.textContent = d.allLabel; });
           $$('[data-count-untouched]', form).forEach(function (el) { el.textContent = d.untouched; });
           $$('[data-count-never]', form).forEach(function (el) { el.textContent = d.never; });

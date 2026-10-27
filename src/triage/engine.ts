@@ -454,6 +454,9 @@ export interface Evaluation {
   config: TriageConfig;
   inputTokens: number;
   outputTokens: number;
+  /** Of the input, read from and written to Claude's prompt cache. */
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
 }
 
 /** What a custom-labels pass decided for a ticket or issue. Nothing is added yet. */
@@ -466,6 +469,8 @@ export interface LabelsEvaluation {
   suggested: TriageAction[];
   inputTokens: number;
   outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
 }
 
 export type LabelsOutcome = { status: 'done'; e: LabelsEvaluation } | Exclude<Outcome, { status: 'done' }>;
@@ -657,8 +662,27 @@ export interface RunCounts {
   appliedSince: number;
   inputTokens: number;
   outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  /** Tickets Claude read (each with its tokens), for the cost so far and the cost to come. */
+  readCount: number;
   lastDoneAt: Date | null;
   lastApplyAt: Date | null;
+}
+
+/** A run's progress and tokens, as the list of runs shows them. */
+export interface RunTotals {
+  total: number;
+  done: number;
+  skipped: number;
+  failed: number;
+  pending: number;
+  applying: number;
+  applied: number;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cache_read_tokens: number | null;
+  cache_write_tokens: number | null;
 }
 
 export type RunItemView = RunItemRow & { ref: string; app_name: string | null; ticket_type_name: string | null; issue_number: number | null; repo_id: number | null; repo_owner: string; repo_name: string; issue_title: string | null; issue_state: string | null };
@@ -1094,6 +1118,8 @@ export class TriageEngine {
       error,
       input_tokens: e.inputTokens,
       output_tokens: e.outputTokens,
+      cache_read_tokens: e.cacheReadTokens,
+      cache_write_tokens: e.cacheWriteTokens,
       completed_at: new Date(),
     }, store);
     const detail = { applied: applied.map(describeAction), suggested: suggested.map(describeAction), told_member: toldMember };
@@ -1262,7 +1288,7 @@ export class TriageEngine {
     const dc = await getDiscordConnection(deps.db, workspaceId);
     const ctx: TemplateContext = { app: resolved.app, repoUrl: `https://github.com/${own}`, repo: own, guildId: dc?.guild_id ?? null, helpChannel: c.helpChannel };
     const { auto, suggested } = planActions(verdict, c, ctx, new Map(apps.map((a) => [a.name, `${a.repo_owner}/${a.repo_name}`])));
-    return { status: 'done', e: { target, verdict, auto, suggested, config: c, inputTokens: result.inputTokens, outputTokens: result.outputTokens } };
+    return { status: 'done', e: { target, verdict, auto, suggested, config: c, inputTokens: result.inputTokens, outputTokens: result.outputTokens, cacheReadTokens: result.cacheReadTokens, cacheWriteTokens: result.cacheWriteTokens } };
   }
 
   /** What a failed Claude call means for the ticket: triage pauses, the ticket is skipped, or tried again later. */
@@ -1339,7 +1365,7 @@ export class TriageEngine {
     if (key.source === 'workspace') await recordKeyCheck(deps.db, workspaceId, 'working', null).catch(() => {});
     const picked: LabelsAnswer = { reason: String(result.answer.reason ?? '').replace(/\s+/g, ' ').trim().slice(0, 600), labels: normalizeLabels(result.answer.labels, groups) };
     const { auto, suggested } = planLabels(picked, groups, base.threshold, issue.labels, scope.only);
-    return { status: 'done', e: { target, picked, auto, suggested, inputTokens: result.inputTokens, outputTokens: result.outputTokens } };
+    return { status: 'done', e: { target, picked, auto, suggested, inputTokens: result.inputTokens, outputTokens: result.outputTokens, cacheReadTokens: result.cacheReadTokens, cacheWriteTokens: result.cacheWriteTokens } };
   }
 
   /**
@@ -1599,12 +1625,12 @@ export class TriageEngine {
     return rows[0] ? withParsedConfig(rows[0]) : null;
   }
 
-  async listRuns(workspaceId: string, limit = 20): Promise<(TriageRunRow & { total: number; done: number; skipped: number; failed: number; pending: number; applying: number; applied: number; input_tokens: number | null; output_tokens: number | null })[]> {
-    const { rows } = await this.deps.db.query<TriageRunRow & { total: number; done: number; skipped: number; failed: number; pending: number; applying: number; applied: number; input_tokens: number | null; output_tokens: number | null }>(
+  async listRuns(workspaceId: string, limit = 20): Promise<(TriageRunRow & RunTotals)[]> {
+    const { rows } = await this.deps.db.query<TriageRunRow & RunTotals>(
       `SELECT r.*, count(i.subject) AS total,
          sum(i.status = 'done') AS done, sum(i.status = 'skipped') AS skipped, sum(i.status = 'failed') AS failed, sum(i.status = 'pending') AS pending,
          sum(i.apply_status = 'pending') AS applying, sum(i.apply_status = 'done') AS applied,
-         sum(i.input_tokens) AS input_tokens, sum(i.output_tokens) AS output_tokens
+         sum(i.input_tokens) AS input_tokens, sum(i.output_tokens) AS output_tokens, sum(i.cache_read_tokens) AS cache_read_tokens, sum(i.cache_write_tokens) AS cache_write_tokens
        FROM triage_runs r LEFT JOIN triage_run_items i ON i.run_id = r.id
        WHERE r.workspace_id = $1 GROUP BY r.id ORDER BY r.created_at DESC LIMIT $2`,
       [workspaceId, limit],
@@ -1644,7 +1670,8 @@ export class TriageEngine {
          sum(i.apply_status = 'pending') AS applying, sum(i.apply_status = 'done') AS applied, sum(i.apply_status IN ('skipped', 'failed')) AS not_applied,
          sum(i.status = 'done' AND ${open}) AS a_all, sum(${FILTER_SQL.changed} AND ${open}) AS a_changed, sum(${FILTER_SQL.same} AND ${open}) AS a_same,
          sum(i.apply_done_at >= $2) AS applied_since,
-         sum(i.input_tokens) AS input_tokens, sum(i.output_tokens) AS output_tokens, max(i.completed_at) AS last_done_at, max(i.apply_done_at) AS last_apply_at
+         sum(i.input_tokens) AS input_tokens, sum(i.output_tokens) AS output_tokens, sum(i.cache_read_tokens) AS cache_read_tokens, sum(i.cache_write_tokens) AS cache_write_tokens,
+         sum(i.input_tokens IS NOT NULL) AS read_count, max(i.completed_at) AS last_done_at, max(i.apply_done_at) AS last_apply_at
        FROM triage_run_items i WHERE i.run_id = $1`,
       [runId, applyingSince ?? new Date(8.64e15)],
     );
@@ -1655,7 +1682,8 @@ export class TriageEngine {
       applying: n('applying'), applied: n('applied'), notApplied: n('not_applied'),
       applicable: { all: n('a_all'), changed: n('a_changed'), same: n('a_same'), skipped: 0 },
       appliedSince: n('applied_since'),
-      inputTokens: n('input_tokens'), outputTokens: n('output_tokens'), lastDoneAt: r.last_done_at, lastApplyAt: r.last_apply_at,
+      inputTokens: n('input_tokens'), outputTokens: n('output_tokens'), cacheReadTokens: n('cache_read_tokens'), cacheWriteTokens: n('cache_write_tokens'), readCount: n('read_count'),
+      lastDoneAt: r.last_done_at, lastApplyAt: r.last_apply_at,
     };
   }
 
@@ -1809,7 +1837,7 @@ export class TriageEngine {
         const e = out.e;
         const done: RunItemRow = { ...item, verdict: e.picked as unknown as Verdict, auto_actions: e.auto, suggestions: e.suggested };
         const change: RunChange = !e.auto.length && !e.suggested.length ? 'same' : item.before?.labels?.length ? 'changed' : 'new';
-        await set({ status: 'done', note: null, change, verdict: e.picked, auto_actions: e.auto, suggestions: e.suggested, model: run.config_used.model, input_tokens: e.inputTokens, output_tokens: e.outputTokens, completed_at: new Date() });
+        await set({ status: 'done', note: null, change, verdict: e.picked, auto_actions: e.auto, suggestions: e.suggested, model: run.config_used.model, input_tokens: e.inputTokens, output_tokens: e.outputTokens, cache_read_tokens: e.cacheReadTokens, cache_write_tokens: e.cacheWriteTokens, completed_at: new Date() });
         if (run.mode === 'preview') await writeTriageLog(db, { ...about, source: 'preview', ref: e.target.ref, result: 'ok', detail: { auto: e.auto, suggested: e.suggested } });
         if (run.mode === 'apply') {
           try {
@@ -1824,7 +1852,7 @@ export class TriageEngine {
         const { e } = out;
         const done: RunItemRow = { ...item, verdict: e.verdict, auto_actions: e.auto, suggestions: e.suggested };
         const change = changeFrom(beforeDecisions(item.before), { auto: e.auto, suggested: e.suggested });
-        await set({ status: 'done', note: null, change, verdict: e.verdict, auto_actions: e.auto, suggestions: e.suggested, model: e.config.model, input_tokens: e.inputTokens, output_tokens: e.outputTokens, completed_at: new Date() });
+        await set({ status: 'done', note: null, change, verdict: e.verdict, auto_actions: e.auto, suggestions: e.suggested, model: e.config.model, input_tokens: e.inputTokens, output_tokens: e.outputTokens, cache_read_tokens: e.cacheReadTokens, cache_write_tokens: e.cacheWriteTokens, completed_at: new Date() });
         if (run.mode === 'preview') await writeTriageLog(db, { ...about, source: 'preview', ref: e.target.ref, result: 'ok', detail: { auto: e.auto, suggested: e.suggested } });
         if (run.mode === 'apply') {
           try {
@@ -1890,7 +1918,7 @@ export class TriageEngine {
       }
     }
     const config = subject.kind === 'issue' ? forGitHub(run.config_used) : run.config_used;
-    const e: Evaluation = fresh ?? { target, verdict: item.verdict!, auto, suggested: suggestedIn, config, inputTokens: 0, outputTokens: 0 };
+    const e: Evaluation = fresh ?? { target, verdict: item.verdict!, auto, suggested: suggestedIn, config, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
     const { applied, suggested, error } = await this.applyAuto(target, auto, e.suggested, false, { rateLimitThrows: true });
     const fields = { ...resultFields(e, applied, suggested), error };
     const cols = Object.keys(fields);

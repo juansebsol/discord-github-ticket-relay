@@ -127,7 +127,7 @@ export function registerTriageRoutes(app: FastifyInstance, web: Web): void {
     const keyState = await keyStatus(web, wid);
     const c = settings.config;
     const { models: available, error: modelError } = await models(key?.key ?? null);
-    const cost = tokenCost(c.model, usage.inputTokens, usage.outputTokens);
+    const cost = tokenCost(c.model, usage.inputTokens, usage.outputTokens, { read: usage.cacheReadTokens, write: usage.cacheWriteTokens });
     const nextMonth = new Date(Date.UTC(usage.since.getUTCFullYear(), usage.since.getUTCMonth() + 1, 1));
 
     const anyOn = settings.enabled || settings.githubEnabled;

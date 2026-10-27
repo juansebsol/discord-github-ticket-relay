@@ -376,15 +376,35 @@ export const MODEL_PRICES: Record<string, [number, number]> = {
   'claude-fable-5-1': [10, 50],
 };
 
-/** What tokens cost with a model, in USD; null for models without a known price. */
-export function tokenCost(model: string, input: number, output: number): number | null {
+/** What a prompt-cache read costs, as a share of the model's input price (a tenth unless listed). */
+const CACHE_READ_SHARE: Record<string, number> = { 'claude-opus-5-5': 0.05, 'claude-fable-5-1': 0.025 };
+/** A 5-minute cache write costs a quarter more than plain input. */
+const CACHE_WRITE_SHARE = 1.25;
+
+/**
+ * What tokens cost with a model, in USD; null for models without a known price. `input` is every
+ * input token; of those, the ones read from or written to Claude's prompt cache are priced as such.
+ */
+export function tokenCost(model: string, input: number, output: number, cache: { read?: number | null; write?: number | null } = {}): number | null {
   const p = MODEL_PRICES[model];
-  return p ? (input * p[0] + output * p[1]) / 1_000_000 : null;
+  if (!p) return null;
+  const read = cache.read ?? 0;
+  const write = cache.write ?? 0;
+  const plain = Math.max(0, input - read - write);
+  return (plain * p[0] + read * p[0] * (CACHE_READ_SHARE[model] ?? 0.1) + write * p[0] * CACHE_WRITE_SHARE + output * p[1]) / 1_000_000;
 }
 
 /** "about $0.12", or "under $0.01". */
 export function formatCost(usd: number): string {
   return usd < 0.01 ? 'under $0.01' : `about $${usd.toFixed(2)}`;
+}
+
+/** A small amount as it is: "$0.0004", "$0.012", "$3.40". */
+export function exactCost(usd: number): string {
+  if (usd >= 1) return `$${usd.toFixed(2)}`;
+  if (usd >= 0.01) return `$${usd.toFixed(3).replace(/0$/, '')}`;
+  if (usd >= 0.0001) return `$${usd.toFixed(4)}`;
+  return usd > 0 ? 'under $0.0001' : '$0';
 }
 
 /** The name of any action, built-in or label group. */
@@ -542,19 +562,20 @@ export async function resolveApiKey(deps: Pick<Deps, 'db' | 'box' | 'config'>, w
 }
 
 /** Tickets triaged this calendar month (UTC) and the tokens used, for the limit and the usage line. */
-export async function monthlyUsage(q: Queryable, workspaceId: string, now = new Date()): Promise<{ triaged: number; inputTokens: number; outputTokens: number; since: Date }> {
+export async function monthlyUsage(q: Queryable, workspaceId: string, now = new Date()): Promise<{ triaged: number; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; since: Date }> {
   const since = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
   // Re-runs (previews included) call Claude too, so they count toward the limit.
-  const { rows } = await q.query<{ n: number; input: number | null; output: number | null }>(
-    `SELECT count(*) AS n, sum(input_tokens) AS input, sum(output_tokens) AS output FROM (
-       SELECT input_tokens, output_tokens FROM triage_results WHERE workspace_id = $1 AND input_tokens IS NOT NULL AND completed_at >= $2
+  const { rows } = await q.query<{ n: number; input: number | null; output: number | null; cache_read: number | null; cache_write: number | null }>(
+    `SELECT count(*) AS n, sum(input_tokens) AS input, sum(output_tokens) AS output, sum(cache_read_tokens) AS cache_read, sum(cache_write_tokens) AS cache_write FROM (
+       SELECT input_tokens, output_tokens, cache_read_tokens, cache_write_tokens FROM triage_results WHERE workspace_id = $1 AND input_tokens IS NOT NULL AND completed_at >= $2
        UNION ALL
-       SELECT input_tokens, output_tokens FROM issue_triage WHERE workspace_id = $1 AND input_tokens IS NOT NULL AND completed_at >= $2
+       SELECT input_tokens, output_tokens, cache_read_tokens, cache_write_tokens FROM issue_triage WHERE workspace_id = $1 AND input_tokens IS NOT NULL AND completed_at >= $2
        UNION ALL
-       SELECT i.input_tokens, i.output_tokens FROM triage_run_items i JOIN triage_runs r ON r.id = i.run_id
+       SELECT i.input_tokens, i.output_tokens, i.cache_read_tokens, i.cache_write_tokens FROM triage_run_items i JOIN triage_runs r ON r.id = i.run_id
        WHERE r.workspace_id = $1 AND i.input_tokens IS NOT NULL AND i.completed_at >= $2
      )`,
     [workspaceId, since],
   );
-  return { triaged: rows[0]?.n ?? 0, inputTokens: rows[0]?.input ?? 0, outputTokens: rows[0]?.output ?? 0, since };
+  const r = rows[0];
+  return { triaged: r?.n ?? 0, inputTokens: r?.input ?? 0, outputTokens: r?.output ?? 0, cacheReadTokens: r?.cache_read ?? 0, cacheWriteTokens: r?.cache_write ?? 0, since };
 }

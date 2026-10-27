@@ -152,7 +152,7 @@ export function registerTriageOverviewRoutes(app: FastifyInstance, web: Web): vo
     const vs = (total: number, prev: number | null, better: Better) => (lifetime ? html`<div class="an-d muted">All time</div>` : delta(total, prev, w.range.compare, better));
     const kind = (k: string) => d.actions.find((a) => a.kind === k);
     const both = (k: string) => (kind(k)?.applied ?? 0) + (kind(k)?.suggested ?? 0);
-    const cost = tokenCost(c.model, d.inputTokens, d.outputTokens);
+    const cost = tokenCost(c.model, d.inputTokens, d.outputTokens, { read: d.cacheReadTokens, write: d.cacheWriteTokens });
     const review = canOpen(ctx.membership, 'triage.review') ? areaHref(ctx, 'triage.review') : null;
     return html`<div class="an-kpis ov-kpis">
       ${tile({ label: 'Read', value: compact(d.total), d: vs(d.total, d.prev, null), title: 'Discord tickets and issues opened on GitHub that Claude triaged' })}

@@ -138,8 +138,12 @@ export interface TicketImage {
 
 export interface Classification {
   verdict: AiVerdict;
+  /** Every input token, cached or not (what the monthly figures count). */
   inputTokens: number;
   outputTokens: number;
+  /** Of the input: read from Claude's prompt cache (about a tenth of the price) and written to it (a quarter more). */
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
 }
 
 /** A failure the queue knows how to handle: pause the workspace, retry later, or skip the ticket. */
@@ -253,17 +257,17 @@ export class TriageAi {
    * for every ticket of that app.
    */
   async classify(apiKey: string, model: string, system: string | string[], user: string, schema: ReturnType<typeof verdictSchema> = VerdictSchema, images: TicketImage[] = []): Promise<Classification> {
-    const r = await this.parse(apiKey, model, system, user, schema, images);
-    return { verdict: r.answer as AiVerdict, inputTokens: r.inputTokens, outputTokens: r.outputTokens };
+    const { answer, ...tokens } = await this.parse(apiKey, model, system, user, schema, images);
+    return { verdict: answer as AiVerdict, ...tokens };
   }
 
   /** A custom-labels backfill: the same call, answering only the categories asked about. */
-  async pickLabels(apiKey: string, model: string, system: string[], user: string, schema: ReturnType<typeof labelsSchema>): Promise<{ answer: LabelsAnswer; inputTokens: number; outputTokens: number }> {
-    const r = await this.parse(apiKey, model, system, user, schema, []);
-    return { answer: r.answer as LabelsAnswer, inputTokens: r.inputTokens, outputTokens: r.outputTokens };
+  async pickLabels(apiKey: string, model: string, system: string[], user: string, schema: ReturnType<typeof labelsSchema>): Promise<Omit<Classification, 'verdict'> & { answer: LabelsAnswer }> {
+    const { answer, ...tokens } = await this.parse(apiKey, model, system, user, schema, []);
+    return { answer: answer as LabelsAnswer, ...tokens };
   }
 
-  private async parse(apiKey: string, model: string, system: string | string[], user: string, schema: z.ZodObject, images: TicketImage[]): Promise<{ answer: unknown; inputTokens: number; outputTokens: number }> {
+  private async parse(apiKey: string, model: string, system: string | string[], user: string, schema: z.ZodObject, images: TicketImage[]): Promise<Omit<Classification, 'verdict'> & { answer: unknown }> {
     try {
       const response = await this.client(apiKey).messages.parse({
         model,
@@ -282,7 +286,9 @@ export class TriageAi {
       if (response.stop_reason === 'refusal') throw new TriageAiError('skip', 'Claude declined to classify this ticket.');
       if (response.stop_reason === 'max_tokens') throw new TriageAiError('skip', 'Claude’s answer was cut off.');
       if (!response.parsed_output) throw new TriageAiError('skip', 'Claude’s answer couldn’t be read.');
-      return { answer: response.parsed_output, inputTokens: response.usage.input_tokens + (response.usage.cache_read_input_tokens ?? 0) + (response.usage.cache_creation_input_tokens ?? 0), outputTokens: response.usage.output_tokens };
+      const read = response.usage.cache_read_input_tokens ?? 0;
+      const written = response.usage.cache_creation_input_tokens ?? 0;
+      return { answer: response.parsed_output, inputTokens: response.usage.input_tokens + read + written, outputTokens: response.usage.output_tokens, cacheReadTokens: read, cacheWriteTokens: written };
     } catch (err) {
       throw classifyAiError(err);
     }

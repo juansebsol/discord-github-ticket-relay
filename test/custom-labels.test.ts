@@ -1,7 +1,7 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { IssueIndexer } from '../src/domain/issue-index.js';
 import { acceptSubmission } from '../src/domain/submissions.js';
-import { getTriageSettings, monthlyUsage, parseTriageConfig, saveTriageConfig, setApiKey, setTriageEnabled } from '../src/triage/settings.js';
+import { getTriageSettings, monthlyUsage, parseTriageConfig, saveTriageConfig, setApiKey, setTriageEnabled, tokenCost } from '../src/triage/settings.js';
 import { form, get, grant, makeAdmin, makeApp, makeWorkspace, resetDb, testDb, type ConfiguredWorkspace, type TestEnv } from './helpers.js';
 
 const KEY = 'sk-ant-test-key-0123456789abcdef';
@@ -164,6 +164,42 @@ describe('backfilling custom labels', () => {
     expect(estimate.json()).toMatchObject({ text: 'Choose at least one label to add.' });
     const ok = await env.server.inject({ method: 'GET', url: `${w()}/triage/runs/estimate?what=labels&labels_form=1&group=kind1&only=bug&only=parity&only=plugins&which=missing`, ...get(ws.owner) });
     expect(ok.json()).toMatchObject({ missing: 'Missing these labels (2)', open: 'Every open one (3)' });
+  });
+});
+
+describe('what a backfill costs', () => {
+  it('prices the cache at its own rate, says it before Start, and shows what it cost so far and when done', async () => {
+    // Haiku 5.5: $0.10 per million input, $0.50 output, a cache read a tenth of the input price.
+    expect(tokenCost('claude-haiku-5-5', 3000, 300, { read: 2500 })).toBeCloseTo((500 * 0.1 + 2500 * 0.01 + 300 * 0.5) / 1e6, 12);
+    expect(tokenCost('claude-haiku-5-5', 3000, 300)).toBeCloseTo((3000 * 0.1 + 300 * 0.5) / 1e6, 12);
+    await triaged();
+    // Before any backfill: an estimate that says it is one, and the confirmation Start shows.
+    const est = await env.server.inject({ method: 'GET', url: `${w()}/triage/runs/estimate?what=labels&labels_form=1&group=kind1&only=bug&only=parity&only=plugins&which=all`, ...get(ws.owner) });
+    expect(est.json()).toMatchObject({ cost: 'under $0.01', basis: expect.stringContaining('estimated until a run has measured it'), confirm: expect.stringContaining('Claude reads 3 tickets and issues and picks custom labels for them: under $0.01 with claude-haiku-5-5') });
+    expect((await page('/triage/runs?what=labels')).body).toContain('data-confirm-title="Start this run?"');
+
+    // Each read keeps what came from the cache.
+    env.anthropic.usage = { input_tokens: 400, cache_read_input_tokens: 2600, cache_creation_input_tokens: 0, output_tokens: 200 };
+    const start = await startRun({ only: ['bug', 'parity', 'plugins'], which: 'all', mode: 'preview' });
+    env.anthropic.queue.push(pick(['bug'], 90), pick(['bug'], 90), pick(['parity'], 90));
+    await env.triage.drain();
+    const items = (await env.db.query('SELECT input_tokens, cache_read_tokens, cache_write_tokens FROM triage_run_items')).rows;
+    expect(items).toEqual(Array(3).fill({ input_tokens: 3000, cache_read_tokens: 2600, cache_write_tokens: 0 }));
+    // 3 × (400 × $0.10 + 2,600 × $0.01 + 200 × $0.50) per million ≈ $0.0005
+    const runUrl = start.headers.location as string;
+    expect((await env.server.inject({ method: 'GET', url: runUrl, ...get(ws.owner) })).body).toContain('just now · $0.0005</p>');
+    expect((await page('/triage/runs')).body).toContain('$0.0005');
+
+    // Partway through: so far, and the same average for the rest.
+    await env.db.query(`UPDATE triage_runs SET status = 'running', finished_at = NULL`);
+    await env.db.query(`UPDATE triage_run_items SET status = 'pending', input_tokens = NULL, cache_read_tokens = NULL, output_tokens = NULL WHERE position = 2`);
+    const running = (await env.server.inject({ method: 'GET', url: runUrl, ...get(ws.owner) })).body;
+    expect(running).toContain('<strong>$0.0003</strong> so far · about <strong>$0.0005</strong> when done');
+    // Measured now, the next estimate says what it's based on.
+    await env.db.query(`UPDATE triage_runs SET status = 'cancelled'`);
+    for (let i = 0; i < 20; i++) await env.db.query(`INSERT INTO triage_run_items (run_id, subject, submission_id, position, status, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens) SELECT run_id, 'x' || $1, submission_id, 10 + $1, 'done', 3000, 200, 2600, 0 FROM triage_run_items LIMIT 1`, [i]);
+    const measured = await env.server.inject({ method: 'GET', url: `${w()}/triage/runs/estimate?what=labels&labels_form=1&group=kind1&only=bug&only=parity&only=plugins&which=all`, ...get(ws.owner) });
+    expect(measured.json().basis).toContain('About $0.0002 a ticket with claude-haiku-5-5, from your last 22 custom-label passes');
   });
 });
 
