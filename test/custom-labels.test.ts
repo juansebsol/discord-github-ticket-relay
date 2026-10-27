@@ -209,6 +209,11 @@ describe('Custom labels page', () => {
     const res = await page('/triage/labels');
     expect(res.statusCode).toBe(200);
     expect(res.body).toContain('<title>Custom labels · AI triage');
+    // Every category starts closed: its name, how many Claude picks and its labels with their counts show; the editor opens on click.
+    expect(res.body).toContain('<details class="cl-cat" id="g-kind1" data-flash>');
+    expect(res.body).not.toMatch(/<details class="cl-cat"[^>]*\bopen\b/);
+    expect(res.body).toContain('One label per ticket');
+    expect(res.body).toMatch(/parity<\/span><span class="n">1<\/span>/);
     expect(res.body).toContain('<b>1</b> of 3 open issues have a Kind label');
     expect(res.body).toContain('value="parity"');
     expect(res.body).toContain(`/triage/runs?what=labels&amp;group=kind1&amp;only=parity`);

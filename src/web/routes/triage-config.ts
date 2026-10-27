@@ -31,7 +31,7 @@ import {
 } from '../../triage/settings.js';
 import { setFlash } from '../session.js';
 import type { Web, WorkspaceRequestContext } from '../server.js';
-import { csrfField, empty, icon, iconBtn, linkBtn, notice, pageHeader, pill, plural, postBtn, segRadios, selectWrap, submitBtn, timeAgo, type Tone } from '../ui.js';
+import { csrfField, empty, icon, iconBtn, labelTag, linkBtn, menu, notice, pageHeader, pill, postBtn, segRadios, selectWrap, submitBtn, timeAgo, type Tone } from '../ui.js';
 import { openLabels, openMissing } from '../../triage/label-stats.js';
 import { textField } from './panel.js';
 import { areaHref, canOpen, knowledgeHref, pageLink, toolHeader, toolHref } from './tool.js';
@@ -107,10 +107,17 @@ export function registerTriageConfigRoutes(app: FastifyInstance, web: Web): void
     const runs = can(ctx.membership, 'triage.runs.edit') ? areaHref(ctx, 'triage.runs') : null;
     const backfill = (g: LabelGroup, label?: string) => `${runs}?what=labels&group=${encodeURIComponent(g.id)}${label ? `&only=${encodeURIComponent(label.toLowerCase())}` : ''}`;
     const presets = (Object.keys(LABEL_GROUP_PRESETS) as (keyof typeof LABEL_GROUP_PRESETS)[]).filter((k) => !groups.some((g) => g.name.toLowerCase() === LABEL_GROUP_PRESETS[k].name.toLowerCase()));
-    const addButtons = html`${presets.map((k) => postBtn(`${b}/add`, LABEL_GROUP_PRESETS[k].name, ctx.csrf, { size: 'sm', icon: 'plus', fields: { preset: k }, disabled: full }))}
-      ${postBtn(`${b}/add`, 'Empty category', ctx.csrf, { size: 'sm', variant: 'ghost', icon: 'plus', fields: { preset: 'empty' }, disabled: full })}`;
+    const addMenu = full
+      ? html`<span class="small muted">${String(MAX_LABEL_GROUPS)} categories at most</span>`
+      : menu([
+          ...presets.map((k) => ({ post: `${b}/add`, label: `${LABEL_GROUP_PRESETS[k].name} (ready-made)`, icon: 'tags' as const, fields: { preset: k } })),
+          presets.length ? ('sep' as const) : null,
+          { post: `${b}/add`, label: 'Empty category', icon: 'plus' as const, fields: { preset: 'empty' } },
+        ], { csrf: ctx.csrf, label: 'Add a category', button: { label: 'Add category', opts: { variant: 'primary', icon: 'plus' } } });
     const count = (label: string) => open.byLabel.get(label.toLowerCase()) ?? 0;
     const labelCount = groups.reduce((t, g) => t + g.options.length, 0);
+    // The first sentence of what a category is about, for its closed row (the whole text is in the editor).
+    const gist = (text: string) => /^(.+?[.!?])(\s|$)/.exec(text.trim())?.[1] ?? text.trim();
 
     /** One label's row in the editor: its name, when to use it, and how many open issues have it. */
     const row = (g: LabelGroup | null, o: { label: string; description: string } | null) => html`<div class="cl-row" data-row>
@@ -120,84 +127,98 @@ export function registerTriageConfigRoutes(app: FastifyInstance, web: Web): void
         ${edit ? iconBtn('x', 'Remove this label', { size: 'sm', attrs: raw('data-row-remove') }) : html`<span></span>`}
       </div>`;
 
-    const groupCard = (g: LabelGroup) => {
+    /**
+     * A category: closed, one row to read at a glance (its name, how many Claude picks, what it's
+     * about, its labels with their open issues, its modes and how many open issues have one); open,
+     * its editor. Closed until someone opens it, or comes back to it after saving.
+     */
+    const category = (g: LabelGroup) => {
       const none = missing.get(g.id) ?? 0;
       const done = open.open ? Math.round(((open.open - none) / open.open) * 100) : 0;
       const ghMode = githubMode(c, groupKind(g.id));
-      return html`<section class="card cl-card" id="g-${g.id}" aria-labelledby="h-${g.id}">
-      <div class="card-h"><div>
-          <div class="title"><h2 id="h-${g.id}">${g.name}</h2>${pill(`Discord: ${MODE_NAMES[g.mode]}`, MODE_TONE[g.mode])}${pill(`GitHub: ${MODE_NAMES[ghMode]}`, MODE_TONE[ghMode])}</div>
-          <div class="desc">${PICK_NAMES[g.pick]} per ticket · ${plural(g.options.length, 'label')}</div>
-        </div>
-        <div class="row">
-          ${runs && edit ? linkBtn(backfill(g), 'Backfill', { size: 'sm', icon: 'history', title: `Add ${g.name} labels to open tickets and issues` }) : ''}
-          ${edit ? postBtn(`${b}/${g.id}/delete`, 'Delete', ctx.csrf, { size: 'sm', variant: 'ghost danger', icon: 'trash-2', confirm: { title: `Delete the ${g.name} category?`, body: 'Claude stops picking these labels. Labels already on issues stay on GitHub.', label: 'Delete category', danger: true } }) : ''}
-        </div></div>
-      ${open.open ? html`<div class="cl-cover">
-          <div class="cl-cover-bar" role="img" aria-label="${`${done}% of open issues have a ${g.name} label`}"><i style="width:${String(done)}%"></i></div>
-          <span class="small"><b>${n(open.open - none)}</b> of ${n(open.open)} open issues have a ${g.name} label${none ? html` · <span class="muted">${n(none)} have none yet</span>` : ''}</span>
+      return html`<details class="cl-cat" id="g-${g.id}" data-flash>
+      <summary class="cl-sum">
+        <span class="cl-chev" aria-hidden="true">${icon('chevron-right', 14)}</span>
+        <span class="cl-main">
+          <span class="cl-title"><h2 id="h-${g.id}">${g.name}</h2><span class="cl-pick">${PICK_NAMES[g.pick]} per ticket</span></span>
+          ${g.instruction.trim() ? html`<span class="cl-about">${gist(g.instruction)}</span>` : ''}
+          <span class="cl-chips">${g.options.map((o) => html`<span class="cl-chip" title="${o.description || o.label}">${labelTag(o.label)}<span class="n">${n(count(o.label))}</span></span>`)}</span>
+        </span>
+        <span class="cl-side">
+          <span class="cl-modes">${pill(`Discord: ${MODE_NAMES[g.mode]}`, MODE_TONE[g.mode])}${pill(`GitHub: ${MODE_NAMES[ghMode]}`, MODE_TONE[ghMode])}</span>
+          ${open.open ? html`<span class="cl-cov" title="${`${n(open.open - none)} of ${n(open.open)} open issues have a ${g.name} label`}"><span class="cl-cover-bar" aria-hidden="true"><i style="width:${String(done)}%"></i></span><span><b>${String(done)}%</b> labelled${none ? html`<span class="muted"> · ${n(none)} have none</span>` : ''}</span></span>` : ''}
+          <span class="btn sm cl-open" aria-hidden="true"><span class="o">${edit ? 'Edit' : 'Details'}</span><span class="c">Close</span></span>
+        </span>
+      </summary>
+      <div class="cl-body">
+        ${open.open || edit ? html`<div class="cl-tools">
+          <span class="small muted">${open.open ? html`<b>${n(open.open - none)}</b> of ${n(open.open)} open issues have a ${g.name} label` : ''}</span>
+          <div class="row">
+            ${runs && edit && none ? linkBtn(backfill(g), `Backfill the ${n(none)} with none`, { size: 'sm', icon: 'history', title: `Add ${g.name} labels to the open tickets and issues that have none` }) : ''}
+            ${edit ? postBtn(`${b}/${g.id}/delete`, 'Delete', ctx.csrf, { size: 'sm', variant: 'ghost danger', icon: 'trash-2', confirm: { title: `Delete the ${g.name} category?`, body: 'Claude stops picking these labels. Labels already on issues stay on GitHub.', label: 'Delete category', danger: true } }) : ''}
+          </div>
         </div>` : ''}
-      <form method="post" action="${b}/${g.id}" ${edit ? raw('data-dirty') : ''}>${csrfField(ctx.csrf)}
-        <fieldset class="plain${edit ? '' : ' view-only'}" ${edit ? '' : raw('disabled')}>
-        <div class="section">
-          <div class="fields">
-            <div class="fields-2">
-              <div class="field"><label for="name-${g.id}">Name</label><input id="name-${g.id}" type="text" name="name" value="${g.name}" maxlength="40" required></div>
-              <div class="field"><label for="pick-${g.id}">How many Claude picks</label>${selectWrap(html`<select id="pick-${g.id}" name="pick">${(['one', 'two', 'any'] as const).map((p) => html`<option value="${p}" ${p === g.pick ? raw('selected') : ''}>${PICK_NAMES[p]}</option>`)}</select>`)}</div>
-            </div>
-            ${textField({ id: `instruction-${g.id}`, name: 'instruction', label: 'What this category is about (optional)', value: g.instruction, max: 600, rows: Math.min(6, Math.max(2, Math.ceil(g.instruction.length / 120))), placeholder: 'What kind of work this is for the team, judged by the text.' })}
-            <div class="field">
-              <div class="lbl-row"><span class="lbl">Labels</span><span class="xs muted">Claude only picks these, by their sentence. New ones are created on GitHub the first time they’re used.</span></div>
-              <div class="cl-rows" data-rows data-rows-max="${String(MAX_GROUP_OPTIONS)}">
-                <div class="cl-head" aria-hidden="true"><span>Label</span><span>When to use it</span><span class="num">Open</span><span></span></div>
-                ${g.options.map((o) => row(g, o))}
-                ${edit ? html`<template data-row-template>${row(null, null)}</template>` : ''}
+        <form method="post" action="${b}/${g.id}" ${edit ? raw('data-dirty') : ''}>${csrfField(ctx.csrf)}
+          <fieldset class="plain${edit ? '' : ' view-only'}" ${edit ? '' : raw('disabled')}>
+          <div class="section">
+            <div class="fields">
+              <div class="fields-2">
+                <div class="field"><label for="name-${g.id}">Name</label><input id="name-${g.id}" type="text" name="name" value="${g.name}" maxlength="40" required></div>
+                <div class="field"><label for="pick-${g.id}">How many Claude picks</label>${selectWrap(html`<select id="pick-${g.id}" name="pick">${(['one', 'two', 'any'] as const).map((p) => html`<option value="${p}" ${p === g.pick ? raw('selected') : ''}>${PICK_NAMES[p]}</option>`)}</select>`)}</div>
               </div>
-              ${edit ? html`<div class="row cl-add"><button type="button" class="btn sm" data-row-add>${icon('plus', 14)}Add label</button><span class="xs muted">Up to ${String(MAX_GROUP_OPTIONS)}.</span></div>` : ''}
+              ${textField({ id: `instruction-${g.id}`, name: 'instruction', label: 'What this category is about (optional)', value: g.instruction, max: 600, rows: Math.min(6, Math.max(2, Math.ceil(g.instruction.length / 120))), placeholder: 'What kind of work this is for the team, judged by the text.' })}
+              <div class="field">
+                <div class="lbl-row"><span class="lbl">Labels</span><span class="xs muted">Claude only picks these, by their sentence. New ones are created on GitHub the first time they’re used.</span></div>
+                <div class="cl-rows" data-rows data-rows-max="${String(MAX_GROUP_OPTIONS)}">
+                  <div class="cl-head" aria-hidden="true"><span>Label</span><span>When to use it</span><span class="num">Open</span><span></span></div>
+                  ${g.options.map((o) => row(g, o))}
+                  ${edit ? html`<template data-row-template>${row(null, null)}</template>` : ''}
+                </div>
+                ${edit ? html`<div class="row cl-add"><button type="button" class="btn sm" data-row-add>${icon('plus', 14)}Add label</button><span class="xs muted">Up to ${String(MAX_GROUP_OPTIONS)}.</span></div>` : ''}
+              </div>
             </div>
           </div>
-        </div>
-        <div class="section">
-          <div class="section-h"><div><h3>When Claude picks</h3><div class="desc">For new tickets, set separately for Discord tickets and issues opened on GitHub. Suggest shows the labels for someone to apply; Automatic adds them when Claude is at least ${String(c.threshold)}% sure. A backfill adds them whatever this says.</div></div>
-            <div class="src-modes${settings.githubEnabled ? '' : ' gh-off'}">
-              <span class="src-l">${icon('message-circle', 14)}Discord tickets</span>${segRadios('mode', MODE_OPTIONS, g.mode, `${g.name} for Discord tickets`)}
-              <span class="src-l gh">${icon('github', 14)}Opened on GitHub</span><span class="gh">${segRadios('gh_mode', MODE_OPTIONS, ghMode, `${g.name} for issues opened on GitHub`)}</span>
-            </div></div>
-        </div>
-        </fieldset>
-        <div class="card-f">${edit ? html`<span></span><div class="end">
-          <button type="button" class="btn" data-discard data-dirty-enable>Cancel</button>
-          ${submitBtn('Save category', { variant: 'primary', loading: 'Saving…', attrs: raw('data-dirty-enable') })}
-        </div>` : viewOnlyFooter('this category')}</div>
-      </form>
-    </section>`;
+          <div class="section">
+            <div class="section-h"><div><h3>When Claude picks</h3><div class="desc">For new tickets. Suggest shows the labels for someone to apply; Automatic adds them when Claude is at least ${String(c.threshold)}% sure. A backfill adds them whatever this says.</div></div>
+              <div class="src-modes${settings.githubEnabled ? '' : ' gh-off'}">
+                <span class="src-l">${icon('message-circle', 14)}Discord tickets</span>${segRadios('mode', MODE_OPTIONS, g.mode, `${g.name} for Discord tickets`)}
+                <span class="src-l gh">${icon('github', 14)}Opened on GitHub</span><span class="gh">${segRadios('gh_mode', MODE_OPTIONS, ghMode, `${g.name} for issues opened on GitHub`)}</span>
+              </div></div>
+          </div>
+          </fieldset>
+          <div class="card-f">${edit ? html`<span></span><div class="end">
+            <button type="button" class="btn" data-discard data-dirty-enable>Cancel</button>
+            ${submitBtn('Save category', { variant: 'primary', loading: 'Saving…', attrs: raw('data-dirty-enable') })}
+          </div>` : viewOnlyFooter('this category')}</div>
+        </form>
+      </div>
+    </details>`;
     };
 
-    const steps = [
-      { i: 'tags' as const, t: 'Your labels', d: 'In categories such as Kind or Platform, with one sentence each on when to use it.' },
-      { i: 'sparkles' as const, t: 'Claude picks', d: 'For every new ticket and issue, from each category, by those sentences. It never invents a label.' },
-      { i: 'github' as const, t: 'On GitHub', d: 'Added right away when Claude is sure enough, or suggested in Review. Backfill does older ones.' },
-    ];
     const body = html`
       ${await toolHeader(web, ctx, 'triage', 'triage.labels')}
-      <div class="stack">
-        <section class="card cl-intro" aria-labelledby="cl-intro-h">
-          <div class="card-b">
-            <h2 id="cl-intro-h">Custom labels</h2>
-            <p class="muted">Your own labels, on top of what triage adds by itself (priority, duplicate, needs info…). Each category is a question Claude answers for every ticket, like “what kind of work is this?”, and your labels are its answers.</p>
-            <ol class="cl-steps">${steps.map((x, i) => html`<li><span class="cl-step-i">${icon(x.i, 16)}</span><span><b>${String(i + 1)}. ${x.t}</b><span class="small muted">${x.d}</span></span></li>`)}</ol>
-            ${groups.length ? html`<div class="cl-sum">
-              <span class="chip-stat"><b>${n(groups.length)}</b> ${groups.length === 1 ? 'category' : 'categories'}</span>
-              <span class="chip-stat"><b>${n(labelCount)}</b> ${labelCount === 1 ? 'label' : 'labels'}</span>
-              <span class="chip-stat"><b>${n(open.open)}</b> open issues</span>
-            </div>` : ''}
+      <div class="cl-page">
+        <div class="cl-top">
+          <div>
+            <h2>Custom labels</h2>
+            <p class="muted">Your own labels, in categories. For every ticket Claude picks from each category, only from your labels. Open one to edit it.</p>
           </div>
-          ${edit
-            ? html`<div class="card-f plain"><div class="row"><span class="small muted">${groups.length ? 'Add a category:' : 'Start from a ready-made category, or an empty one:'}</span>${addButtons}</div>${full ? html`<span class="small muted">You have the most categories there can be (${String(MAX_LABEL_GROUPS)}).</span>` : ''}</div>`
-            : ''}
-          <div class="card-note">Which ticket types each category runs for is set in ${pageLink(ctx, 'triage.actions', 'Actions › Rules by ticket type', '#rules')}.${runs ? html` To add labels to tickets filed before, use ${pageLink(ctx, 'triage.runs', 'Re-run › Custom labels only')}.` : ''}</div>
-        </section>
-        ${groups.length ? groups.map(groupCard) : html`<div class="card">${empty('tags', 'No custom labels yet', edit ? 'Add a category above to start: Claude then sorts every new ticket into your labels.' : 'An admin can add them here.')}</div>`}
+          <div class="row">
+            ${runs && groups.length ? linkBtn(`${runs}?what=labels`, 'Backfill…', { icon: 'history' }) : ''}
+            ${edit ? addMenu : ''}
+          </div>
+        </div>
+        ${groups.length ? html`<div class="cl-sum-row">
+          <span class="chip-stat"><b>${n(groups.length)}</b> ${groups.length === 1 ? 'category' : 'categories'}</span>
+          <span class="chip-stat"><b>${n(labelCount)}</b> ${labelCount === 1 ? 'label' : 'labels'}</span>
+          <span class="chip-stat"><b>${n(open.open)}</b> open issues</span>
+        </div>` : ''}
+        ${groups.length
+          ? groups.map(category)
+          : html`<div class="card">${empty('tags', 'No custom labels yet', edit
+            ? 'Each category is a question Claude answers for every ticket, like “what kind of work is this?”, and your labels are its answers. Add one to start, ready-made or empty.'
+            : 'An admin can add them here.', edit ? addMenu : null)}</div>`}
+        <p class="xs muted cl-foot">Which ticket types each category runs for is set in ${pageLink(ctx, 'triage.actions', 'Actions › Rules by ticket type', '#rules')}. Counts are the open issues on GitHub now.</p>
       </div>`;
     return web.render(reply, ctx, 'Custom labels · AI triage', 'triage', body);
   });
