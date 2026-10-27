@@ -40,7 +40,14 @@ Discord endpoint, OAuth), one or more queue workers, and an optional triage work
   suggestions too). The worker only takes re-run items when no new ticket is waiting, one at a
   time, and a run waits instead of failing when Claude rate-limits it or when the
   installation's GitHub budget drops below a reserve (a fifth of the hourly limit, at least
-  500 calls), so filing always has room. Every step is written to `triage_log` (kept 90 days), shown
+  500 calls), so filing always has room. A custom-labels backfill is a run whose scope has
+  `labels` (the categories, the labels it may add, open ones missing them or all): its items are
+  open tickets and GitHub issues whatever triage did, each asked only about those categories with a
+  short prompt (the ticket, what triage found before, its labels now, its app's TRIAGE.md;
+  `buildLabelsSystemPrompt`), and applying it only adds labels on GitHub (and to our copy of the
+  issue): `triage_results` stay as they were. AI triage › Overview (`src/triage/overview.ts`,
+  `src/triage/label-stats.ts`) counts what triage did per period from the results and those runs,
+  and the labels on open issues from `issue_index`. Every step is written to `triage_log` (kept 90 days), shown
   live in AI triage › Activity with the queues and what the worker is doing. Bulk Apply from
   the inbox or Opened on GitHub (`triage_bulk`) takes only the suggestions the list's filters are
   about and applies them one ticket at a time, with the same GitHub-budget guard.

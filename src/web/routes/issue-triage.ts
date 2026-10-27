@@ -125,6 +125,8 @@ function eventText(e: { kind: string; detail: Record<string, unknown> }, names: 
       return { by, text: html`<span class="actor">${by}</span> applied the triage suggestion: ${list('actions').join(', ')}` };
     case 'triage_dismissed':
       return { by, text: html`<span class="actor">${by}</span> dismissed the triage suggestion: ${list('actions').join(', ')}` };
+    case 'triage_labels':
+      return { by, text: html`Custom labels added: ${list('labels').join(', ')}${by ? html` · by <span class="actor">${by}</span>` : ''}` };
     default:
       return { by, text: html`${e.kind}` };
   }

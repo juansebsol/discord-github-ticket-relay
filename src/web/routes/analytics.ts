@@ -18,7 +18,7 @@ import { empty, localTime, notice, pageHeader, plural, postBtn, segLinks, select
 
 const n = (x: number) => x.toLocaleString('en-US');
 /** 1,284 · 12.9K · 4.2M */
-function compact(x: number): string {
+export function compact(x: number): string {
   if (x < 10_000) return n(x);
   if (x < 1_000_000) return `${(x / 1000).toFixed(x < 100_000 ? 1 : 0).replace(/\.0$/, '')}K`;
   return `${(x / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`;
@@ -27,9 +27,9 @@ function compact(x: number): string {
 const signed = (x: number) => (x > 0 ? `+${compact(x)}` : x < 0 ? `−${compact(-x)}` : '0');
 
 /** Up is good, down is good, or neither (the delta stays neutral). */
-type Better = 'up' | 'down' | null;
+export type Better = 'up' | 'down' | null;
 
-function delta(total: number, prev: number | null, compare: string, better: Better): SafeHtml {
+export function delta(total: number, prev: number | null, compare: string, better: Better): SafeHtml {
   if (prev === null) return html`<div class="an-d muted">—<span class="an-vs">not recorded ${compare}</span></div>`;
   if (prev === 0 && total === 0) return html`<div class="an-d muted">Same<span class="an-vs">as ${compare}</span></div>`;
   if (prev === 0) return html`<div class="an-d muted">New<span class="an-vs">none ${compare}</span></div>`;

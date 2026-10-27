@@ -389,7 +389,7 @@ export function formatCost(usd: number): string {
 
 /** The name of any action, built-in or label group. */
 export function actionName(c: TriageConfig, key: string): string {
-  if (key.startsWith('group:')) return c.labelGroups.find((g) => groupKind(g.id) === key)?.name ?? 'Label group';
+  if (key.startsWith('group:')) return c.labelGroups.find((g) => groupKind(g.id) === key)?.name ?? 'Custom labels';
   return ACTION_NAMES[key as ActionKind] ?? key;
 }
 

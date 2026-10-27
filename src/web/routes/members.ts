@@ -283,7 +283,7 @@ export function registerMemberRoutes(app: FastifyInstance, web: Web): void {
         ? html`${mods.map(accessForm)}
             ${mods.length > 1 ? html`${picker}${fallback}` : ''}
             ${mods.map(editor)}
-            <div class="card-note">Changes save right away. Applying or dismissing AI suggestions, on Review, tickets or issues, needs Edit on Review. “Use these settings” on a re-run also needs Edit on Actions, Label groups and Prompt. Updating the panel in Discord needs Edit on Discord tickets › Panel.</div>
+            <div class="card-note">Changes save right away. Applying or dismissing AI suggestions, on Review, tickets or issues, needs Edit on Review. “Use these settings” on a re-run also needs Edit on Actions, Custom labels and Prompt. Updating the panel in Discord needs Edit on Discord tickets › Panel.</div>
 `
         : empty('users', 'No moderators yet', 'Moderators can read the tickets inbox. Invite someone as a moderator, then choose what else they can open here.', owner ? linkBtn(`${b}/members?invite=1#invite`, 'Invite', { icon: 'user-plus' }) : null)}
     </div>`;

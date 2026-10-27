@@ -17,7 +17,7 @@ import { MARKER_PREFIX, neutralizeGitHubMentions } from '../github/issue-content
 import { labelColor } from '../domain/ticket-types.js';
 import { UserFacingError, type AppRow, type Deps, type SubmissionRow } from '../domain/types.js';
 import { GitHubApiError, type IssueDetail } from '../github/client.js';
-import { normalizeVerdict, TriageAiError, verdictSchema, type TicketImage, type TriageAi, type Verdict } from './ai.js';
+import { labelsSchema, normalizeLabels, normalizeVerdict, TriageAiError, verdictSchema, type LabelsAnswer, type TicketImage, type TriageAi, type Verdict } from './ai.js';
 import { knowledgeTexts, listKnowledge, type AppKnowledge } from './knowledge.js';
 import { KnowledgeWriter } from './knowledge-writer.js';
 import { ChangeTracker, recentChanges, type AppChange } from './knowledge-changes.js';
@@ -26,7 +26,7 @@ import { AnalyticsRecorder } from '../analytics/recorder.js';
 import { Announcer } from '../announcements/announcer.js';
 import { KnownIssuesUpdater } from '../bot-features/known-issues.js';
 import { actionMatcher } from './state.js';
-import { buildKnowledgeBlock, buildSystemPrompt, buildUserPrompt, extractDescription, searchTerms, type Candidate } from './prompt.js';
+import { buildKnowledgeBlock, buildLabelsSystemPrompt, buildLabelsUserPrompt, buildSystemPrompt, buildUserPrompt, extractDescription, searchTerms, type Candidate, type PromptApp } from './prompt.js';
 import { findWork, type WorkItem, type WorkRef } from './work.js';
 import {
   appOf,
@@ -69,6 +69,7 @@ import {
   type ActionKind,
   type Flag,
   type GroupKind,
+  type LabelGroup,
   type MissingItem,
   type Mode,
   type Priority,
@@ -274,6 +275,24 @@ export function planActions(v: Verdict, c: TriageConfig, ctx?: TemplateContext, 
   return { auto, suggested };
 }
 
+/**
+ * A custom-labels pass's picks as labels to add, one action per category: never a label the issue
+ * has already, only `only` when given, and automatic at or above the threshold.
+ */
+export function planLabels(picked: LabelsAnswer, groups: LabelGroup[], threshold: number, has: string[], only: string[] | null): { auto: TriageAction[]; suggested: TriageAction[] } {
+  const there = new Set(has.map((l) => l.toLowerCase()));
+  const allowed = only ? new Set(only.map((l) => l.toLowerCase())) : null;
+  const auto: TriageAction[] = [];
+  const suggested: TriageAction[] = [];
+  for (const g of groups) {
+    const p = picked.labels[g.id];
+    const add = (p?.options ?? []).filter((l) => !there.has(l.toLowerCase()) && (!allowed || allowed.has(l.toLowerCase())));
+    if (!p || !add.length) continue;
+    (p.confidence >= threshold ? auto : suggested).push({ kind: groupKind(g.id), label: '', labels: add, groupName: g.name, close: false, confidence: p.confidence });
+  }
+  return { auto, suggested };
+}
+
 /** Short, human description of an action for the activity log. */
 export function describeAction(a: TriageAction): string {
   const what = a.kind === 'priority'
@@ -398,12 +417,16 @@ function githubMessage(err: unknown): string {
   return err instanceof GitHubApiError ? `${err.status} ${err.message}` : (err as Error)?.message ?? 'unknown error';
 }
 
-/** The system prompt for these settings. Label groups that are off everywhere are left out. */
+const promptApps = (apps: AppRow[]): PromptApp[] => apps.map((a) => ({ name: a.name, repo: `${a.repo_owner}/${a.repo_name}`, description: a.description ?? '' }));
+
+/** The system prompt for these settings. Custom label categories that are off everywhere are left out. */
 export function systemPromptFor(c: TriageConfig, apps: AppRow[]): string {
-  return buildSystemPrompt(
-    { ...c, labelGroups: c.labelGroups.filter((g) => g.mode !== 'off') },
-    { apps: apps.map((a) => ({ name: a.name, repo: `${a.repo_owner}/${a.repo_name}`, description: a.description ?? '' })), work: workOn(c) },
-  );
+  return buildSystemPrompt({ ...c, labelGroups: c.labelGroups.filter((g) => g.mode !== 'off') }, { apps: promptApps(apps), work: workOn(c) });
+}
+
+/** The system prompt for a custom-labels pass over these categories (whatever their modes). */
+export function labelsPromptFor(c: TriageConfig, groups: LabelGroup[], apps: AppRow[]): string {
+  return buildLabelsSystemPrompt(c, groups, { apps: promptApps(apps) });
 }
 
 /**
@@ -432,6 +455,20 @@ export interface Evaluation {
   inputTokens: number;
   outputTokens: number;
 }
+
+/** What a custom-labels pass decided for a ticket or issue. Nothing is added yet. */
+export interface LabelsEvaluation {
+  target: Target;
+  /** What Claude picked in each category, and why. */
+  picked: LabelsAnswer;
+  /** The labels to add, one action per category: sure enough (at or above the threshold), or not. */
+  auto: TriageAction[];
+  suggested: TriageAction[];
+  inputTokens: number;
+  outputTokens: number;
+}
+
+export type LabelsOutcome = { status: 'done'; e: LabelsEvaluation } | Exclude<Outcome, { status: 'done' }>;
 
 export type Outcome =
   | { status: 'done'; e: Evaluation }
@@ -463,9 +500,24 @@ function resultFields(e: Evaluation, applied: TriageAction[], suggested: TriageA
 /** Which re-run candidates: tickets from Discord, issues opened on GitHub, or both. */
 export type RerunSource = 'tickets' | 'github' | 'all';
 
+/**
+ * A custom-labels backfill (Re-run, Custom labels only): Claude is asked only about these
+ * categories, on open tickets and issues whatever triage did before, and only labels are added.
+ */
+export interface LabelsScope {
+  /** The categories (custom label groups) by id. */
+  groups: string[];
+  /** Only these labels may be added (lowercase); null: any of the categories' labels. */
+  only: string[] | null;
+  /** missing: open ones with none of those labels yet; all: every open one. */
+  which: 'missing' | 'all';
+}
+
 export interface RerunScope {
   /** Runs saved before GitHub issues existed have no source: Discord tickets. */
   source?: RerunSource;
+  /** Set for a custom-labels backfill; a full re-run otherwise. */
+  labels?: LabelsScope;
   /** Tickets triage already looked at, with no action applied (only suggestions, or nothing found). */
   untouched: boolean;
   /** Tickets never triaged: filed before triage was on, or skipped. */
@@ -497,6 +549,8 @@ export interface TriageRunRow {
 
 /** The ticket's triage result when a run started, to compare with. */
 export interface BeforeResult {
+  /** A custom-labels backfill: the labels from its categories the issue had when the run started (the rest is unset). */
+  labels?: string[];
   status: TriageResultRow['status'];
   applied: TriageAction[];
   suggestions: TriageAction[];
@@ -566,6 +620,20 @@ export function changeFrom(before: Decisions | null, after: Decisions): RunChang
   return decisionKey(before) === now ? 'same' : 'changed';
 }
 
+/** A result not applied yet (or that failed), so it can be. */
+const APPLICABLE = `(i.apply_status IS NULL OR i.apply_status = 'failed')`;
+
+/**
+ * A custom-labels backfill's results that adding labels can still change: the sure ones need a
+ * label Claude was sure enough of; every label also takes the ones whose less sure labels were
+ * left when the sure ones were added.
+ */
+export function labelsApplicable(mode: ApplyMode): string {
+  return mode === 'all'
+    ? `(${APPLICABLE} OR (i.apply_status = 'done' AND i.apply_suggestions = 0 AND json_array_length(COALESCE(i.suggestions, '[]')) > 0))`
+    : `${APPLICABLE} AND json_array_length(COALESCE(i.auto_actions, '[]')) > 0`;
+}
+
 const FILTER_SQL: Record<RunFilter, string> = {
   all: '1',
   changed: `i.status = 'done' AND i.change IN ('changed', 'new')`,
@@ -631,13 +699,14 @@ function isGitHubRateLimit(err: unknown): err is GitHubApiError {
  * GitHub, not known to be closed, with no triage action applied and not queued. Columns:
  * subject, submission_id, gh_repo_id, gh_number, at and tiebreak (newest first), and before.
  */
-function rerunSources(workspaceId: string, scope: RerunScope): { sql: string; params: unknown[] } {
+function rerunSources(workspaceId: string, scope: RerunScope, config?: TriageConfig): { sql: string; params: unknown[] } {
   const params: unknown[] = [];
   const $ = (v: unknown) => {
     params.push(v);
     return `$${params.length}`;
   };
   const source = scope.source ?? 'tickets';
+  if (scope.labels) return labelSources(workspaceId, scope, scope.labels, config, $, params);
   const kinds = (missing: string) => {
     const k = [
       scope.untouched ? `(r.status = 'done' AND json_array_length(COALESCE(r.applied_actions, '[]')) = 0)` : '',
@@ -669,6 +738,49 @@ function rerunSources(workspaceId: string, scope: RerunScope): { sql: string; pa
       WHERE i.repo_id IN (${repos}) AND i.state = 'open' AND i.gone = 0 AND i.app_name IS NULL
         AND NOT EXISTS (SELECT 1 FROM submissions s WHERE s.repo_id = i.repo_id AND s.issue_number = i.number)
         AND ${kinds('r.id IS NULL')}`);
+  }
+  if (!parts.length) parts.push('SELECT NULL AS subject, NULL AS submission_id, NULL AS gh_repo_id, NULL AS gh_number, NULL AS at, NULL AS tiebreak, NULL AS before WHERE 0');
+  return { sql: parts.join('\n UNION ALL \n'), params };
+}
+
+/** Every label of these categories, lowercase. */
+export function categoryLabels(c: TriageConfig | undefined, ids: string[]): string[] {
+  return [...new Set((c?.labelGroups ?? []).filter((g) => ids.includes(g.id)).flatMap((g) => g.options.map((o) => o.label.toLowerCase())))];
+}
+
+/**
+ * What a custom-labels backfill can pick, newest first: open filed tickets and open issues opened
+ * on GitHub, whatever triage did with them, without the labels asked for when that's the choice.
+ * `before` holds the labels of these categories each one has now (from our copy of the issue).
+ */
+function labelSources(workspaceId: string, scope: RerunScope, l: LabelsScope, config: TriageConfig | undefined, $: (v: unknown) => string, params: unknown[]): { sql: string; params: unknown[] } {
+  const source = scope.source ?? 'tickets';
+  const names = $(JSON.stringify(categoryLabels(config, l.groups)));
+  const wanted = $(JSON.stringify(l.only ?? categoryLabels(config, l.groups)));
+  const has = (labels: string, set: string) => `SELECT l.value FROM json_each(${labels}) l WHERE lower(l.value) IN (SELECT value FROM json_each(${set}))`;
+  const w = $(workspaceId);
+  const parts: string[] = [];
+  if (source !== 'github') {
+    const issue = `SELECT x.labels FROM issue_index x WHERE x.repo_id = s.repo_id AND x.number = s.issue_number`;
+    const where = [
+      `s.workspace_id = ${w}`, `s.status = 'created'`, 's.issue_number IS NOT NULL',
+      `NOT EXISTS (SELECT 1 FROM issue_index i WHERE i.repo_id = s.repo_id AND i.number = s.issue_number AND i.state = 'closed')`,
+    ];
+    if (l.which === 'missing') where.push(`NOT EXISTS (${has(`COALESCE((${issue}), '[]')`, wanted)})`);
+    if (scope.appId) where.push(`s.app_id = ${$(scope.appId)}`);
+    if (scope.typeName) where.push(`s.ticket_type_name = ${$(scope.typeName)}`);
+    parts.push(`SELECT 'sub:' || s.id AS subject, s.id AS submission_id, NULL AS gh_repo_id, NULL AS gh_number, s.completed_at AS at, s.rowid AS tiebreak,
+        json_object('labels', json((SELECT json_group_array(value) FROM (${has(`COALESCE((${issue}), '[]')`, names)})))) AS before
+      FROM submissions s WHERE ${where.join(' AND ')}`);
+  }
+  if (source !== 'tickets' && !scope.typeName) {
+    const repos = `SELECT DISTINCT repo_id FROM apps WHERE workspace_id = ${w}${scope.appId ? ` AND id = ${$(scope.appId)}` : ''}`;
+    parts.push(`SELECT 'gh:' || i.repo_id || ':' || i.number AS subject, NULL AS submission_id, i.repo_id AS gh_repo_id, i.number AS gh_number, i.created_at AS at, i.number AS tiebreak,
+        json_object('labels', json((SELECT json_group_array(value) FROM (${has('i.labels', names)})))) AS before
+      FROM issue_index i
+      WHERE i.repo_id IN (${repos}) AND i.state = 'open' AND i.gone = 0 AND i.app_name IS NULL
+        AND NOT EXISTS (SELECT 1 FROM submissions s WHERE s.repo_id = i.repo_id AND s.issue_number = i.number)
+        ${l.which === 'missing' ? `AND NOT EXISTS (${has('i.labels', wanted)})` : ''}`);
   }
   if (!parts.length) parts.push('SELECT NULL AS subject, NULL AS submission_id, NULL AS gh_repo_id, NULL AS gh_number, NULL AS at, NULL AS tiebreak, NULL AS before WHERE 0');
   return { sql: parts.join('\n UNION ALL \n'), params };
@@ -1025,7 +1137,7 @@ export class TriageEngine {
    * What is triaged and with which settings: a ticket uses the Discord-ticket modes and its
    * ticket type's rules; an issue opened on GitHub uses the GitHub modes.
    */
-  private async resolveSubject(workspaceId: string, subject: Subject, base: TriageConfig): Promise<
+  private async resolveSubject(workspaceId: string, subject: Subject, base: TriageConfig, o: { labelsOnly?: boolean } = {}): Promise<
     { skip: string } | { target: Target; effective: TriageConfig; c: TriageConfig; off: Set<string>; app: string; type: string | null; title: string | null }
   > {
     const { deps } = this;
@@ -1037,14 +1149,14 @@ export class TriageEngine {
       const type = sub.ticket_type_name ? (await listTicketTypes(deps.db, workspaceId)).find((t) => t.name === sub.ticket_type_name) ?? null : null;
       const off = actionsOffFor(base, type);
       const c = withActionsOff(base, off);
-      if (!anyActionOn(c)) return { skip: off.size >= allActionKeys(base).length ? 'Not in scope (ticket type)' : 'No triage actions are turned on' };
+      if (!o.labelsOnly && !anyActionOn(c)) return { skip: off.size >= allActionKeys(base).length ? 'Not in scope (ticket type)' : 'No triage actions are turned on' };
       return { target: sub, effective: base, c, off, app: sub.app_name, type: sub.ticket_type_name, title: decryptPayload(deps.box, sub)?.title ?? null };
     }
     const repoApps = (await listApps(deps.db, workspaceId)).filter((a) => a.repo_id === subject.repoId);
     if (!repoApps.length) return { skip: 'The repository is no longer connected' };
     if (base.appIds && !repoApps.some((a) => base.appIds!.includes(a.id))) return { skip: 'Not in scope (app)' };
     const c = forGitHub(base);
-    if (!anyActionOn(c)) return { skip: 'No triage actions are turned on for issues opened on GitHub' };
+    if (!o.labelsOnly && !anyActionOn(c)) return { skip: 'No triage actions are turned on for issues opened on GitHub' };
     if (await isTicketIssue(deps.db, subject.repoId, subject.number)) return { skip: 'Filed through Discord, so it’s triaged as a ticket' };
     const target = await this.issueTarget(workspaceId, subject.repoId, subject.number);
     if (!target) return { skip: 'GitHub isn’t connected' };
@@ -1135,19 +1247,7 @@ export class TriageEngine {
         result = await ask([]);
       }
     } catch (err) {
-      const e = err instanceof TriageAiError ? err : new TriageAiError('retry', (err as Error).message);
-      if (e.action === 'pause') {
-        // Triage › Activity shows when it stopped (once, not for every ticket that was waiting).
-        if (await pauseTriage(deps.db, workspaceId, e.pauseReason ?? 'rejected', e.message)) {
-          await writeTriageLog(deps.db, { workspaceId, source: 'system', result: 'failed', message: `Paused: ${e.message}` });
-        }
-        // Settings › Claude API shows the key's problem too.
-        if (key.source === 'workspace' && (e.pauseReason === 'key_invalid' || e.pauseReason === 'credits')) await recordKeyCheck(deps.db, workspaceId, stateFromPause(e.pauseReason), e.message);
-        deps.log.warn({ workspace: workspaceId, reason: e.pauseReason }, 'triage paused');
-        return { status: 'paused' };
-      }
-      if (e.action === 'skip') return skip(e.message, c.model);
-      return e.retryAfterSeconds ? { status: 'retry', message: e.message, waitSeconds: e.retryAfterSeconds, waitFor: 'claude' } : { status: 'retry', message: e.message };
+      return this.aiFailed(err, workspaceId, key.source, c.model);
     }
 
     if (key.source === 'workspace') await recordKeyCheck(deps.db, workspaceId, 'working', null).catch(() => {});
@@ -1163,6 +1263,83 @@ export class TriageEngine {
     const ctx: TemplateContext = { app: resolved.app, repoUrl: `https://github.com/${own}`, repo: own, guildId: dc?.guild_id ?? null, helpChannel: c.helpChannel };
     const { auto, suggested } = planActions(verdict, c, ctx, new Map(apps.map((a) => [a.name, `${a.repo_owner}/${a.repo_name}`])));
     return { status: 'done', e: { target, verdict, auto, suggested, config: c, inputTokens: result.inputTokens, outputTokens: result.outputTokens } };
+  }
+
+  /** What a failed Claude call means for the ticket: triage pauses, the ticket is skipped, or tried again later. */
+  private async aiFailed(err: unknown, workspaceId: string, keySource: string, model: string): Promise<Exclude<Outcome, { status: 'done' }>> {
+    const { deps } = this;
+    const e = err instanceof TriageAiError ? err : new TriageAiError('retry', (err as Error).message);
+    if (e.action === 'pause') {
+      // Triage › Activity shows when it stopped (once, not for every ticket that was waiting).
+      if (await pauseTriage(deps.db, workspaceId, e.pauseReason ?? 'rejected', e.message)) {
+        await writeTriageLog(deps.db, { workspaceId, source: 'system', result: 'failed', message: `Paused: ${e.message}` });
+      }
+      // Settings › Claude API shows the key's problem too.
+      if (keySource === 'workspace' && (e.pauseReason === 'key_invalid' || e.pauseReason === 'credits')) await recordKeyCheck(deps.db, workspaceId, stateFromPause(e.pauseReason), e.message);
+      deps.log.warn({ workspace: workspaceId, reason: e.pauseReason }, 'triage paused');
+      return { status: 'paused' };
+    }
+    if (e.action === 'skip') return { status: 'skip', reason: e.message, model };
+    return e.retryAfterSeconds ? { status: 'retry', message: e.message, waitSeconds: e.retryAfterSeconds, waitFor: 'claude' } : { status: 'retry', message: e.message };
+  }
+
+  /**
+   * A custom-labels pass (Re-run, Custom labels only) over a ticket or issue that's already filed:
+   * reads it from GitHub and asks Claude only about the chosen categories, with what triage found
+   * before, the labels it has now and its app's TRIAGE.md. Plans the labels to add: never one it
+   * already has, and with `only`, just those. Changes nothing on GitHub.
+   */
+  async evaluateLabels(workspaceId: string, subject: Subject, base: TriageConfig, scope: LabelsScope): Promise<LabelsOutcome> {
+    const { deps } = this;
+    const skip = (reason: string): LabelsOutcome => ({ status: 'skip', reason });
+    const resolved = await this.resolveSubject(workspaceId, subject, base, { labelsOnly: true });
+    if ('skip' in resolved) return skip(resolved.skip);
+    const { target, off } = resolved;
+    // Categories the ticket type's rules switch off aren't asked about.
+    const groups = base.labelGroups.filter((g) => scope.groups.includes(g.id) && !off.has(groupKind(g.id)));
+    if (!groups.length) return skip(base.labelGroups.some((g) => scope.groups.includes(g.id)) ? 'Not in scope (ticket type)' : 'Those categories were deleted');
+    const usage = await monthlyUsage(deps.db, workspaceId);
+    if (usage.triaged >= base.monthlyLimit) return skip('Monthly limit reached');
+    const key = await resolveApiKey(deps, workspaceId);
+    if (!key) {
+      if (await pauseTriage(deps.db, workspaceId, 'no_key', null)) await writeTriageLog(deps.db, { workspaceId, source: 'system', result: 'failed', message: 'Paused: there’s no Claude API key.' });
+      return { status: 'paused' };
+    }
+    if (!deps.github) return skip('GitHub isn’t configured');
+    const conn = await getGitHubConnection(deps.db, workspaceId);
+    let issue: IssueDetail;
+    try {
+      issue = await deps.github.getIssueDetail(conn?.installation_id ?? target.installation_id, target.repo_owner, target.repo_name, target.issue_number!);
+    } catch (err) {
+      if (err instanceof GitHubApiError && [403, 404, 410].includes(err.status) && !err.isRateLimit) return skip('The GitHub issue no longer exists or can’t be read');
+      if (isGitHubRateLimit(err)) return { status: 'retry', message: 'GitHub rate limit', waitSeconds: err.retryAfterSeconds ?? 60, waitFor: 'github' };
+      return { status: 'retry', message: `GitHub unavailable: ${githubMessage(err)}` };
+    }
+    if (issue.state === 'closed') return skip('The issue was already closed on GitHub');
+    const ticket = ticketOf(target);
+    if (!ticket) {
+      if (issue.authorIsBot) return skip('Opened by a bot');
+      if (issue.body.includes(MARKER_PREFIX)) return skip('Filed through Discord, so it’s triaged as a ticket');
+    }
+    // What triage found before: its summary, reason and priority give Claude more to go on.
+    const prev = subject.kind === 'ticket' ? await this.getResult(workspaceId, subject.submissionId) : await this.getIssueResult(workspaceId, subject.repoId, subject.number);
+    const known = prev?.status === 'done' && prev.verdict ? { summary: prev.verdict.summary ?? null, reason: prev.verdict.reason ?? null, priority: prev.verdict.priority ?? null } : null;
+    const [apps, knowledge] = await Promise.all([listApps(deps.db, workspaceId), listKnowledge(deps.db, workspaceId)]);
+    const appIds = ticket ? [ticket.app_id] : apps.filter((a) => a.repo_id === target.repo_id).map((a) => a.id);
+    const merged = base.knowledgeAuto ? await recentChanges(deps.db, appIds.filter((x): x is string => Boolean(x))) : new Map<string, AppChange[]>();
+    const block = knowledgePromptFor(apps, knowledge, appIds, merged);
+    const system = labelsPromptFor(base, groups, apps);
+    const user = buildLabelsUserPrompt({ app: resolved.app, type: resolved.type, title: resolved.title ?? issue.title, description: extractDescription(issue.body) }, known, issue.labels);
+    let result;
+    try {
+      result = await this.ai.pickLabels(key.key, base.model, block ? [system, block] : [system], user, labelsSchema(groups));
+    } catch (err) {
+      return this.aiFailed(err, workspaceId, key.source, base.model);
+    }
+    if (key.source === 'workspace') await recordKeyCheck(deps.db, workspaceId, 'working', null).catch(() => {});
+    const picked: LabelsAnswer = { reason: String(result.answer.reason ?? '').replace(/\s+/g, ' ').trim().slice(0, 600), labels: normalizeLabels(result.answer.labels, groups) };
+    const { auto, suggested } = planLabels(picked, groups, base.threshold, issue.labels, scope.only);
+    return { status: 'done', e: { target, picked, auto, suggested, inputTokens: result.inputTokens, outputTokens: result.outputTokens } };
   }
 
   /**
@@ -1350,7 +1527,8 @@ export class TriageEngine {
 
   /** How many tickets a re-run with this scope would pick (before the limit). */
   async countRerun(workspaceId: string, scope: RerunScope): Promise<number> {
-    const w = rerunSources(workspaceId, scope);
+    const config = scope.labels ? (await getTriageSettings(this.deps.db, workspaceId)).config : undefined;
+    const w = rerunSources(workspaceId, scope, config);
     const { rows } = await this.deps.db.query<{ n: number }>(`SELECT count(*) AS n FROM (${w.sql})`, w.params);
     return rows[0]?.n ?? 0;
   }
@@ -1362,7 +1540,8 @@ export class TriageEngine {
   async startRun(workspaceId: string, userId: string, o: { mode: 'preview' | 'apply'; name: string | null; scope: RerunScope }): Promise<TriageRunRow> {
     const run = await this.startRunInner(workspaceId, userId, o);
     const items = (run.scope.limit ?? 0) < (run.scope.matched ?? 0) ? run.scope.limit : run.scope.matched;
-    await writeTriageLog(this.deps.db, { workspaceId, source: run.mode === 'preview' ? 'preview' : 'rerun', result: 'info', runId: run.id, by: userId, message: `Re-run started (${run.mode === 'preview' ? 'preview' : 'applying right away'}): ${items ?? 0} queued` });
+    const what = run.scope.labels ? 'Custom labels backfill' : 'Re-run';
+    await writeTriageLog(this.deps.db, { workspaceId, source: run.mode === 'preview' ? 'preview' : 'rerun', result: 'info', runId: run.id, by: userId, message: `${what} started (${run.mode === 'preview' ? 'preview' : 'applying right away'}): ${items ?? 0} queued` });
     return run;
   }
 
@@ -1370,13 +1549,24 @@ export class TriageEngine {
     const { db } = this.deps;
     const settings = await getTriageSettings(db, workspaceId);
     const source = o.scope.source ?? 'tickets';
-    if (o.mode === 'apply' && ((source !== 'github' && !settings.enabled) || (source !== 'tickets' && !settings.githubEnabled))) {
-      throw new UserFacingError(source === 'tickets' ? 'Turn triage on to apply results. A preview works while it’s off.' : 'Turn triage on for these issues to apply results. A preview works while it’s off.');
-    }
-    const ticketsOn = anyActionOn(settings.config);
-    const githubOn = anyActionOn(forGitHub(settings.config));
-    if (source === 'tickets' ? !ticketsOn : source === 'github' ? !githubOn : !ticketsOn && !githubOn) {
-      throw new UserFacingError(source === 'github' ? 'Turn at least one action on for issues opened on GitHub first.' : 'Turn at least one triage action on first.');
+    const labels = o.scope.labels;
+    if (labels) {
+      // A backfill only adds labels, so it works whatever is switched on.
+      const groups = labels.groups.filter((id) => settings.config.labelGroups.some((g) => g.id === id));
+      if (!groups.length) throw new UserFacingError('Choose at least one category of custom labels.');
+      const known = new Set(categoryLabels(settings.config, groups));
+      const only = labels.only?.map((l) => l.toLowerCase()).filter((l) => known.has(l)) ?? null;
+      if (labels.only && !only?.length) throw new UserFacingError('Choose at least one label to add.');
+      o = { ...o, scope: { ...o.scope, labels: { groups, only, which: labels.which === 'all' ? 'all' : 'missing' } } };
+    } else {
+      if (o.mode === 'apply' && ((source !== 'github' && !settings.enabled) || (source !== 'tickets' && !settings.githubEnabled))) {
+        throw new UserFacingError(source === 'tickets' ? 'Turn triage on to apply results. A preview works while it’s off.' : 'Turn triage on for these issues to apply results. A preview works while it’s off.');
+      }
+      const ticketsOn = anyActionOn(settings.config);
+      const githubOn = anyActionOn(forGitHub(settings.config));
+      if (source === 'tickets' ? !ticketsOn : source === 'github' ? !githubOn : !ticketsOn && !githubOn) {
+        throw new UserFacingError(source === 'github' ? 'Turn at least one action on for issues opened on GitHub first.' : 'Turn at least one triage action on first.');
+      }
     }
     if (!(await resolveApiKey(this.deps, workspaceId))) throw new UserFacingError('Add a Claude API key in Settings first.');
     const { rows: running } = await db.query('SELECT id FROM triage_runs WHERE workspace_id = $1 AND status = $2', [workspaceId, 'running']);
@@ -1385,10 +1575,10 @@ export class TriageEngine {
     const left = settings.config.monthlyLimit - usage.triaged;
     if (left <= 0) throw new UserFacingError('This month’s triage limit is used up. Raise the monthly limit to re-run.');
     const matched = await this.countRerun(workspaceId, o.scope);
-    if (!matched) throw new UserFacingError('No open tickets match. Change which tickets to include.');
+    if (!matched) throw new UserFacingError(o.scope.labels?.which === 'missing' ? 'Every open ticket and issue here has those labels already.' : 'No open tickets match. Change which tickets to include.');
     const limit = Math.max(1, Math.min(o.scope.limit, MAX_RERUN, left));
     const scope: RerunScope = { ...o.scope, source, limit, matched };
-    const w = rerunSources(workspaceId, scope);
+    const w = rerunSources(workspaceId, scope, settings.config);
     const id = randomUUID();
     const n = w.params.length;
     // Everything that matches is queued at once, newest first, with its triage so far to compare with.
@@ -1505,19 +1695,27 @@ export class TriageEngine {
     if (run.status === 'running') throw new UserFacingError('Wait for the preview to finish, or stop it, first.', 409);
     const settings = await getTriageSettings(db, workspaceId);
     const source = run.scope.source ?? 'tickets';
-    if (o.mode !== 'inbox' && ((source !== 'github' && !settings.enabled) || (source !== 'tickets' && !settings.githubEnabled))) {
+    // A custom-labels backfill only adds labels: the preview itself is the review.
+    if (run.scope.labels && o.mode === 'inbox') throw new UserFacingError('A custom-labels backfill only adds labels on GitHub.');
+    if (!run.scope.labels && o.mode !== 'inbox' && ((source !== 'github' && !settings.enabled) || (source !== 'tickets' && !settings.githubEnabled))) {
       throw new UserFacingError('Turn triage on (for Discord tickets and, if included, issues opened on GitHub) to apply results on GitHub.');
     }
     if (!o.ids?.length && !o.filter) throw new UserFacingError('Select the results to apply.');
+    // A backfill's "all" means the ones that get labels (the rest have nothing to add).
+    if (run.scope.labels && o.filter === 'all') o = { ...o, filter: 'changed' };
     const res = await db.query(
       `UPDATE triage_run_items AS i SET apply_status = 'pending', apply_note = NULL, apply_suggestions = $3, apply_inbox_only = $4, lease_until_at = NULL
-       WHERE i.run_id = $1 AND i.status = 'done' AND (i.apply_status IS NULL OR i.apply_status = 'failed')
+       WHERE i.run_id = $1 AND i.status = 'done' AND ${run.scope.labels ? labelsApplicable(o.mode) : APPLICABLE}
          AND ${o.ids?.length ? 'i.subject IN (SELECT value FROM json_each($2))' : `$2 IS NULL AND ${FILTER_SQL[o.filter ?? 'all']}`}`,
       [runId, o.ids?.length ? JSON.stringify(o.ids) : null, o.mode === 'all' ? 1 : 0, o.mode === 'inbox' ? 1 : 0],
     );
-    if (!res.rowCount) throw new UserFacingError('There’s nothing left to apply here.', 409);
+    if (!res.rowCount) {
+      throw new UserFacingError(run.scope.labels && o.mode !== 'all' ? `None of these has a label Claude was at least ${run.config_used.threshold}% sure of. Add every label to add the ones it was less sure of.` : 'There’s nothing left to apply here.', 409);
+    }
     await db.query('UPDATE triage_runs SET applied_at = now_ms(), applied_by = $2 WHERE id = $1', [runId, userId]);
-    const how = o.mode === 'inbox' ? 'to the inbox only (as suggestions)' : o.mode === 'all' ? 'on GitHub, suggestions included' : 'on GitHub (automatic actions)';
+    const how = run.scope.labels
+      ? o.mode === 'all' ? '(every label Claude picked)' : `(labels Claude was at least ${run.config_used.threshold}% sure of)`
+      : o.mode === 'inbox' ? 'to the inbox only (as suggestions)' : o.mode === 'all' ? 'on GitHub, suggestions included' : 'on GitHub (automatic actions)';
     await writeTriageLog(db, { workspaceId, source: 'rerun', result: 'info', runId, by: userId, message: `Applying ${res.rowCount} result${res.rowCount === 1 ? '' : 's'} ${how}, one at a time` });
     return res.rowCount;
   }
@@ -1589,10 +1787,12 @@ export class TriageEngine {
       if (run.waiting_until_at) await db.query('UPDATE triage_runs SET waiting_until_at = NULL, waiting_reason = NULL WHERE id = $1', [run.id]);
 
       if (job === 'apply') {
-        await applied(await this.commitItem(run, item, run.applied_by));
+        await applied(run.scope.labels ? await this.commitLabels(run, item, run.applied_by) : await this.commitItem(run, item, run.applied_by));
         return;
       }
-      const out = await this.evaluate(run.workspace_id, subjectOfItem(item), run.config_used);
+      const out = run.scope.labels
+        ? await this.evaluateLabels(run.workspace_id, subjectOfItem(item), run.config_used, run.scope.labels)
+        : await this.evaluate(run.workspace_id, subjectOfItem(item), run.config_used);
       if (out.status === 'skip') {
         await set({ status: 'skipped', note: out.reason, model: out.model ?? null, completed_at: new Date() });
         await writeTriageLog(db, { ...about, source: evalSource, result: 'skipped', message: out.reason });
@@ -1604,6 +1804,22 @@ export class TriageEngine {
           ? { status: 'failed', note: out.message, completed_at: new Date() }
           : { note: out.message, next_attempt_at: new Date(Date.now() + 60_000 * item.attempts) });
         if (item.attempts >= RERUN_ATTEMPTS) await writeTriageLog(db, { ...about, source: evalSource, result: 'failed', message: `Gave up after ${item.attempts} tries: ${out.message}` });
+      } else if ('picked' in out.e) {
+        // A custom-labels backfill: the labels Claude picked, added right away in a run that applies.
+        const e = out.e;
+        const done: RunItemRow = { ...item, verdict: e.picked as unknown as Verdict, auto_actions: e.auto, suggestions: e.suggested };
+        const change: RunChange = !e.auto.length && !e.suggested.length ? 'same' : item.before?.labels?.length ? 'changed' : 'new';
+        await set({ status: 'done', note: null, change, verdict: e.picked, auto_actions: e.auto, suggestions: e.suggested, model: run.config_used.model, input_tokens: e.inputTokens, output_tokens: e.outputTokens, completed_at: new Date() });
+        if (run.mode === 'preview') await writeTriageLog(db, { ...about, source: 'preview', ref: e.target.ref, result: 'ok', detail: { auto: e.auto, suggested: e.suggested } });
+        if (run.mode === 'apply') {
+          try {
+            await applied(await this.commitLabels(run, done, run.created_by, e));
+          } catch (err) {
+            if (!isGitHubRateLimit(err)) throw err;
+            await set({ apply_status: 'pending' });
+            await this.waitRun(run, item, new Date(Date.now() + (err.retryAfterSeconds ?? 60) * 1000), 'github', false);
+          }
+        }
       } else {
         const { e } = out;
         const done: RunItemRow = { ...item, verdict: e.verdict, auto_actions: e.auto, suggestions: e.suggested };
@@ -1702,6 +1918,79 @@ export class TriageEngine {
     }
     const did = { applied, suggested, inbox: inboxOnly, ref: target.ref };
     return error ? { status: 'failed', note: `${error}. Kept as suggestions.`, ...did } : { status: 'done', note: null, ...did };
+  }
+
+  /**
+   * Adds a custom-labels backfill's labels on GitHub: the ones Claude was sure enough of, or every
+   * one it picked when someone applied them all. Labels only: no comment, nothing closed, and the
+   * ticket's triage result stays as it was. Skipped when the issue was closed since, or already
+   * has them all.
+   */
+  private async commitLabels(run: TriageRunRow, item: RunItemRow, userId: string | null, fresh?: LabelsEvaluation): Promise<CommitResult> {
+    const { deps } = this;
+    const subject = subjectOfItem(item);
+    const target: Target | null = fresh?.target
+      ?? (subject.kind === 'ticket' ? await getSubmission(deps.db, run.workspace_id, subject.submissionId) : await this.issueTarget(run.workspace_id, subject.repoId, subject.number));
+    const ticket = target ? ticketOf(target) : null;
+    if (!target || !target.issue_number || (ticket && ticket.status !== 'created')) return { status: 'skipped', note: subject.kind === 'ticket' ? 'The ticket is no longer filed' : 'The repository isn’t connected any more' };
+    const picked = [...(item.auto_actions ?? []), ...(!fresh && item.apply_suggestions ? item.suggestions ?? [] : [])];
+    if (!picked.length) return { status: 'skipped', note: `Nothing Claude was at least ${run.config_used.threshold}% sure of`, ref: target.ref };
+    // A preview may be old: the issue may be closed, or labelled by someone, since.
+    let has = new Set<string>();
+    if (!fresh && deps.github) {
+      try {
+        const conn = await getGitHubConnection(deps.db, run.workspace_id);
+        const live = await deps.github.getIssueDetail(conn?.installation_id ?? target.installation_id, target.repo_owner, target.repo_name, target.issue_number);
+        if (live.state === 'closed') return { status: 'skipped', note: 'The issue was closed since the preview', ref: target.ref };
+        has = new Set(live.labels.map((l) => l.toLowerCase()));
+      } catch (err) {
+        if (isGitHubRateLimit(err)) throw err;
+        return { status: 'failed', note: `GitHub unavailable: ${githubMessage(err)}`, ref: target.ref };
+      }
+    }
+    const add = picked.map((a) => ({ ...a, labels: (a.labels ?? []).filter((l) => !has.has(l.toLowerCase())) })).filter((a) => a.labels.length);
+    if (!add.length) return { status: 'skipped', note: 'It has those labels already', ref: target.ref };
+    try {
+      await applyToGitHub(deps, target, add);
+    } catch (err) {
+      if (isGitHubRateLimit(err)) throw err;
+      return { status: 'failed', note: `Couldn’t update the GitHub issue: ${githubMessage(err)}`, ref: target.ref };
+    }
+    const labels = add.flatMap(actionLabels);
+    // Our copy of the issue has them right away (the next sync agrees).
+    await deps.db.query(
+      `UPDATE issue_index SET labels = (SELECT json_group_array(value) FROM (SELECT value FROM json_each(issue_index.labels) UNION SELECT value FROM json_each($3))) WHERE repo_id = $1 AND number = $2`,
+      [target.repo_id, target.issue_number, JSON.stringify(labels)],
+    ).catch(() => {});
+    const detail = { by: userId, labels };
+    if (ticket) await addEvent(deps.db, ticket.id, 'triage_labels', detail);
+    else {
+      const row = await this.getIssueResult(run.workspace_id, target.repo_id, target.issue_number);
+      if (row) await addIssueEvent(deps.db, row.id, 'triage_labels', detail);
+    }
+    return { status: 'done', note: null, applied: add, ref: target.ref };
+  }
+
+  /** A custom-labels backfill's results that adding labels can still change (see labelsApplicable). */
+  async labelsLeft(runId: string): Promise<number> {
+    const { rows } = await this.deps.db.query<{ n: number }>(`SELECT count(*) AS n FROM triage_run_items i WHERE i.run_id = $1 AND i.status = 'done' AND ${labelsApplicable('all')} AND ${FILTER_SQL.changed}`, [runId]);
+    return Number(rows[0]?.n ?? 0);
+  }
+
+  /** What a custom-labels backfill picks, per label: how many tickets it would add it to (sure, and not sure enough), and to how many it was added. */
+  async runLabelTotals(runId: string): Promise<{ label: string; category: string; sure: number; unsure: number; added: number }[]> {
+    const { rows } = await this.deps.db.query<{ label: string; category: string; sure: number; unsure: number; added: number }>(
+      `SELECT l.value AS label, min(json_extract(x.action, '$.groupName')) AS category, sum(x.sure) AS sure, sum(1 - x.sure) AS unsure,
+         sum(x.apply_status = 'done' AND (x.sure = 1 OR x.apply_suggestions = 1)) AS added
+       FROM (
+         SELECT a.value AS action, 1 AS sure, i.apply_status, i.apply_suggestions FROM triage_run_items i, json_each(i.auto_actions) a WHERE i.run_id = $1 AND i.status = 'done'
+         UNION ALL
+         SELECT a.value, 0, i.apply_status, i.apply_suggestions FROM triage_run_items i, json_each(i.suggestions) a WHERE i.run_id = $1 AND i.status = 'done'
+       ) x, json_each(json_extract(x.action, '$.labels')) l
+       GROUP BY l.value ORDER BY sum(x.sure) + sum(1 - x.sure) DESC, l.value`,
+      [runId],
+    );
+    return rows.map((r) => ({ ...r, sure: Number(r.sure ?? 0), unsure: Number(r.unsure ?? 0), added: Number(r.added ?? 0) }));
   }
 
   // ---- Activity (Triage › Activity) ---------------------------------------------------------------

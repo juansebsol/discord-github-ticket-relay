@@ -26,12 +26,17 @@ export interface VerdictContext {
  * rather than as enums: the SDK only passes enums on as hints, and a strict check would throw
  * away the whole answer for one stray label. normalizeVerdict drops anything not listed.
  */
-export function verdictSchema(ctx: VerdictContext) {
-  const appName = z.string().describe(ctx.apps.length ? `One of these app names: ${ctx.apps.join(', ')}` : 'An app name');
-  const labels = z.object(Object.fromEntries(ctx.groups.map((g) => [g.id, z.object({
+/** Custom labels: per category, the labels picked and a confidence. */
+function labelsField(groups: LabelGroup[]) {
+  return z.object(Object.fromEntries(groups.map((g) => [g.id, z.object({
     options: z.array(z.string().describe(`One of: ${g.options.map((o) => o.label).join(', ')}`)),
     confidence: int(),
   })])));
+}
+
+export function verdictSchema(ctx: VerdictContext) {
+  const appName = z.string().describe(ctx.apps.length ? `One of these app names: ${ctx.apps.join(', ')}` : 'An app name');
+  const labels = labelsField(ctx.groups);
   return z.object({
     reason: z.string(),
     summary: z.string(),
@@ -76,8 +81,18 @@ export function verdictSchema(ctx: VerdictContext) {
   });
 }
 
-/** The answer with no label groups or apps (types and tests). */
+/** The answer with no custom labels or apps (types and tests). */
 export const VerdictSchema = verdictSchema({ groups: [], apps: [] });
+
+/** The answer to a custom-labels backfill: only the categories asked about (reason first). */
+export function labelsSchema(groups: LabelGroup[]) {
+  return z.object({ reason: z.string(), labels: labelsField(groups) });
+}
+
+export interface LabelsAnswer {
+  reason: string;
+  labels: Record<string, { options: string[]; confidence: number }>;
+}
 
 export type AiVerdict = Omit<z.infer<typeof VerdictSchema>, 'labels' | 'shared_apps' | 'right_app'> & {
   labels: Record<string, { options: string[]; confidence: number }>;
@@ -238,6 +253,17 @@ export class TriageAi {
    * for every ticket of that app.
    */
   async classify(apiKey: string, model: string, system: string | string[], user: string, schema: ReturnType<typeof verdictSchema> = VerdictSchema, images: TicketImage[] = []): Promise<Classification> {
+    const r = await this.parse(apiKey, model, system, user, schema, images);
+    return { verdict: r.answer as AiVerdict, inputTokens: r.inputTokens, outputTokens: r.outputTokens };
+  }
+
+  /** A custom-labels backfill: the same call, answering only the categories asked about. */
+  async pickLabels(apiKey: string, model: string, system: string[], user: string, schema: ReturnType<typeof labelsSchema>): Promise<{ answer: LabelsAnswer; inputTokens: number; outputTokens: number }> {
+    const r = await this.parse(apiKey, model, system, user, schema, []);
+    return { answer: r.answer as LabelsAnswer, inputTokens: r.inputTokens, outputTokens: r.outputTokens };
+  }
+
+  private async parse(apiKey: string, model: string, system: string | string[], user: string, schema: z.ZodObject, images: TicketImage[]): Promise<{ answer: unknown; inputTokens: number; outputTokens: number }> {
     try {
       const response = await this.client(apiKey).messages.parse({
         model,
@@ -256,7 +282,7 @@ export class TriageAi {
       if (response.stop_reason === 'refusal') throw new TriageAiError('skip', 'Claude declined to classify this ticket.');
       if (response.stop_reason === 'max_tokens') throw new TriageAiError('skip', 'Claude’s answer was cut off.');
       if (!response.parsed_output) throw new TriageAiError('skip', 'Claude’s answer couldn’t be read.');
-      return { verdict: response.parsed_output as AiVerdict, inputTokens: response.usage.input_tokens + (response.usage.cache_read_input_tokens ?? 0) + (response.usage.cache_creation_input_tokens ?? 0), outputTokens: response.usage.output_tokens };
+      return { answer: response.parsed_output, inputTokens: response.usage.input_tokens + (response.usage.cache_read_input_tokens ?? 0) + (response.usage.cache_creation_input_tokens ?? 0), outputTokens: response.usage.output_tokens };
     } catch (err) {
       throw classifyAiError(err);
     }
@@ -291,6 +317,17 @@ export interface NormalizeContext {
   work?: Map<string, WorkItem>;
 }
 
+/** Custom labels as answered: only each category's own labels, as many as it allows, confidence 0–100. */
+export function normalizeLabels(answer: Record<string, { options: string[]; confidence: number }> | undefined, groups: LabelGroup[]): Record<string, { options: string[]; confidence: number }> {
+  const labels: Record<string, { options: string[]; confidence: number }> = {};
+  for (const g of groups) {
+    const allowed = new Set(g.options.map((o) => o.label));
+    const picked = [...new Set((answer?.[g.id]?.options ?? []).filter((o) => allowed.has(o)))];
+    labels[g.id] = { options: picked.slice(0, g.pick === 'one' ? 1 : g.pick === 'two' ? 2 : picked.length), confidence: Math.max(0, Math.min(100, Math.round(answer?.[g.id]?.confidence ?? 0))) };
+  }
+  return labels;
+}
+
 /**
  * Clamps confidences to 0–100 and keeps only what Claude was actually shown: duplicates from
  * the ticket's repository (once each, most confident first), a regression of a closed issue,
@@ -318,12 +355,7 @@ export function normalizeVerdict(v: AiVerdict, ctx: NormalizeContext | Set<numbe
   const fix = workByRef(v.fixed_by, shown);
   const fixed = fix && fix.state === 'merged' ? fix : null;
   const parts = (v.parts ?? []).map((p) => text(p, 160)).filter(Boolean).slice(0, 6);
-  const labels: Verdict['labels'] = {};
-  for (const g of x.groups) {
-    const allowed = new Set(g.options.map((o) => o.label));
-    const picked = [...new Set((v.labels?.[g.id]?.options ?? []).filter((o) => allowed.has(o)))];
-    labels[g.id] = { options: picked.slice(0, g.pick === 'one' ? 1 : g.pick === 'two' ? 2 : picked.length), confidence: c(v.labels?.[g.id]?.confidence ?? 0) };
-  }
+  const labels = normalizeLabels(v.labels, x.groups);
   const apps = new Set(x.apps);
   return {
     ...v,

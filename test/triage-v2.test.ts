@@ -135,7 +135,8 @@ describe('label groups', () => {
     expect(groups.at(-1)).toMatchObject({ name: 'Platform', mode: 'off' });
     const page = await env.server.inject({ method: 'GET', url: `${w()}/triage/labels`, ...get(ws.owner) });
     expect(page.statusCode).toBe(200);
-    expect(page.body).toContain('macos: macOS only.');
+    expect(page.body).toContain('value="macos"');
+    expect(page.body).toContain('aria-label="When to use it">macOS only.</textarea>');
   });
 
   it('saves a group from “label: description” lines and rejects duplicates', async () => {

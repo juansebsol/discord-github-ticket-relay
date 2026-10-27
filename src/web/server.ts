@@ -46,6 +46,7 @@ import { registerClaudeRoutes } from './routes/claude.js';
 import { registerHealthRoutes } from './routes/health.js';
 import { registerAlertRoutes } from './routes/alerts.js';
 import { registerTriageReviewRoutes } from './routes/triage-review.js';
+import { registerTriageOverviewRoutes } from './routes/triage-overview.js';
 import { registerMovedRoutes } from './routes/tool.js';
 import { MAX_FILE_BYTES } from '../domain/files.js';
 
@@ -271,6 +272,7 @@ export async function buildServer(deps: Deps, processor: Processor, opts: { logg
   registerPanelRoutes(app, web);
   registerTicketRoutes(app, web);
   registerMovedRoutes(app);
+  registerTriageOverviewRoutes(app, web);
   registerTriageReviewRoutes(app, web);
   registerTriageRoutes(app, web);
   registerTriageConfigRoutes(app, web);

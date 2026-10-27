@@ -217,8 +217,8 @@ export function registerTriageRoutes(app: FastifyInstance, web: Web): void {
           </div>
           ${FLAGS.map(flagSection)}
           <div class="section">
-            <div class="section-h"><div><h3>Label groups</h3><div class="desc">Claude can also sort tickets with labels you define, such as Type, Area and Platform. It only picks from your options.</div></div>${can(ctx.membership, 'triage.labels.edit') ? linkBtn(areaHref(ctx, 'triage.labels'), c.labelGroups.length ? 'Edit groups' : 'Add groups', { size: 'sm', trail: 'arrow-right' }) : canOpen(ctx.membership, 'triage.labels') && c.labelGroups.length ? linkBtn(areaHref(ctx, 'triage.labels'), 'See groups', { size: 'sm', trail: 'arrow-right' }) : ''}</div>
-            ${c.labelGroups.map((g) => html`<div class="group-row"><div><div class="cell-title">${icon('tags', 14, 'muted')} ${g.name}</div><div class="sub">${plural(g.options.length, 'option')}</div></div>${modeControls(`group_${g.id}`, groupKind(g.id), g.name)}</div>`)}
+            <div class="section-h"><div><h3>Custom labels</h3><div class="desc">Your own labels, in categories such as Kind, Topic and Platform. Claude picks from each category for every ticket, and only from your labels.</div></div>${can(ctx.membership, 'triage.labels.edit') ? linkBtn(areaHref(ctx, 'triage.labels'), c.labelGroups.length ? 'Edit labels' : 'Add labels', { size: 'sm', trail: 'arrow-right' }) : canOpen(ctx.membership, 'triage.labels') && c.labelGroups.length ? linkBtn(areaHref(ctx, 'triage.labels'), 'See labels', { size: 'sm', trail: 'arrow-right' }) : ''}</div>
+            ${c.labelGroups.map((g) => html`<div class="group-row"><div><div class="cell-title">${icon('tags', 14, 'muted')} ${g.name}</div><div class="sub">${plural(g.options.length, 'label')}</div></div>${modeControls(`group_${g.id}`, groupKind(g.id), g.name)}</div>`)}
           </div>
         </div>
         ${types.length ? html`<div class="card" id="rules">

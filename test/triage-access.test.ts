@@ -50,10 +50,10 @@ describe('Triage access for moderators', () => {
       payload: new URLSearchParams({ _csrf: ws.owner.csrf, 'triage.actions': 'view', 'triage.labels': 'edit', 'triage.prompt': 'none', 'triage.runs': 'view', 'triage.activity': 'edit' }).toString(),
     });
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toMatchObject({ ok: true, message: 'mia: Actions → View, Label groups → Edit, Re-run → View, Activity → View' });
+    expect(res.json()).toMatchObject({ ok: true, message: 'mia: Actions → View, Custom labels → Edit, Re-run → View, Activity → View' });
     // Activity is a log: Edit becomes View. No access isn't stored; other pages keep theirs.
     expect(await access()).toEqual({ verifications: 'view', 'triage.actions': 'view', 'triage.labels': 'edit', 'triage.runs': 'view', 'triage.activity': 'view' });
-    expect((await page('/members', ws.owner)).body).toContain('Triage · 4 of 7');
+    expect((await page('/members', ws.owner)).body).toContain('Triage · 4 of 8');
     // Moderators can't change their own access.
     expect((await post(`/members/${mod.user.id}/access`, { 'triage.actions': 'edit' })).statusCode).toBe(403);
   });
@@ -80,12 +80,12 @@ describe('Triage access for moderators', () => {
     expect((await post('/triage/enabled', { set: '1', enabled: '1' })).statusCode).toBe(403);
     expect((await getTriageSettings(env.db, wid())).config).toEqual(before);
 
-    // Label groups: Edit.
+    // Custom labels: Edit.
     const labels = await page('/triage/labels');
     expect(labels.body).not.toContain('view-only');
-    expect(labels.body).not.toContain('title="You can see the label groups.');
+    expect(labels.body).not.toContain('title="You can see the custom labels.');
     expect(labels.body).toContain('Moderator</div>'); // not “Moderator · View only”: they can change something
-    expect(labels.body).toContain('Empty group');
+    expect(labels.body).toContain('Empty category');
     expect((await post('/triage/labels/add', { preset: 'empty' })).statusCode).toBe(302);
     expect((await getTriageSettings(env.db, wid())).config.labelGroups).toHaveLength(1);
 

@@ -1,5 +1,5 @@
 /**
- * AI triage › Label groups and AI triage › Prompt: the labels Claude picks from, and what Claude is
+ * AI triage › Custom labels and AI triage › Prompt: the labels Claude picks from, and what Claude is
  * told (about the products, each check, examples), with a page showing the full prompt.
  */
 import { randomUUID } from 'node:crypto';
@@ -31,34 +31,38 @@ import {
 } from '../../triage/settings.js';
 import { setFlash } from '../session.js';
 import type { Web, WorkspaceRequestContext } from '../server.js';
-import { csrfField, empty, icon, labelTag, linkBtn, notice, pageHeader, pill, postBtn, segRadios, selectWrap, submitBtn, timeAgo, type Tone } from '../ui.js';
+import { csrfField, empty, icon, iconBtn, linkBtn, notice, pageHeader, pill, plural, postBtn, segRadios, selectWrap, submitBtn, timeAgo, type Tone } from '../ui.js';
+import { openLabels, openMissing } from '../../triage/label-stats.js';
 import { textField } from './panel.js';
 import { areaHref, canOpen, knowledgeHref, pageLink, toolHeader, toolHref } from './tool.js';
 import { FLAG_COPY, MODE_NAMES, MODE_OPTIONS, viewOnlyFooter } from './triage.js';
 
-const PICK_NAMES: Record<LabelGroup['pick'], string> = { one: 'One option', two: 'Up to two options', any: 'Any number of options' };
+const PICK_NAMES: Record<LabelGroup['pick'], string> = { one: 'One label', two: 'Up to two labels', any: 'Any number of labels' };
+const n = (x: number) => x.toLocaleString('en-US');
 const MODE_TONE: Record<Mode, Tone> = { off: 'neutral', suggest: 'warn', auto: 'ok' };
 
-/** "label: description" lines, as edited in the options box. */
-function optionsText(g: Pick<LabelGroup, 'options'>): string {
-  return g.options.map((o) => (o.description ? `${o.label}: ${o.description}` : o.label)).join('\n');
-}
-
+/** "label: description" lines, as the options box had them. */
 function parseOptions(text: string): LabelGroup['options'] {
   const lines = text.replace(/\r\n/g, '\n').split('\n').map((l) => l.trim()).filter(Boolean);
-  if (!lines.length) throw new UserFacingError('Add at least one option.');
-  if (lines.length > MAX_GROUP_OPTIONS) throw new UserFacingError(`A group can have up to ${MAX_GROUP_OPTIONS} options.`);
-  const seen = new Set<string>();
-  return lines.map((line) => {
+  return checkOptions(lines.map((line) => {
     const i = line.indexOf(':');
-    const label = (i >= 0 ? line.slice(0, i) : line).trim();
-    const description = i >= 0 ? line.slice(i + 1).trim() : '';
-    if (!label || label.length > 50) throw new UserFacingError(`“${label.slice(0, 60) || line.slice(0, 60)}” isn’t a valid label: labels are 1 to 50 characters, before the colon.`);
-    if (description.length > 200) throw new UserFacingError(`The description of “${label}” is longer than 200 characters.`);
+    return { label: (i >= 0 ? line.slice(0, i) : line).trim(), description: i >= 0 ? line.slice(i + 1).trim() : '' };
+  }));
+}
+
+/** A category's labels, checked: 1 to 50 characters each, a sentence of up to 200, no label twice. */
+function checkOptions(options: LabelGroup['options']): LabelGroup['options'] {
+  if (!options.length) throw new UserFacingError('Add at least one label.');
+  if (options.length > MAX_GROUP_OPTIONS) throw new UserFacingError(`A category can have up to ${MAX_GROUP_OPTIONS} labels.`);
+  const seen = new Set<string>();
+  for (const { label, description } of options) {
+    if (!label) throw new UserFacingError(`“${description.slice(0, 60)}” has no label: give it a name, or clear the row.`);
+    if (label.length > 50) throw new UserFacingError(`“${label.slice(0, 60)}” is too long: labels are 1 to 50 characters.`);
+    if (description.length > 200) throw new UserFacingError(`The sentence for “${label}” is longer than 200 characters.`);
     if (seen.has(label.toLowerCase())) throw new UserFacingError(`“${label}” is listed twice.`);
     seen.add(label.toLowerCase());
-    return { label, description };
-  });
+  }
+  return options;
 }
 
 /** Approximate tokens of a text (about four characters each). */
@@ -68,7 +72,7 @@ function tokensOf(text: string): string {
 
 /** " Edit it in Prompt and Actions.": the pages that shape the prompt this person can change (empty: none). */
 function editIn(m: MemberAccess): string {
-  const pages = ([['triage.prompt', 'Prompt'], ['triage.actions', 'Actions'], ['triage.labels', 'Label groups'], ['triage.knowledge', 'Knowledge']] as const)
+  const pages = ([['triage.prompt', 'Prompt'], ['triage.actions', 'Actions'], ['triage.labels', 'Custom labels'], ['triage.knowledge', 'Knowledge']] as const)
     .filter(([a]) => can(m, `${a}.edit`))
     .map(([, name]) => name);
   if (!pages.length) return '';
@@ -86,64 +90,116 @@ export function registerTriageConfigRoutes(app: FastifyInstance, web: Web): void
     await saveTriageConfig(deps.db, ctx.workspace.id, parseTriageConfig(c));
   }
 
-  // ---- Label groups -------------------------------------------------------------------------
+  // ---- Custom labels ------------------------------------------------------------------------
 
   app.get('/w/:wid/triage/labels', async (req, reply) => {
     const ctx = await web.requireWorkspace(req, reply, { permission: 'triage.labels.view' });
     if (!ctx) return reply;
     const b = labelsUrl(ctx);
     const edit = can(ctx.membership, 'triage.labels.edit');
-    const c = (await getTriageSettings(deps.db, ctx.workspace.id)).config;
+    const [settings, apps] = await Promise.all([getTriageSettings(deps.db, ctx.workspace.id), listApps(deps.db, ctx.workspace.id)]);
+    const c = settings.config;
     const groups = c.labelGroups;
+    const repoIds = [...new Set(apps.map((a) => a.repo_id))];
+    const [open, missing] = await Promise.all([openLabels(deps.db, repoIds), openMissing(deps.db, repoIds, groups)]);
     const full = groups.length >= MAX_LABEL_GROUPS;
+    // A backfill of a category, or of one label, starts on Re-run (Custom labels only).
+    const runs = can(ctx.membership, 'triage.runs.edit') ? areaHref(ctx, 'triage.runs') : null;
+    const backfill = (g: LabelGroup, label?: string) => `${runs}?what=labels&group=${encodeURIComponent(g.id)}${label ? `&only=${encodeURIComponent(label.toLowerCase())}` : ''}`;
     const presets = (Object.keys(LABEL_GROUP_PRESETS) as (keyof typeof LABEL_GROUP_PRESETS)[]).filter((k) => !groups.some((g) => g.name.toLowerCase() === LABEL_GROUP_PRESETS[k].name.toLowerCase()));
     const addButtons = html`${presets.map((k) => postBtn(`${b}/add`, LABEL_GROUP_PRESETS[k].name, ctx.csrf, { size: 'sm', icon: 'plus', fields: { preset: k }, disabled: full }))}
-      ${postBtn(`${b}/add`, 'Empty group', ctx.csrf, { size: 'sm', variant: 'ghost', icon: 'plus', fields: { preset: 'empty' }, disabled: full })}`;
+      ${postBtn(`${b}/add`, 'Empty category', ctx.csrf, { size: 'sm', variant: 'ghost', icon: 'plus', fields: { preset: 'empty' }, disabled: full })}`;
+    const count = (label: string) => open.byLabel.get(label.toLowerCase()) ?? 0;
+    const labelCount = groups.reduce((t, g) => t + g.options.length, 0);
 
-    const settings = await getTriageSettings(deps.db, ctx.workspace.id);
-    const groupCard = (g: LabelGroup) => html`<div class="card" id="g-${g.id}">
-      <div class="card-h"><div><div class="title"><h2>${g.name}</h2>${pill(`Discord: ${MODE_NAMES[g.mode]}`, MODE_TONE[g.mode])}${pill(`GitHub: ${MODE_NAMES[githubMode(c, groupKind(g.id))]}`, MODE_TONE[githubMode(c, groupKind(g.id))])}</div><div class="desc">${PICK_NAMES[g.pick]} · <span class="tags">${g.options.slice(0, 8).map((o) => labelTag(o.label))}${g.options.length > 8 ? html`<span class="small muted">+${String(g.options.length - 8)} more</span>` : ''}</span></div></div>
-        ${edit ? postBtn(`${b}/${g.id}/delete`, 'Delete', ctx.csrf, { size: 'sm', variant: 'ghost danger', icon: 'trash-2', confirm: { title: `Delete the ${g.name} group?`, body: 'Claude stops picking these labels. Labels already added to issues stay on GitHub.', label: 'Delete group', danger: true } }) : ''}</div>
+    /** One label's row in the editor: its name, when to use it, and how many open issues have it. */
+    const row = (g: LabelGroup | null, o: { label: string; description: string } | null) => html`<div class="cl-row" data-row>
+        <input type="text" name="opt_label" value="${o?.label ?? ''}" maxlength="50" placeholder="parity" aria-label="Label" autocomplete="off" spellcheck="false">
+        <textarea name="opt_desc" rows="1" maxlength="200" placeholder="When Claude should pick it, in one sentence." aria-label="When to use it">${o?.description ?? ''}</textarea>
+        <span class="cl-n">${o && g ? html`<span class="num" title="Open issues with this label now">${n(count(o.label))}</span>${runs && edit ? html`<a class="cl-bf" href="${backfill(g, o.label)}" title="Backfill just ${o.label} on open tickets and issues">${icon('history', 14)}<span class="sr-only">Backfill ${o.label}</span></a>` : ''}` : html`<span class="em">new</span>`}</span>
+        ${edit ? iconBtn('x', 'Remove this label', { size: 'sm', attrs: raw('data-row-remove') }) : html`<span></span>`}
+      </div>`;
+
+    const groupCard = (g: LabelGroup) => {
+      const none = missing.get(g.id) ?? 0;
+      const done = open.open ? Math.round(((open.open - none) / open.open) * 100) : 0;
+      const ghMode = githubMode(c, groupKind(g.id));
+      return html`<section class="card cl-card" id="g-${g.id}" aria-labelledby="h-${g.id}">
+      <div class="card-h"><div>
+          <div class="title"><h2 id="h-${g.id}">${g.name}</h2>${pill(`Discord: ${MODE_NAMES[g.mode]}`, MODE_TONE[g.mode])}${pill(`GitHub: ${MODE_NAMES[ghMode]}`, MODE_TONE[ghMode])}</div>
+          <div class="desc">${PICK_NAMES[g.pick]} per ticket · ${plural(g.options.length, 'label')}</div>
+        </div>
+        <div class="row">
+          ${runs && edit ? linkBtn(backfill(g), 'Backfill', { size: 'sm', icon: 'history', title: `Add ${g.name} labels to open tickets and issues` }) : ''}
+          ${edit ? postBtn(`${b}/${g.id}/delete`, 'Delete', ctx.csrf, { size: 'sm', variant: 'ghost danger', icon: 'trash-2', confirm: { title: `Delete the ${g.name} category?`, body: 'Claude stops picking these labels. Labels already on issues stay on GitHub.', label: 'Delete category', danger: true } }) : ''}
+        </div></div>
+      ${open.open ? html`<div class="cl-cover">
+          <div class="cl-cover-bar" role="img" aria-label="${`${done}% of open issues have a ${g.name} label`}"><i style="width:${String(done)}%"></i></div>
+          <span class="small"><b>${n(open.open - none)}</b> of ${n(open.open)} open issues have a ${g.name} label${none ? html` · <span class="muted">${n(none)} have none yet</span>` : ''}</span>
+        </div>` : ''}
       <form method="post" action="${b}/${g.id}" ${edit ? raw('data-dirty') : ''}>${csrfField(ctx.csrf)}
         <fieldset class="plain${edit ? '' : ' view-only'}" ${edit ? '' : raw('disabled')}>
         <div class="section">
-          <div class="section-h"><div><h3>When Claude picks</h3><div class="desc">Set separately for Discord tickets and issues opened on GitHub. Suggest shows the labels for someone to apply; Automatic adds them when Claude is at least ${String(c.threshold)}% sure.</div></div>
-            <div class="src-modes${settings.githubEnabled ? '' : ' gh-off'}">
-              <span class="src-l">${icon('message-circle', 14)}Discord tickets</span>${segRadios('mode', MODE_OPTIONS, g.mode, `${g.name} for Discord tickets`)}
-              <span class="src-l gh">${icon('github', 14)}Opened on GitHub</span><span class="gh">${segRadios('gh_mode', MODE_OPTIONS, githubMode(c, groupKind(g.id)), `${g.name} for issues opened on GitHub`)}</span>
-            </div></div>
           <div class="fields">
             <div class="fields-2">
               <div class="field"><label for="name-${g.id}">Name</label><input id="name-${g.id}" type="text" name="name" value="${g.name}" maxlength="40" required></div>
-              <div class="field"><label for="pick-${g.id}">How many to pick</label>${selectWrap(html`<select id="pick-${g.id}" name="pick">${(['one', 'two', 'any'] as const).map((p) => html`<option value="${p}" ${p === g.pick ? raw('selected') : ''}>${PICK_NAMES[p]}</option>`)}</select>`)}</div>
+              <div class="field"><label for="pick-${g.id}">How many Claude picks</label>${selectWrap(html`<select id="pick-${g.id}" name="pick">${(['one', 'two', 'any'] as const).map((p) => html`<option value="${p}" ${p === g.pick ? raw('selected') : ''}>${PICK_NAMES[p]}</option>`)}</select>`)}</div>
             </div>
-            ${textField({ id: `instruction-${g.id}`, name: 'instruction', label: 'What this group is about (optional)', value: g.instruction, max: 600, rows: 2, placeholder: 'The part of the app the ticket is about.' })}
-            ${textField({ id: `options-${g.id}`, name: 'options', label: 'Options', value: optionsText(g), max: 5000, rows: Math.min(12, Math.max(4, g.options.length + 1)), placeholder: 'crash: The app crashes, freezes or loses work.\nbug: Wrong behaviour.', hint: html`One per line: <code>label: when to use it</code>. Claude can only pick these labels; each is created on GitHub the first time it’s used. Up to ${String(MAX_GROUP_OPTIONS)}.` })}
+            ${textField({ id: `instruction-${g.id}`, name: 'instruction', label: 'What this category is about (optional)', value: g.instruction, max: 600, rows: Math.min(6, Math.max(2, Math.ceil(g.instruction.length / 120))), placeholder: 'What kind of work this is for the team, judged by the text.' })}
+            <div class="field">
+              <div class="lbl-row"><span class="lbl">Labels</span><span class="xs muted">Claude only picks these, by their sentence. New ones are created on GitHub the first time they’re used.</span></div>
+              <div class="cl-rows" data-rows data-rows-max="${String(MAX_GROUP_OPTIONS)}">
+                <div class="cl-head" aria-hidden="true"><span>Label</span><span>When to use it</span><span class="num">Open</span><span></span></div>
+                ${g.options.map((o) => row(g, o))}
+                ${edit ? html`<template data-row-template>${row(null, null)}</template>` : ''}
+              </div>
+              ${edit ? html`<div class="row cl-add"><button type="button" class="btn sm" data-row-add>${icon('plus', 14)}Add label</button><span class="xs muted">Up to ${String(MAX_GROUP_OPTIONS)}.</span></div>` : ''}
+            </div>
           </div>
+        </div>
+        <div class="section">
+          <div class="section-h"><div><h3>When Claude picks</h3><div class="desc">For new tickets, set separately for Discord tickets and issues opened on GitHub. Suggest shows the labels for someone to apply; Automatic adds them when Claude is at least ${String(c.threshold)}% sure. A backfill adds them whatever this says.</div></div>
+            <div class="src-modes${settings.githubEnabled ? '' : ' gh-off'}">
+              <span class="src-l">${icon('message-circle', 14)}Discord tickets</span>${segRadios('mode', MODE_OPTIONS, g.mode, `${g.name} for Discord tickets`)}
+              <span class="src-l gh">${icon('github', 14)}Opened on GitHub</span><span class="gh">${segRadios('gh_mode', MODE_OPTIONS, ghMode, `${g.name} for issues opened on GitHub`)}</span>
+            </div></div>
         </div>
         </fieldset>
         <div class="card-f">${edit ? html`<span></span><div class="end">
           <button type="button" class="btn" data-discard data-dirty-enable>Cancel</button>
-          ${submitBtn('Save group', { variant: 'primary', loading: 'Saving…', attrs: raw('data-dirty-enable') })}
-        </div>` : viewOnlyFooter('this group')}</div>
+          ${submitBtn('Save category', { variant: 'primary', loading: 'Saving…', attrs: raw('data-dirty-enable') })}
+        </div>` : viewOnlyFooter('this category')}</div>
       </form>
-    </div>`;
+    </section>`;
+    };
 
+    const steps = [
+      { i: 'tags' as const, t: 'Your labels', d: 'In categories such as Kind or Platform, with one sentence each on when to use it.' },
+      { i: 'sparkles' as const, t: 'Claude picks', d: 'For every new ticket and issue, from each category, by those sentences. It never invents a label.' },
+      { i: 'github' as const, t: 'On GitHub', d: 'Added right away when Claude is sure enough, or suggested in Review. Backfill does older ones.' },
+    ];
     const body = html`
       ${await toolHeader(web, ctx, 'triage', 'triage.labels')}
       <div class="stack">
-        <div class="card">
-          <div class="card-h"><div><h2>Label groups</h2><div class="desc">Sets of labels Claude sorts tickets with, such as the type of problem, the part of the app and the platform. Claude only picks from the options you list, using each one’s description. New groups start Off.</div></div></div>
-          ${!edit
-            ? (groups.length ? '' : empty('tags', 'No label groups yet', 'An admin can add groups here.'))
-            : groups.length
-              ? html`<div class="card-b tight"><div class="row"><span class="small muted">Add a group:</span>${addButtons}</div>${full ? html`<p class="small muted mt-8">You have the maximum of ${String(MAX_LABEL_GROUPS)} groups.</p>` : ''}</div>`
-              : empty('tags', 'No label groups yet', 'Start from a ready-made group and edit its options, or start empty.', html`<div class="row">${addButtons}</div>`)}
-          <div class="card-note">Which ticket types each group runs for is set in ${pageLink(ctx, 'triage.actions', 'Actions › Rules by ticket type', '#rules')}.</div>
-        </div>
-        ${groups.map(groupCard)}
+        <section class="card cl-intro" aria-labelledby="cl-intro-h">
+          <div class="card-b">
+            <h2 id="cl-intro-h">Custom labels</h2>
+            <p class="muted">Your own labels, on top of what triage adds by itself (priority, duplicate, needs info…). Each category is a question Claude answers for every ticket, like “what kind of work is this?”, and your labels are its answers.</p>
+            <ol class="cl-steps">${steps.map((x, i) => html`<li><span class="cl-step-i">${icon(x.i, 16)}</span><span><b>${String(i + 1)}. ${x.t}</b><span class="small muted">${x.d}</span></span></li>`)}</ol>
+            ${groups.length ? html`<div class="cl-sum">
+              <span class="chip-stat"><b>${n(groups.length)}</b> ${groups.length === 1 ? 'category' : 'categories'}</span>
+              <span class="chip-stat"><b>${n(labelCount)}</b> ${labelCount === 1 ? 'label' : 'labels'}</span>
+              <span class="chip-stat"><b>${n(open.open)}</b> open issues</span>
+            </div>` : ''}
+          </div>
+          ${edit
+            ? html`<div class="card-f plain"><div class="row"><span class="small muted">${groups.length ? 'Add a category:' : 'Start from a ready-made category, or an empty one:'}</span>${addButtons}</div>${full ? html`<span class="small muted">You have the most categories there can be (${String(MAX_LABEL_GROUPS)}).</span>` : ''}</div>`
+            : ''}
+          <div class="card-note">Which ticket types each category runs for is set in ${pageLink(ctx, 'triage.actions', 'Actions › Rules by ticket type', '#rules')}.${runs ? html` To add labels to tickets filed before, use ${pageLink(ctx, 'triage.runs', 'Re-run › Custom labels only')}.` : ''}</div>
+        </section>
+        ${groups.length ? groups.map(groupCard) : html`<div class="card">${empty('tags', 'No custom labels yet', edit ? 'Add a category above to start: Claude then sorts every new ticket into your labels.' : 'An admin can add them here.')}</div>`}
       </div>`;
-    return web.render(reply, ctx, 'Label groups · AI triage', 'triage', body);
+    return web.render(reply, ctx, 'Custom labels · AI triage', 'triage', body);
   });
 
   app.post('/w/:wid/triage/labels/add', async (req, reply) => {
@@ -153,13 +209,13 @@ export function registerTriageConfigRoutes(app: FastifyInstance, web: Web): void
     const id = randomUUID().replace(/-/g, '').slice(0, 8);
     try {
       await update(ctx, (c) => {
-        if (c.labelGroups.length >= MAX_LABEL_GROUPS) throw new UserFacingError(`You can have up to ${MAX_LABEL_GROUPS} label groups.`);
+        if (c.labelGroups.length >= MAX_LABEL_GROUPS) throw new UserFacingError(`You can have up to ${MAX_LABEL_GROUPS} categories.`);
         const base = preset in LABEL_GROUP_PRESETS
           ? structuredClone(LABEL_GROUP_PRESETS[preset as keyof typeof LABEL_GROUP_PRESETS])
-          : { name: 'New group', instruction: '', pick: 'one' as const, options: [{ label: 'example', description: 'Replace with your own options.' }] };
+          : { name: 'New category', instruction: '', pick: 'one' as const, options: [{ label: 'example', description: 'Replace with your own labels.' }] };
         c.labelGroups.push({ id, mode: 'off', ...base });
       });
-      setFlash(reply, 'success', 'Label group added. It starts Off for Discord tickets and for GitHub issues: edit its options, then choose Suggest or Automatic.');
+      setFlash(reply, 'success', 'Category added. It starts Off for Discord tickets and for GitHub issues: edit its labels, then choose Suggest or Automatic.');
     } catch (err) {
       if (!(err instanceof UserFacingError)) throw err;
       setFlash(reply, 'error', err.message);
@@ -171,19 +227,25 @@ export function registerTriageConfigRoutes(app: FastifyInstance, web: Web): void
     const ctx = await web.requireWorkspace(req, reply, { permission: 'triage.labels.edit' });
     if (!ctx) return reply;
     const gid = (req.params as { gid: string }).gid;
-    const f = (req.body ?? {}) as Record<string, string | undefined>;
+    const f = (req.body ?? {}) as Record<string, string | string[] | undefined>;
+    const one = (k: string) => { const v = f[k]; return Array.isArray(v) ? v[0] : v; };
+    const all = (k: string) => { const v = f[k]; return v === undefined ? [] : Array.isArray(v) ? v : [v]; };
     try {
-      const name = String(f.name ?? '').trim();
-      if (!name || name.length > 40) throw new UserFacingError('Give the group a name of up to 40 characters.');
-      const mode = (MODES as readonly string[]).includes(String(f.mode)) ? (f.mode as Mode) : 'off';
-      const ghMode = f.gh_mode === undefined ? undefined : (MODES as readonly string[]).includes(String(f.gh_mode)) ? (f.gh_mode as Mode) : 'off';
-      const pick = (['one', 'two', 'any'] as const).find((p) => p === f.pick) ?? 'one';
-      const instruction = String(f.instruction ?? '').replace(/\r\n/g, '\n').trim().slice(0, 600);
-      const options = parseOptions(String(f.options ?? ''));
+      const name = String(one('name') ?? '').trim();
+      if (!name || name.length > 40) throw new UserFacingError('Give the category a name of up to 40 characters.');
+      const mode = (MODES as readonly string[]).includes(String(one('mode'))) ? (one('mode') as Mode) : 'off';
+      const ghMode = one('gh_mode') === undefined ? undefined : (MODES as readonly string[]).includes(String(one('gh_mode'))) ? (one('gh_mode') as Mode) : 'off';
+      const pick = (['one', 'two', 'any'] as const).find((p) => p === one('pick')) ?? 'one';
+      const instruction = String(one('instruction') ?? '').replace(/\r\n/g, '\n').trim().slice(0, 600);
+      // The editor sends a row per label; "label: description" lines still work.
+      const labels = all('opt_label');
+      const options = f.opt_label !== undefined
+        ? checkOptions(labels.map((label, i) => ({ label: label.trim(), description: String(all('opt_desc')[i] ?? '').replace(/\s+/g, ' ').trim() })).filter((o) => o.label || o.description))
+        : parseOptions(String(one('options') ?? ''));
       await update(ctx, (c) => {
         const g = c.labelGroups.find((x) => x.id === gid);
-        if (!g) throw new UserFacingError('That label group was deleted.', 404);
-        if (c.labelGroups.some((x) => x.id !== gid && x.name.toLowerCase() === name.toLowerCase())) throw new UserFacingError(`There’s already a group called ${name}.`);
+        if (!g) throw new UserFacingError('That category was deleted.', 404);
+        if (c.labelGroups.some((x) => x.id !== gid && x.name.toLowerCase() === name.toLowerCase())) throw new UserFacingError(`There’s already a category called ${name}.`);
         Object.assign(g, { name, mode, pick, instruction, options });
         if (ghMode) c.githubModes[groupKind(gid)] = ghMode;
       });
@@ -205,7 +267,7 @@ export function registerTriageConfigRoutes(app: FastifyInstance, web: Web): void
       // Rules by ticket type no longer mention it.
       for (const rule of Object.values(c.typeRules)) rule.off = rule.off.filter((k) => k !== `group:${gid}`);
     });
-    setFlash(reply, 'success', 'Label group deleted');
+    setFlash(reply, 'success', 'Category deleted');
     return reply.redirect(labelsUrl(ctx));
   });
 
@@ -325,7 +387,7 @@ export function registerTriageConfigRoutes(app: FastifyInstance, web: Web): void
       <div class="stack">
         ${settings.enabled ? '' : notice('info', null, 'Triage is off. This is what Claude would be told.')}
         <div class="card">
-          <div class="card-h"><div><h2>Instructions</h2><div class="desc">Sent with every Discord ticket: ${tokensOf(system)}. Issues opened on GitHub get the same, with the label groups that are on for them.</div></div></div>
+          <div class="card-h"><div><h2>Instructions</h2><div class="desc">Sent with every Discord ticket: ${tokensOf(system)}. Issues opened on GitHub get the same, with the custom labels that are on for them.</div></div></div>
           <pre class="prompt-pre">${system}</pre>
         </div>
         <div class="card">

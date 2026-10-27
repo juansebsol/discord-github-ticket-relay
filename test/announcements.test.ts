@@ -15,7 +15,7 @@ const post = (url: string, fields: Record<string, string> = {}, who: Admin = ws.
 const repo = (i = 0) => env.github.repos.get(ws.repoIds[i]!)!;
 const tick = () => env.triage.engine.announcer.tick();
 const rows = async () => (await env.db.query('SELECT * FROM announcements ORDER BY tag')).rows;
-const posts = () => [...env.discord.messages.entries()].filter(([, m]) => m.channelId === releasesChannel).map(([id, m]) => ({ id, ...m.payload }));
+const posts = () => [...env.discord.messages.entries()].filter(([, m]) => m.channelId === releasesChannel).map(([id, m]): Record<string, any> => ({ id, ...m.payload }));
 const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString();
 
 function release(tag: string, publishedAt: string, o: { body?: string; prerelease?: boolean; name?: string } = {}) {

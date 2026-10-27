@@ -96,7 +96,7 @@ describe('sidebar', () => {
     const active: [string, string][] = [
       ['/tickets', '/tickets'], ['/tickets/files', '/tickets'], ['/tickets/settings', '/tickets'],
       ['/issues/sync', '/issues'], ['/issues/github', '/issues'], ['/repos', '/repos'], ['/repos/settings', '/repos'], ['/analytics', '/analytics'],
-      ['/triage', '/triage'], ['/triage/labels', '/triage'], ['/triage/prompt/full', '/triage'], ['/triage/activity', '/triage'],
+      ['/triage/overview', '/triage/overview'], ['/triage', '/triage/overview'], ['/triage/labels', '/triage/overview'], ['/triage/prompt/full', '/triage/overview'], ['/triage/activity', '/triage/overview'],
       ['/contributors/roles', '/contributors'], ['/apps', '/apps'], ['/members', '/members'],
     ];
     for (const [url, item] of active) {
@@ -133,7 +133,7 @@ describe('tool headers', () => {
     const activity = (await page('/triage/activity')).body;
     expect(activity).toContain('<h1>AI triage</h1>');
     expect(activity).toContain('<nav class="tabs" aria-label="AI triage">');
-    for (const name of ['Review', 'Actions', 'Label groups', 'Re-run']) {
+    for (const name of ['Overview', 'Review', 'Actions', 'Custom labels', 'Re-run']) {
       expect(activity, name).toContain(`<span class="tab locked" aria-disabled="true" title="You don’t have access to ${name}. Ask an admin if you need it.">`);
     }
     expect(activity).toContain(`<a class="tab" href="${w()}/triage/prompt" >Prompt</a>`);

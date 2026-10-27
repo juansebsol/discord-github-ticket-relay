@@ -117,7 +117,7 @@ describe('Members › Moderator access', () => {
     expect(body).toContain(`<form id="acc-${mod.user.id}" method="post" action="${w()}/members/${mod.user.id}/access" data-async hidden>`);
     expect(body).toContain(`<section class="acc-editor" id="mod-${mod.user.id}" data-mod="${mod.user.id}"`);
     expect(body).toContain(`<span class="nm" id="acc-name-${mod.user.id}">mia</span>`);
-    expect(body).toContain('2 of 26 pages open · 1 editable');
+    expect(body).toContain('2 of 27 pages open · 1 editable');
     // No Access / View / Edit per page: the Inbox can't be turned off, Activity has nothing to edit.
     const radios = (name: string) => [...body.matchAll(new RegExp(`<input type="radio" name="${name.replace('.', '\\.')}" value="(\\w+)" form="acc-${mod.user.id}"[^>]*?( checked)?>`, 'g'))].map((m) => `${m[1]}${m[2] ? '*' : ''}`);
     for (const a of AREA_KEYS) expect(radios(a).length, a).toBeGreaterThan(1);
@@ -127,7 +127,7 @@ describe('Members › Moderator access', () => {
     // Each tool: a switch that opens or closes all of it, and a summary.
     expect(body).toMatch(/aria-label="mia: open AI triage"\s+checked\s+data-tool-switch/);
     expect(body).toMatch(/aria-label="mia: open GitHub issues"\s+data-tool-switch/);
-    expect(body).toContain('1 of 7 pages · view only');
+    expect(body).toContain('1 of 8 pages · view only');
     expect(body).toContain('1 of 5 pages · 1 editable');
     expect(body).toContain('<section class="acc-tool" data-tool="issues">');
     // Quick sets; with one moderator there's nobody to pick, so no picker.
@@ -160,7 +160,7 @@ describe('Members › Moderator access', () => {
     const one = await saveJson(mod.user.id, { inbox: 'edit', 'triage.review': 'view' });
     expect(one.json()).toEqual({ ok: true, message: 'mia: Inbox → Edit, Review → View' });
     // A tool's select sends all of that moderator's pages: the message names the tool.
-    const triage = await saveJson(mod.user.id, { inbox: 'edit', 'triage.review': 'edit', 'triage.actions': 'edit', 'triage.labels': 'edit', 'triage.prompt': 'edit', 'triage.knowledge': 'edit', 'triage.runs': 'edit', 'triage.activity': 'edit' });
+    const triage = await saveJson(mod.user.id, { inbox: 'edit', 'triage.overview': 'view', 'triage.review': 'edit', 'triage.actions': 'edit', 'triage.labels': 'edit', 'triage.prompt': 'edit', 'triage.knowledge': 'edit', 'triage.runs': 'edit', 'triage.activity': 'edit' });
     expect(triage.json()).toEqual({ ok: true, message: 'mia: AI triage → Edit all' });
     const all = await saveJson(mod.user.id, Object.fromEntries(AREA_KEYS.map((a) => [a, 'none'])));
     expect(all.json()).toEqual({ ok: true, message: 'mia: All pages → No access' });
@@ -252,7 +252,7 @@ describe('what each level allows', () => {
     const body = (await page('')).body;
     expect(body).toContain('Your access');
     expect(body).toMatch(/Discord tickets<\/span><span class="locked">.*?1 of 5 pages · 1 editable<\/span>/);
-    expect(body).toMatch(/AI triage<\/span><span class="locked">.*?1 of 7 pages<\/span>/);
+    expect(body).toMatch(/AI triage<\/span><span class="locked">.*?1 of 8 pages<\/span>/);
     expect(body).toMatch(/Contributor roles<\/span><span class="locked">.*?No access<\/span>/);
   });
 });

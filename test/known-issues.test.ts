@@ -17,7 +17,7 @@ const sync = async () => {
   await new IssueIndexer(env.deps).tick();
 };
 const board = async () => computeBoard(env.deps, ws.workspace.id, await getKnownIssuesSettings(env.db, ws.workspace.id));
-const posted = () => [...env.discord.messages.entries()].filter(([, m]) => m.channelId === boardChannel).map(([id, m]) => ({ id, ...m.payload }));
+const posted = () => [...env.discord.messages.entries()].filter(([, m]) => m.channelId === boardChannel).map(([id, m]): Record<string, any> => ({ id, ...m.payload }));
 const ago = (days: number) => new Date(Date.now() - days * 86_400_000).toISOString();
 
 let k = 0;

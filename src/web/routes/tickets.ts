@@ -239,6 +239,8 @@ function eventView(e: EventRow, s: SubmissionRow, names: Map<string, string>): {
     }
     case 'triage_dismissed':
       return { actor: by, text: html`<span class="actor">${by}</span> dismissed the triage suggestion: ${(d.actions as string[] | undefined)?.join(', ') ?? ''}` };
+    case 'triage_labels':
+      return { icon: 'tags', tone: 'muted', text: html`Custom labels added: ${(d.labels as string[] | undefined)?.join(', ') ?? ''}${typeof d.by === 'string' ? html` · by <span class="actor">${by}</span>` : ''}` };
     default:
       return { icon: 'info', tone: 'muted', text: html`${e.kind}` };
   }

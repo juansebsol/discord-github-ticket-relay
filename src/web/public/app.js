@@ -617,6 +617,52 @@
     el.addEventListener('input', function () { syncField(el); });
   });
 
+  // Rows a form can add and remove (AI triage › Custom labels: a row per label). Before the
+  // unsaved-changes check below, so Cancel puts the rows back before it resets the form.
+  $$('[data-rows]').forEach(function (box) {
+    var form = box.closest('form');
+    var add = form && form.querySelector('[data-row-add]');
+    var max = Number(box.getAttribute('data-rows-max')) || 20;
+    var original = box.innerHTML;
+    function rows() { return $$('[data-row]', box); }
+    function sync() { if (add) add.disabled = rows().length >= max; }
+    function changed() { if (form) form.dispatchEvent(new Event('change', { bubbles: true })); sync(); }
+    if (add) {
+      add.addEventListener('click', function () {
+        // Looked up each time: Cancel puts back the rows, and the template with them.
+        var tpl = box.querySelector('template[data-row-template]');
+        if (!tpl || rows().length >= max) return;
+        var row = tpl.content.firstElementChild.cloneNode(true);
+        box.insertBefore(row, tpl);
+        row.querySelector('input').focus();
+        changed();
+      });
+    }
+    box.addEventListener('click', function (e) {
+      var b = e.target.closest('[data-row-remove]');
+      if (!b) return;
+      var row = b.closest('[data-row]');
+      var next = row.nextElementSibling && row.nextElementSibling.matches('[data-row]') ? row.nextElementSibling : null;
+      row.remove();
+      var focus = next ? next.querySelector('[data-row-remove]') : add;
+      if (focus) focus.focus();
+      changed();
+    });
+    // Enter moves to the next row (a new one after the last) instead of saving half-typed labels.
+    box.addEventListener('keydown', function (e) {
+      if (e.key !== 'Enter' || e.shiftKey || !e.target.matches('input, textarea')) return;
+      e.preventDefault();
+      var row = e.target.closest('[data-row]');
+      // From a label, on to its sentence; from a sentence, on to the next label (a new row after the last).
+      if (e.target.matches('input') && row.querySelector('textarea')) { row.querySelector('textarea').focus(); return; }
+      var next = row && row.nextElementSibling && row.nextElementSibling.matches('[data-row]') ? row.nextElementSibling : null;
+      if (next) next.querySelector('input').focus();
+      else if (add) add.click();
+    });
+    if (form) $$('[data-discard]', form).forEach(function (b) { b.addEventListener('click', function () { box.innerHTML = original; sync(); }); });
+    sync();
+  });
+
   $$('form[data-dirty]').forEach(function (form) {
     function snapshot() { return new URLSearchParams(new FormData(form)).toString(); }
     var initial = snapshot();
@@ -1363,6 +1409,22 @@
     sync();
   });
 
+  // ---- Parts of a form shown for one choice of a radio ("what=labels" on Re-run) ----
+
+  $$('form').forEach(function (form) {
+    var parts = $$('[data-shown-for]', form);
+    if (!parts.length) return;
+    function sync() {
+      parts.forEach(function (el) {
+        var rule = el.getAttribute('data-shown-for').split('=');
+        var on = form.querySelector('input[name="' + rule[0] + '"]:checked');
+        el.hidden = !on || on.value !== rule[1];
+      });
+    }
+    form.addEventListener('change', sync);
+    sync();
+  });
+
   // ---- Re-run estimate (Triage › Re-run): how many tickets, cost and time, as the form changes ----
 
   $$('form[data-estimate]').forEach(function (form) {
@@ -1386,6 +1448,8 @@
           $$('[data-count-all]', form).forEach(function (el) { el.textContent = d.allLabel; });
           $$('[data-count-untouched]', form).forEach(function (el) { el.textContent = d.untouched; });
           $$('[data-count-never]', form).forEach(function (el) { el.textContent = d.never; });
+          $$('[data-count-missing]', form).forEach(function (el) { if (d.missing) el.textContent = d.missing; });
+          $$('[data-count-open]', form).forEach(function (el) { if (d.open) el.textContent = d.open; });
         })
         .catch(function () {});
     }
