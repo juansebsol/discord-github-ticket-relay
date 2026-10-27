@@ -1,7 +1,8 @@
 /**
- * Bot features: extra things the bot does in Discord, one tab each. Known issues is the first: the
- * board as it is now (what's on it, what's just below, what's hidden) with pinning, hiding and a
- * title or note per issue, its settings, and a preview of the message.
+ * Bot features: extra things the bot does in Discord, one tab each. Known issues is the first: a
+ * card with what the board is and whether it's live, then the issues on it, just below it and
+ * hidden, and its settings, each a closed row that opens to change it, beside a preview of the
+ * message.
  */
 import type { FastifyInstance } from 'fastify';
 import {
@@ -33,20 +34,30 @@ import {
 import { inspectGuild, type GuildAccess } from '../../domain/discord-checks.js';
 import { can } from '../../domain/permissions.js';
 import { getDiscordConnection, listApps } from '../../domain/store.js';
-import { UserFacingError } from '../../domain/types.js';
+import { UserFacingError, type DiscordConnectionRow } from '../../domain/types.js';
 import { html, raw, type SafeHtml } from '../../lib/html.js';
 import { PERIODS, periodOf } from '../../repo-status/reports.js';
 import { botIdentity, botMessage, discordMd, previewCaption, type BotIdentity } from '../discord-preview.js';
 import { setFlash } from '../session.js';
 import type { Web, WorkspaceRequestContext } from '../server.js';
-import { csrfField, icon, linkBtn, menu, pageHeader, pill, plural, segLinks, selectWrap, setting, submitBtn, switchInput, tag, timeAgo, type Tone } from '../ui.js';
+import { csrfField, icon, linkBtn, menu, pageHeader, pill, plural, postBtn, selectWrap, setting, submitBtn, switchInput, tag, timeAgo, type IconName, type Tone } from '../ui.js';
 import { checklist, textField } from './panel.js';
 import { areaHref, toolHeader, toolHref } from './tool.js';
 import { viewOnlyFooter } from './triage.js';
 
-type Check = { status: 'ok' | 'warning' | 'error'; title: string; detail?: string; fix?: { label: string; href: string } };
+type Check = { key?: 'channel' | 'button' | 'private'; status: 'ok' | 'warning' | 'error'; title: string; detail?: string; fix?: { label: string; href: string } };
+type Content = SafeHtml | string;
+
+/** The parts of the settings, each saved from its own row (a form with every field saves them all). */
+const SECTIONS = ['power', 'channel', 'content', 'message', 'status', 'button'] as const;
+type Section = (typeof SECTIONS)[number];
 
 const STATUS_TONES: Record<IssueStatus, Tone> = { open: 'neutral', working: 'warn', coming: 'ok', released: 'ok', fixed: 'ok' };
+
+/** The Edit (or Details) button of a closed row; the whole row opens it, then it says Close. */
+function openBtn(edit: boolean): SafeHtml {
+  return html`<span class="btn sm cl-open" aria-hidden="true"><span class="o">${edit ? 'Edit' : 'Details'}</span><span class="c">Close</span></span>`;
+}
 
 /** A GitHub issue link (or owner/repo#123) to the repository and number. */
 function parseIssueRef(text: string): { owner: string; name: string; number: number } | null {
@@ -77,54 +88,129 @@ export function registerBotFeatureRoutes(app: FastifyInstance, web: Web): void {
     return reply.redirect(areaHref(ctx, 'known-issues'));
   });
 
-  function stateStrip(s: KnownIssuesSettings, state: BoardState, edit: boolean): SafeHtml {
-    if (!s.enabled) return html`${pill('Off', 'neutral')}<span class="small muted">${state.state === 'published' ? 'The board is in Discord but isn’t kept up to date.' : 'Turn it on in Settings to post the board.'}</span>`;
-    if (state.state === 'published') {
-      if (state.channelChanged) return html`${pill('Channel changed', 'warn')}<span class="small muted">${edit ? `Update it to move it to #${s.channelName ?? ''}.` : `It’s still in the old channel, not #${s.channelName ?? ''}.`}</span>`;
-      return html`${pill('Live', 'ok')}<span class="small muted">in #${s.channelName ?? ''} · last changed ${timeAgo(state.changedAt)}${state.checkedAt ? ` · checked ${timeAgo(state.checkedAt)}` : ''}. Kept up to date every 10 minutes.</span>${state.error ? html`<span class="small" title="${state.error}">${icon('triangle-alert', 14, 'warn')}</span>` : ''}`;
+  function boardPill(s: KnownIssuesSettings, state: BoardState): SafeHtml {
+    if (!s.enabled) return pill('Off', 'neutral');
+    if (state.state === 'published') return state.channelChanged ? pill('Channel changed', 'warn') : pill('Live', 'ok');
+    if (state.state === 'missing') return pill('Deleted in Discord', 'warn');
+    return pill('Not published', 'neutral');
+  }
+
+  /** Where the board is now, in a line. */
+  function stateLine(s: KnownIssuesSettings, state: BoardState, edit: boolean): SafeHtml {
+    const channel = `#${s.channelName ?? ''}`;
+    if (!s.enabled) {
+      if (state.state === 'published') return html`Off: the board is still in Discord, but isn’t kept up to date.`;
+      return s.channelId ? html`Off. Turn it on, then publish it in ${channel}.` : html`Off. Choose its channel in Settings below, then turn it on.`;
     }
-    if (state.state === 'missing') return html`${pill('Deleted in Discord', 'warn')}<span class="small muted">Someone deleted the board message.${edit ? ' Publish it again.' : ''}</span>`;
-    return html`${pill('Not published', 'neutral')}<span class="small muted">${s.channelId ? 'Ready to post.' : 'Choose a channel in Settings first.'}</span>`;
+    if (state.state === 'published') {
+      if (state.channelChanged) return html`It’s still in the old channel, not ${channel}.${edit ? ' Move it to post it there.' : ''}`;
+      return html`In ${channel} · changed ${timeAgo(state.changedAt)}${state.checkedAt ? ` · checked ${timeAgo(state.checkedAt)}` : ''}${state.error ? html` <span title="${state.error}">${icon('triangle-alert', 14, 'warn')}</span>` : ''}`;
+    }
+    if (state.state === 'missing') return html`Someone deleted the board message in Discord.${edit ? ' Publish it again.' : ''}`;
+    return html`On. Publish it to post it in ${channel}.`;
   }
 
-  /** A table of issues with what can be done to each. */
-  function issueTable(ctx: WorkspaceRequestContext, s: KnownIssuesSettings, list: BoardIssue[], edit: boolean, where: 'shown' | 'below' | 'hidden'): SafeHtml {
+  /** The feature's card: what it is, whether it's live, turning it on and off, and what needs a look. */
+  function hero(ctx: WorkspaceRequestContext, s: KnownIssuesSettings, state: BoardState, board: Board, checks: Check[], edit: boolean): SafeHtml {
     const b = base(ctx);
-    const act = (i: BoardIssue, action: string) => ({ post: `${b}/issue`, fields: { repo: String(i.repoId), number: String(i.number), action } });
-    return html`<div class="table-wrap"><table class="ki-table">
-      <thead><tr><th class="col-main">Issue</th><th class="num">Reports</th><th>${where === 'hidden' ? 'Would show' : 'Shows'}</th>${edit ? html`<th class="actions"><span class="sr-only">Actions</span></th>` : ''}</tr></thead>
-      <tbody>${list.map((i) => html`<tr>
-        <td><div class="row ki-meta"><span class="small muted">${i.appName}</span>${i.pinned ? tag('Pinned', { icon: 'star' }) : ''}${i.private ? tag('Private', { title: 'Shown without a link: its repository is private' }) : ''}</div>
-          <a class="cell-title" href="${i.githubUrl}" target="_blank" rel="noopener noreferrer">${i.title}</a> <span class="small muted mono">#${String(i.number)}</span>
-          ${i.title !== i.githubTitle ? html`<div class="sub">On GitHub: ${i.githubTitle}</div>` : ''}
-          ${i.note ? html`<div class="sub">↳ ${i.note}</div>` : ''}</td>
-        <td class="num">${String(i.reports)}</td>
-        <td><span class="ki-status ${STATUS_TONES[i.status]}">${statusLine(s, i)}</span>${i.pull ? html`<div class="sub"><a href="${i.pull.url}" target="_blank" rel="noopener noreferrer">PR #${String(i.pull.number)}</a></div>` : ''}</td>
-        ${edit ? html`<td class="actions">${menu([
-          where === 'hidden' ? { ...act(i, 'unhide'), label: 'Show again', icon: 'eye' as const } : i.pinned ? { ...act(i, 'unpin'), label: 'Unpin', icon: 'star' as const } : { ...act(i, 'pin'), label: where === 'below' ? 'Pin to the board' : 'Pin to the top', icon: 'star' as const },
-          { href: `${b}/issue/${i.repoId}/${i.number}`, label: 'Title and note…', icon: 'pencil' as const },
-          where === 'hidden' ? null : { ...act(i, 'hide'), label: 'Hide from the board', icon: 'eye-off' as const },
-          'sep',
-          { href: i.githubUrl, label: 'Open on GitHub', icon: 'arrow-up-right' as const, external: true },
-        ], { csrf: ctx.csrf, label: `Actions for #${i.number}` })}</td>` : ''}
-      </tr>`)}</tbody></table></div>`;
+    const published = state.state === 'published';
+    const publishLabel = published ? (state.channelChanged ? 'Move board' : 'Update now') : state.state === 'missing' ? 'Publish again' : 'Publish board';
+    const problems = checks.filter((c) => c.status !== 'ok');
+    const live = s.enabled && published;
+    const stat = (n: number, label: string, href: string) => html`<a class="chip-stat" href="${href}"><b>${String(n)}</b> ${label}</a>`;
+    return html`<section class="card ki-hero" aria-labelledby="ki-name">
+      <div class="ki-hero-top">
+        <span class="ki-icon" aria-hidden="true">${icon('clipboard-list', 20)}</span>
+        <div class="ki-hero-text">
+          <div class="ki-hero-title"><h2 id="ki-name">Known-issues board</h2>${boardPill(s, state)}</div>
+          <p class="muted">A message in Discord with the problems members report most and where each fix is, so they check it before opening a ticket. The bot looks every 10 minutes and edits it when something changes.</p>
+          <div class="ki-state">${stateLine(s, state, edit)}</div>
+        </div>
+        ${edit ? html`<div class="ki-actions">
+          <form method="post" action="${b}/settings" class="ki-power">${csrfField(ctx.csrf)}<input type="hidden" name="section" value="power">
+            <label class="row small" ${s.channelId || s.enabled ? '' : raw('title="Choose a channel first"')}>${switchInput({ name: 'enabled', checked: s.enabled, label: 'Board turned on', id: 'ki-enabled', disabled: !s.channelId && !s.enabled, attrs: raw('data-autosubmit') })}<span>${s.enabled ? 'On' : 'Off'}</span></label>
+          </form>
+          ${s.enabled ? html`<form method="post" action="${b}/publish" class="inline-form">${csrfField(ctx.csrf)}${submitBtn(publishLabel, { variant: published && !state.channelChanged ? undefined : 'primary', size: 'sm', icon: published ? 'refresh-cw' : 'send', loading: 'Posting…' })}</form>` : ''}
+          ${menu([
+            published && state.link ? { href: state.link, label: 'View in Discord', icon: 'arrow-up-right' as const, external: true } : null,
+            state.state !== 'not_published' ? { post: `${b}/remove`, label: 'Remove from Discord', icon: 'trash-2' as const, danger: true, confirm: { title: 'Remove the board from Discord?', body: 'The message is deleted. Your settings, pins and notes are kept, so you can post it again.', label: 'Remove board', danger: true } } : null,
+          ], { csrf: ctx.csrf, label: 'More for the board' })}
+        </div>` : ''}
+      </div>
+      <div class="ki-stats">
+        ${stat(board.shown.length, live ? 'on the board' : 'would be on it', '#on')}
+        ${board.below.length ? stat(board.below.length, 'also reported', '#below') : ''}
+        ${board.hidden.length ? stat(board.hidden.length, 'hidden', '#hidden') : ''}
+      </div>
+      ${problems.length ? checklist(problems) : ''}
+    </section>`;
   }
 
-  async function healthChecks(ctx: WorkspaceRequestContext, s: KnownIssuesSettings, guild: GuildAccess | null, board: Board): Promise<Check[]> {
-    const conn = await getDiscordConnection(deps.db, ctx.workspace.id);
+  /** An issue as a closed row: what members see, its reports and status; opened, its title and note. */
+  function issueRow(ctx: WorkspaceRequestContext, s: KnownIssuesSettings, i: BoardIssue, edit: boolean, where: 'shown' | 'below' | 'hidden'): SafeHtml {
+    const b = base(ctx);
+    const id = `i-${i.repoId}-${i.number}`;
+    const act = (action: string, label: string, name: IconName) => postBtn(`${b}/issue`, label, ctx.csrf, { size: 'sm', icon: name, fields: { repo: String(i.repoId), number: String(i.number), action } });
+    const fields = html`<div class="fields-2">
+        ${textField({ id: `t-${id}`, name: 'title', label: 'Shown as', value: i.title !== i.githubTitle ? i.title : '', max: TEXT_LIMITS.issueTitle, placeholder: i.githubTitle, hint: 'Empty: the title on GitHub. Say it the way members would.' })}
+        ${textField({ id: `n-${id}`, name: 'note', label: 'Note under it', value: i.note ?? '', max: TEXT_LIMITS.note, rows: 2, placeholder: 'For example: until it’s fixed, export as PNG instead.', hint: 'A workaround, or what to do meanwhile.' })}
+      </div>`;
+    return html`<details class="ki-row" id="${id}" data-flash>
+      <summary class="ki-sum">
+        <span class="cl-chev" aria-hidden="true">${icon('chevron-right', 14)}</span>
+        <span class="ki-main">
+          <span class="ki-meta"><span>${i.appName}</span><span class="mono">#${String(i.number)}</span>${i.pinned ? tag('Pinned', { icon: 'star' }) : ''}${i.private ? tag('Private', { title: 'Shown without a link: its repository is private' }) : ''}</span>
+          <span class="ki-title">${i.title}</span>
+          ${i.note ? html`<span class="ki-note">↳ ${i.note}</span>` : ''}
+        </span>
+        <span class="ki-side">
+          <span class="ki-status ${STATUS_TONES[i.status]}">${statusLine(s, i)}</span>
+          <span class="ki-reports"><b>${String(i.reports)}</b> ${i.reports === 1 ? 'report' : 'reports'}</span>
+          ${openBtn(edit)}
+        </span>
+      </summary>
+      <div class="ki-body">
+        <div class="cl-tools">
+          <span class="small muted">On GitHub: <a href="${i.githubUrl}" target="_blank" rel="noopener noreferrer">${i.githubTitle}</a>${i.pull ? html` · <a href="${i.pull.url}" target="_blank" rel="noopener noreferrer">PR #${String(i.pull.number)}</a>` : ''}</span>
+          ${edit ? html`<div class="row">${where === 'hidden'
+            ? act('unhide', 'Show again', 'eye')
+            : html`${i.pinned ? act('unpin', 'Unpin', 'star') : act('pin', where === 'below' ? 'Pin to the board' : 'Pin to the top', 'star')}${act('hide', 'Hide', 'eye-off')}`}</div>` : ''}
+        </div>
+        ${edit
+          ? html`<form method="post" action="${b}/issue/${String(i.repoId)}/${String(i.number)}" data-dirty>${csrfField(ctx.csrf)}
+              <div class="section">${fields}</div>
+              <div class="card-f"><span></span><div class="end"><button type="button" class="btn" data-discard data-dirty-enable>Cancel</button>${submitBtn('Save', { variant: 'primary', loading: 'Saving…', attrs: raw('data-dirty-enable') })}</div></div>
+            </form>`
+          : html`<fieldset class="plain view-only" disabled><div class="section">${fields}</div></fieldset>`}
+      </div>
+    </details>`;
+  }
+
+  /** A setting as a closed row: its name and what it's set to; opened, its own form. */
+  function settingRow(id: string, name: IconName, title: string, gist: Content, edit: boolean, body: SafeHtml): SafeHtml {
+    return html`<details class="ki-row ki-set" id="s-${id}" data-flash>
+      <summary class="ki-sum">
+        <span class="ki-ico" aria-hidden="true">${icon(name, 14)}</span>
+        <span class="ki-main"><span class="ki-title">${title}</span><span class="ki-gist">${gist}</span></span>
+        <span class="ki-side">${openBtn(edit)}</span>
+      </summary>
+      <div class="ki-body">${body}</div>
+    </details>`;
+  }
+
+  async function healthChecks(ctx: WorkspaceRequestContext, s: KnownIssuesSettings, guild: GuildAccess | null, board: Board, conn: DiscordConnectionRow | null): Promise<Check[]> {
     const checks: Check[] = [];
-    if (!conn) checks.push({ status: 'error', title: 'Connect a Discord server first', fix: can(ctx.membership, 'manage') ? { label: 'Connect Discord', href: `${ctx.base}/setup/discord` } : undefined });
-    else if (guild && !guild.ok) checks.push({ status: 'error', title: guild.message });
+    if (!conn) checks.push({ key: 'channel', status: 'error', title: 'Connect a Discord server first', fix: can(ctx.membership, 'manage') ? { label: 'Connect Discord', href: `${ctx.base}/setup/discord` } : undefined });
+    else if (guild && !guild.ok) checks.push({ key: 'channel', status: 'error', title: guild.message });
     else if (guild?.ok) {
       const c = s.channelId ? guild.channels.find((x) => x.id === s.channelId) : null;
-      if (!s.channelId) checks.push({ status: 'error', title: 'No channel chosen' });
-      else if (!c) checks.push({ status: 'error', title: 'The chosen channel no longer exists or is hidden from the bot' });
-      else if (c.missing.length) checks.push({ status: 'error', title: `The bot is missing permissions in #${c.name}`, detail: `Missing: ${c.missing.join(', ')}` });
-      else checks.push({ status: 'ok', title: `The bot can post in #${c.name}` });
+      if (!s.channelId) checks.push({ key: 'channel', status: s.enabled ? 'error' : 'warning', title: 'No channel chosen yet', fix: can(ctx.membership, 'known-issues.edit') ? { label: 'Choose one', href: '#s-channel' } : undefined });
+      else if (!c) checks.push({ key: 'channel', status: 'error', title: 'The chosen channel no longer exists or is hidden from the bot' });
+      else if (c.missing.length) checks.push({ key: 'channel', status: 'error', title: `The bot is missing permissions in #${c.name}`, detail: `Missing: ${c.missing.join(', ')}` });
+      else checks.push({ key: 'channel', status: 'ok', title: `The bot can post in #${c.name}` });
     }
-    if (s.reportButton) checks.push(reportUrl(conn) ? { status: 'ok', title: `“${s.reportButtonLabel?.trim() || TEXT_DEFAULTS.reportButton}” opens #${conn?.tickets_channel_name ?? 'the tickets channel'}` } : { status: 'warning', title: 'There’s no ticket panel channel for the button to open', detail: 'Choose one under Discord tickets › Panel, or turn the button off.' });
-    if (board.privateApps.length) checks.push({ status: 'warning', title: `Left out: ${board.privateApps.join(', ')}`, detail: 'Their repositories are private. Turn on “Private repositories” to show their issues without links.' });
-    if (!s.enabled) checks.push({ status: 'warning', title: 'The board is off', detail: 'Turn it on at the top to post it and keep it up to date.' });
+    if (s.reportButton) checks.push(reportUrl(conn) ? { key: 'button', status: 'ok', title: `“${s.reportButtonLabel?.trim() || TEXT_DEFAULTS.reportButton}” opens #${conn?.tickets_channel_name ?? 'the tickets channel'}` } : { key: 'button', status: 'warning', title: 'There’s no ticket panel channel for the button to open', detail: 'Choose one under Discord tickets › Panel, or turn the button off.' });
+    if (board.privateApps.length) checks.push({ key: 'private', status: 'warning', title: `Left out: ${board.privateApps.join(', ')}`, detail: 'Their repositories are private. Turn on “Private repositories” to show their issues without links.' });
     return checks;
   }
 
@@ -134,105 +220,96 @@ export function registerBotFeatureRoutes(app: FastifyInstance, web: Web): void {
     const wid = ctx.workspace.id;
     const b = base(ctx);
     const edit = can(ctx.membership, 'known-issues.edit');
-    const view = (req.query as { view?: string }).view === 'settings' ? 'settings' : 'board';
     const [s, conn, apps, bot] = await Promise.all([getKnownIssuesSettings(deps.db, wid), getDiscordConnection(deps.db, wid), listApps(deps.db, wid), botIdentity(deps)]);
-    const [board, state] = await Promise.all([computeBoard(deps, wid, s), checkBoard(deps, wid, conn)]);
+    const [board, state, guild] = await Promise.all([computeBoard(deps, wid, s), checkBoard(deps, wid, conn), conn && deps.discord ? inspectGuild(deps.discord, conn.guild_id) : null]);
+    const checks = await healthChecks(ctx, s, guild, board, conn);
     const updatedAt = state.state === 'published' ? state.changedAt : new Date();
+    const over = s.period === 'all' ? 'of all time' : `in the last ${periodOf(s.period).label.toLowerCase()}`;
     const preview = html`<div class="panel-preview">
         ${previewCaption(s.channelName, state.state === 'published' ? state.link : null)}
         ${boardPreview(bot, s, board.shown, reportUrl(conn), updatedAt)}
         <p class="dp-note">${board.shown.length ? `${plural(board.shown.length, 'issue')} on the board.` : 'Nothing on the board right now.'} It’s edited in place when something changes, so the channel doesn’t fill up.</p>
       </div>`;
-    const views = segLinks('View', [{ href: b, label: 'Board', current: view === 'board' }, { href: `${b}?view=settings`, label: 'Settings', current: view === 'settings' }]);
+    const head = (id: string, title: string, n: number | null, desc: Content) => html`<div class="ki-sec" id="${id}"><h2>${title}${n === null ? '' : html`<span class="ki-count">${String(n)}</span>`}</h2><p class="small muted">${desc}</p></div>`;
+    const list = (issues: BoardIssue[], where: 'shown' | 'below' | 'hidden') => issues.map((i) => issueRow(ctx, s, i, edit, where));
 
-    let main: SafeHtml;
-    if (view === 'board') {
-      const publishLabel = state.state === 'published' ? (state.channelChanged ? 'Move board' : 'Update now') : state.state === 'missing' ? 'Publish again' : 'Publish board';
-      const boardCard = html`<div class="card">
-          <div class="card-h strip"><div class="row">${stateStrip(s, state, edit)}</div>
-            ${edit ? html`<div class="row">${state.state !== 'not_published' ? html`<button type="submit" class="btn ghost danger sm" form="ki-remove"><span class="lead">${icon('trash-2', 14)}</span><span class="lbl">Remove</span></button>` : ''}
-              <form method="post" action="${b}/publish" class="inline-form">${csrfField(ctx.csrf)}${submitBtn(publishLabel, { variant: state.state === 'published' ? undefined : 'primary', size: 'sm', icon: state.state === 'published' ? 'refresh-cw' : 'send', loading: 'Posting…', disabled: !s.enabled || !s.channelId, title: !s.enabled ? 'Turn the board on in Settings first' : undefined })}</form></div>` : ''}</div>
-          <div class="card-b tight"><p class="small muted">The most-reported problems from Discord tickets ${s.period === 'all' ? 'of all time' : `in the last ${periodOf(s.period).label.toLowerCase()}`}, with ${s.minReports}+ reports, up to ${s.maxIssues}. Fixed ones stay ${s.fixedDays ? `${plural(s.fixedDays, 'day')} after they’re closed` : 'off'}. Pinned issues are always on, at the top.</p></div>
-          ${board.shown.length ? html`<div class="card-b flush">${issueTable(ctx, s, board.shown, edit, 'shown')}</div>` : html`<div class="card-b"><p class="small muted">Nothing qualifies right now. Members see: “${s.emptyText?.trim() || TEXT_DEFAULTS.empty}”</p></div>`}
-        </div>`;
-      main = html`<div class="stack gap-16">
-        ${boardCard}
-        ${board.below.length ? html`<div class="card"><div class="card-h"><div><h2>Also reported</h2><div class="desc">Not on the board: fewer reports than ${s.minReports}, or past the ${s.maxIssues} shown. Pin one to put it on.</div></div></div><div class="card-b flush">${issueTable(ctx, s, board.below, edit, 'below')}</div></div>` : ''}
-        ${board.hidden.length ? html`<div class="card" id="hidden"><div class="card-h"><div><h2>Hidden</h2><div class="desc">Never on the board, whatever their reports.</div></div></div><div class="card-b flush">${issueTable(ctx, s, board.hidden, edit, 'hidden')}</div></div>` : ''}
-        ${edit ? html`<form method="post" action="${b}/add" class="card"><div class="card-h"><div><h2>Add an issue</h2><div class="desc">Put any issue of your apps on the board, pinned, even with no Discord reports.</div></div></div>
-            ${csrfField(ctx.csrf)}<div class="card-b"><div class="row"><label class="sr-only" for="ki-add">GitHub issue link</label><input id="ki-add" type="text" class="full" name="issue" placeholder="https://github.com/owner/repo/issues/123" required>${submitBtn('Pin it', { icon: 'star', loading: 'Adding…' })}</div></div></form>` : ''}
-      </div>`;
-    } else {
-      const guild = conn && deps.discord ? await inspectGuild(deps.discord, conn.guild_id) : null;
-      const checks = await healthChecks(ctx, s, guild, board);
-      const sorted = [...apps].sort((x, y) => x.position - y.position);
-      const channelControl = guild?.ok
-        ? selectWrap(html`<select id="ki-channel" name="channel_id" aria-label="Board channel">
-            ${s.channelId ? '' : html`<option value="" selected disabled>Choose a channel…</option>`}
-            ${guild.channels.map((c) => html`<option value="${c.id}" ${c.id === s.channelId ? raw('selected') : ''} ${c.missing.length ? raw('disabled') : ''}>#${c.name}${c.missing.length ? ` (bot missing: ${c.missing.join(', ')})` : c.category ? ` · ${c.category}` : ''}</option>`)}
-          </select>`)
-        : html`<span class="small muted">${conn ? 'Discord can’t be reached right now.' : 'Connect Discord first.'}</span>`;
-      const num = (name: string, value: number, [min, max]: readonly [number, number], label: string) => html`<input type="number" class="wide" name="${name}" value="${String(value)}" min="${String(min)}" max="${String(max)}" aria-label="${label}">`;
-      const { apps: covered } = boardApps({ ...s, appIds: null, includePrivate: true }, apps);
-      const fields = html`
-        <div class="card-h strip"><div class="row">${stateStrip(s, state, edit)}</div></div>
-        <fieldset class="plain${edit ? '' : ' view-only'}" ${edit ? '' : raw('disabled')}>
-        <div class="section">
-          ${setting('Known-issues board', 'Post the board and keep it up to date (every 10 minutes, edited only when something changes).', switchInput({ name: 'enabled', checked: s.enabled, label: 'Board turned on', id: 'ki-enabled' }), { flat: true, switchRow: true })}
-          ${setting('Channel', 'Where the board is posted. A channel of its own works best, so it stays easy to find.', channelControl, { for: guild?.ok ? 'ki-channel' : undefined, flat: true })}
+    // Settings: each row saves only its own part.
+    const save = (section: Section, inner: SafeHtml, left: SafeHtml | string = state.state === 'published' ? 'Saving updates the board in Discord.' : '') => edit
+      ? html`<form method="post" action="${b}/settings" data-dirty>${csrfField(ctx.csrf)}<input type="hidden" name="section" value="${section}">
+          <div class="section">${inner}</div>
+          <div class="card-f"><span class="small muted">${left}</span><div class="end"><button type="button" class="btn" data-discard data-dirty-enable>Cancel</button>${submitBtn('Save', { variant: 'primary', loading: 'Saving…', attrs: raw('data-dirty-enable') })}</div></div>
+        </form>`
+      : html`<fieldset class="plain view-only" disabled><div class="section">${inner}</div></fieldset><div class="card-f">${viewOnlyFooter('the board')}</div>`;
+    const reset = (ids: string) => (edit ? html`<button type="button" class="btn ghost sm" data-reset-fields="${ids}"><span class="lead">${icon('undo-2', 14)}</span><span class="lbl">Reset to default</span></button>` : '');
+    const checkLine = (c: Check | undefined) => (c ? html`<span class="ki-check ${c.status}">${icon(c.status === 'ok' ? 'circle-check' : c.status === 'warning' ? 'triangle-alert' : 'circle-x', 12)}${c.title}</span>` : '');
+    const num = (name: string, value: number, [min, max]: readonly [number, number], label: string) => html`<input type="number" class="wide" name="${name}" value="${String(value)}" min="${String(min)}" max="${String(max)}" aria-label="${label}">`;
+    const sorted = [...apps].sort((x, y) => x.position - y.position);
+    const { apps: covered } = boardApps({ ...s, appIds: null, includePrivate: true }, apps);
+    const chosenApps = sorted.filter((a) => !s.appIds || s.appIds.includes(a.id));
+    const channelControl = guild?.ok
+      ? selectWrap(html`<select id="ki-channel" name="channel_id" aria-label="Board channel">
+          ${s.channelId ? '' : html`<option value="" selected disabled>Choose a channel…</option>`}
+          ${guild.channels.map((c) => html`<option value="${c.id}" ${c.id === s.channelId ? raw('selected') : ''} ${c.missing.length ? raw('disabled') : ''}>#${c.name}${c.missing.length ? ` (bot missing: ${c.missing.join(', ')})` : c.category ? ` · ${c.category}` : ''}</option>`)}
+        </select>`)
+      : html`<span class="small muted">${conn ? 'Discord can’t be reached right now.' : 'Connect Discord first.'}</span>`;
+    const problems = checks.filter((c) => c.status !== 'ok');
+    const textIds = 'title_text intro_text empty_text';
+    const statusIds = STATUSES.map((k) => `status_${k}`).join(' ');
+
+    const settings = [
+      settingRow('channel', 'hash', 'Channel', html`<span class="ki-gist-main">${s.channelName ? `#${s.channelName}` : 'Not chosen yet'}</span>${checkLine(checks.find((c) => c.key === 'channel'))}`, edit, save('channel',
+        setting('Channel', 'Where the board is posted. A channel of its own works best, so it stays easy to find.', channelControl, { for: guild?.ok ? 'ki-channel' : undefined, flat: true }))),
+      settingRow('content', 'list-filter', 'What goes on it', html`<span>Reports ${over} · ${String(s.minReports)}+ reports · up to ${String(s.maxIssues)} · fixed ones stay ${s.fixedDays ? plural(s.fixedDays, 'day') : 'off'}</span>
+          <span class="ki-chips">${chosenApps.map((a) => html`<span class="ki-chip${a.repo_private && !s.includePrivate ? ' off' : ''}" ${a.repo_private && !s.includePrivate ? raw('title="Left out: its repository is private"') : ''}>${a.name}</span>`)}</span>`, edit, save('content', html`
+        <p class="small muted ki-lead">Issues are ranked by their Discord tickets (a duplicate counts for its original), as in Repo status › Most reported.</p>
+        ${setting('Reports counted over', null, selectWrap(html`<select name="period" aria-label="Reports counted over">${PERIODS.map((p) => html`<option value="${p.id}" ${p.id === s.period ? raw('selected') : ''}>${p.id === 'all' ? 'All time' : `The last ${p.label.toLowerCase()}`}</option>`)}</select>`), { flat: true })}
+        ${setting('At least', 'Reports an issue needs to go on (pinned ones always do).', html`<div class="row">${num('min_reports', s.minReports, LIMITS.minReports, 'Reports needed')}<span class="small muted">reports</span></div>`, { flat: true })}
+        ${setting('Up to', null, html`<div class="row">${num('max_issues', s.maxIssues, LIMITS.maxIssues, 'Issues shown')}<span class="small muted">issues</span></div>`, { flat: true })}
+        ${setting('Fixed issues stay', 'So members see it’s fixed and update. 0 takes them off as soon as they’re closed.', html`<div class="row">${num('fixed_days', s.fixedDays, LIMITS.fixedDays, 'Days fixed issues stay')}<span class="small muted">days</span></div>`, { flat: true })}
+        ${setting('Private repositories', 'Show their issues too, without links. Off: left out, so nothing private is posted.', switchInput({ name: 'include_private', checked: s.includePrivate, label: 'Include private repositories', id: 'ki-private' }), { flat: true, switchRow: true })}
+        <div class="setting flat top"><div><div class="lbl">Apps</div><div class="desc">All on: apps you add later are included too.</div></div><div class="control"><input type="hidden" name="apps" value="1"><div class="stack gap-8">${sorted.map((a) => html`<label class="row small">${switchInput({ name: 'app_ids', value: a.id, checked: !s.appIds || s.appIds.includes(a.id), label: `Include ${a.name}` })}<span>${a.name}</span>${a.repo_private ? tag('Private') : ''}${covered.some((c) => c.id === a.id) ? '' : html`<span class="small muted">(shares a repository)</span>`}</label>`)}</div></div></div>`)),
+      settingRow('message', 'message-square', 'Message', html`<span>“${s.titleText ?? TEXT_DEFAULTS.title}” · ${s.groupByApp ? 'grouped by app' : 'one list'} · ${s.showCounts ? 'with report counts' : 'no report counts'}</span>${(s.introText ?? TEXT_DEFAULTS.intro).trim() ? html`<span class="ki-quote">${(s.introText ?? TEXT_DEFAULTS.intro).trim()}</span>` : ''}`, edit, save('message', html`
+        <p class="small muted ki-lead">Discord formatting works: **bold**, - list, [link](https://…). The preview follows as you type.</p>
+        <div class="fields">
+          ${textField({ id: 'title_text', label: 'Title', value: s.titleText ?? TEXT_DEFAULTS.title, max: TEXT_LIMITS.title, placeholder: TEXT_DEFAULTS.title, defaultValue: TEXT_DEFAULTS.title, preview: 'pv-ki-title' })}
+          ${textField({ id: 'intro_text', label: 'Introduction', value: s.introText ?? TEXT_DEFAULTS.intro, max: TEXT_LIMITS.intro, rows: 2, placeholder: 'Nothing above the list', defaultValue: TEXT_DEFAULTS.intro, preview: 'pv-ki-intro', md: true })}
+          ${textField({ id: 'empty_text', label: 'When nothing’s on it', value: s.emptyText ?? TEXT_DEFAULTS.empty, max: TEXT_LIMITS.empty, rows: 2, placeholder: TEXT_DEFAULTS.empty, defaultValue: TEXT_DEFAULTS.empty, preview: board.shown.length ? undefined : 'pv-ki-empty', md: true })}
         </div>
-        <div class="section">
-          <div class="section-h"><div><h3>What goes on it</h3><div class="desc">Issues ranked by their Discord tickets (a duplicate counts for its original), as in Repo status › Most reported.</div></div></div>
-          ${setting('Reports counted over', null, selectWrap(html`<select name="period" aria-label="Reports counted over">${PERIODS.map((p) => html`<option value="${p.id}" ${p.id === s.period ? raw('selected') : ''}>${p.id === 'all' ? 'All time' : `The last ${p.label.toLowerCase()}`}</option>`)}</select>`), { flat: true })}
-          ${setting('At least', 'Reports an issue needs to go on (pinned ones always do).', html`<div class="row">${num('min_reports', s.minReports, LIMITS.minReports, 'Reports needed')}<span class="small muted">reports</span></div>`, { flat: true })}
-          ${setting('Up to', null, html`<div class="row">${num('max_issues', s.maxIssues, LIMITS.maxIssues, 'Issues shown')}<span class="small muted">issues</span></div>`, { flat: true })}
-          ${setting('Fixed issues stay', 'So members see it’s fixed and update. 0 takes them off as soon as they’re closed.', html`<div class="row">${num('fixed_days', s.fixedDays, LIMITS.fixedDays, 'Days fixed issues stay')}<span class="small muted">days</span></div>`, { flat: true })}
-          ${setting('Private repositories', 'Show their issues too, without links. Off: left out, so nothing private is posted.', switchInput({ name: 'include_private', checked: s.includePrivate, label: 'Include private repositories', id: 'ki-private' }), { flat: true, switchRow: true })}
-          <div class="setting flat top"><div><div class="lbl">Apps</div><div class="desc">All on: apps you add later are included too.</div></div><div class="control"><input type="hidden" name="apps" value="1"><div class="stack gap-8">${sorted.map((a) => html`<label class="row small">${switchInput({ name: 'app_ids', value: a.id, checked: !s.appIds || s.appIds.includes(a.id), label: `Include ${a.name}` })}<span>${a.name}</span>${a.repo_private ? tag('Private') : ''}${covered.some((c) => c.id === a.id) ? '' : html`<span class="small muted">(shares a repository)</span>`}</label>`)}</div></div></div>
-        </div>
-        <div class="section">
-          <div class="section-h"><div><h3>Text</h3><div class="desc">Discord formatting works: **bold**, - list, [link](https://…).</div></div>
-            ${edit ? html`<button type="button" class="btn ghost sm" data-reset-fields="title_text intro_text empty_text ${STATUSES.map((k) => `status_${k}`).join(' ')} report_button_label"><span class="lead">${icon('undo-2', 14)}</span><span class="lbl">Reset to default</span></button>` : ''}</div>
-          <div class="fields">
-            ${textField({ id: 'title_text', label: 'Title', value: s.titleText ?? TEXT_DEFAULTS.title, max: TEXT_LIMITS.title, placeholder: TEXT_DEFAULTS.title, defaultValue: TEXT_DEFAULTS.title, preview: 'pv-ki-title' })}
-            ${textField({ id: 'intro_text', label: 'Introduction', value: s.introText ?? TEXT_DEFAULTS.intro, max: TEXT_LIMITS.intro, rows: 2, placeholder: 'Nothing above the list', defaultValue: TEXT_DEFAULTS.intro, preview: 'pv-ki-intro', md: true })}
-            ${textField({ id: 'empty_text', label: 'When nothing’s on it', value: s.emptyText ?? TEXT_DEFAULTS.empty, max: TEXT_LIMITS.empty, rows: 2, placeholder: TEXT_DEFAULTS.empty, defaultValue: TEXT_DEFAULTS.empty, preview: board.shown.length ? undefined : 'pv-ki-empty', md: true })}
-          </div>
-          ${setting('Group by app', 'Each app’s issues under its name. Off: one list, the app before each issue.', switchInput({ name: 'group_by_app', checked: s.groupByApp, label: 'Group by app', id: 'ki-group' }), { flat: true, switchRow: true })}
-          ${setting('Report counts', 'Show how many reports each issue has.', switchInput({ name: 'show_counts', checked: s.showCounts, label: 'Show report counts', id: 'ki-counts' }), { flat: true, switchRow: true })}
-        </div>
-        <div class="section">
-          <div class="section-h"><div><h3>Status</h3><div class="desc">What each issue says, from its pull requests and the releases. {version} is the release with the fix.</div></div></div>
-          <div class="fields">${STATUSES.map((k) => textField({ id: `status_${k}`, label: STATUS_NAMES[k], value: s.statusText[k] ?? STATUS_DEFAULTS[k], max: TEXT_LIMITS.status, placeholder: STATUS_DEFAULTS[k], defaultValue: STATUS_DEFAULTS[k] }))}</div>
-        </div>
-        <div class="section">
-          ${setting('“Report a problem” button', html`Opens the ticket panel’s channel${conn?.tickets_channel_name ? ` (#${conn.tickets_channel_name})` : ''}.`, switchInput({ name: 'report_button', checked: s.reportButton, label: 'Report a problem button', id: 'ki-report' }), { flat: true, switchRow: true })}
-          <div class="fields ann-notes-label">${textField({ id: 'report_button_label', label: 'Its label', value: s.reportButtonLabel ?? TEXT_DEFAULTS.reportButton, max: TEXT_LIMITS.reportButton, placeholder: TEXT_DEFAULTS.reportButton, defaultValue: TEXT_DEFAULTS.reportButton, preview: 'pv-ki-button' })}</div>
-        </div>
-        <div class="section">
-          <div class="section-h"><div><h3>Health</h3><div class="desc">Checked live against Discord when this page loads.</div></div>${linkBtn(`${b}?view=settings`, 'Check again', { variant: 'ghost', size: 'sm', icon: 'refresh-cw' })}</div>
-          ${checklist(checks)}
-        </div>
-        </fieldset>`;
-      main = edit
-        ? html`<form method="post" action="${b}/settings" class="card" data-dirty>
-            ${csrfField(ctx.csrf)}
-            ${fields}
-            <div class="card-f"><span class="small muted">${state.state === 'published' ? 'Saving updates the board in Discord.' : ''}</span><div class="end">
-              <span class="row small muted" data-dirty-show hidden><span class="dot c4" aria-hidden="true"></span>Unsaved changes</span>
-              <button type="button" class="btn ghost" data-discard data-dirty-show hidden>Discard</button>
-              ${submitBtn('Save changes', { variant: 'primary', loading: 'Saving…', attrs: raw('data-dirty-enable') })}
-            </div></div>
-          </form>`
-        : html`<div class="card">${fields}<div class="card-f">${viewOnlyFooter('the board')}</div></div>`;
-    }
+        ${setting('Group by app', 'Each app’s issues under its name. Off: one list, the app before each issue.', switchInput({ name: 'group_by_app', checked: s.groupByApp, label: 'Group by app', id: 'ki-group' }), { flat: true, switchRow: true })}
+        ${setting('Report counts', 'Show how many reports each issue has.', switchInput({ name: 'show_counts', checked: s.showCounts, label: 'Show report counts', id: 'ki-counts' }), { flat: true, switchRow: true })}`, reset(textIds))),
+      settingRow('status', 'tag', 'Status wording', html`<span class="ki-chips">${STATUSES.map((k) => html`<span class="ki-chip" title="${STATUS_NAMES[k]}">${s.statusText[k] ?? STATUS_DEFAULTS[k]}</span>`)}</span>`, edit, save('status', html`
+        <p class="small muted ki-lead">What each issue says, worked out from its pull requests and your releases. {version} is the release with the fix.</p>
+        <div class="fields">${STATUSES.map((k) => textField({ id: `status_${k}`, label: STATUS_NAMES[k], value: s.statusText[k] ?? STATUS_DEFAULTS[k], max: TEXT_LIMITS.status, placeholder: STATUS_DEFAULTS[k], defaultValue: STATUS_DEFAULTS[k] }))}</div>`, reset(statusIds))),
+      settingRow('button', 'external-link', '“Report a problem” button', s.reportButton ? html`<span>On</span>${checkLine(checks.find((c) => c.key === 'button'))}` : 'Off: no button under the board', edit, save('button', html`
+        ${setting('Show the button', html`Under the board. It opens the ticket panel’s channel${conn?.tickets_channel_name ? ` (#${conn.tickets_channel_name})` : ''}.`, switchInput({ name: 'report_button', checked: s.reportButton, label: 'Report a problem button', id: 'ki-report' }), { flat: true, switchRow: true })}
+        <div class="fields ann-notes-label">${textField({ id: 'report_button_label', label: 'Its label', value: s.reportButtonLabel ?? TEXT_DEFAULTS.reportButton, max: TEXT_LIMITS.reportButton, placeholder: TEXT_DEFAULTS.reportButton, defaultValue: TEXT_DEFAULTS.reportButton, preview: 'pv-ki-button' })}</div>`)),
+      settingRow('checks', 'activity', 'Checks', problems.length ? html`<span class="ki-check ${problems.some((c) => c.status === 'error') ? 'error' : 'warning'}">${icon('triangle-alert', 12)}${plural(problems.length, 'thing')} to look at</span>` : html`<span class="ki-check ok">${icon('circle-check', 12)}All good</span>`, false, html`
+        <div class="section">${checklist(checks.length ? checks : [{ status: 'ok', title: 'Nothing to check yet' }])}</div>
+        <div class="card-f"><span class="small muted">Checked live against Discord when this page loads.</span><div class="end">${linkBtn(`${b}?checked=1#s-checks`, 'Check again', { size: 'sm', icon: 'refresh-cw' })}</div></div>`),
+    ];
 
     const body = html`
       ${await toolHeader(web, ctx, 'bot', 'known-issues')}
-      <div class="ki-views">${views}</div>
-      <div class="panel-grid">${main}${preview}</div>
-      ${edit && state.state !== 'not_published' ? html`<form method="post" action="${b}/remove" id="ki-remove" hidden data-confirm-title="Remove the board from Discord?" data-confirm-body="The message is deleted. Your settings, pins and notes are kept, so you can post it again." data-confirm-label="Remove board" data-confirm-danger>${csrfField(ctx.csrf)}</form>` : ''}`;
-    return web.render(reply, ctx, view === 'settings' ? 'Settings · Known issues' : 'Known issues · Bot features', 'bot', body, { width: 'full' });
+      <div class="panel-grid">
+        <div class="ki-page">
+          ${hero(ctx, s, state, board, checks, edit)}
+          ${head('on', s.enabled && state.state === 'published' ? 'On the board' : 'Would be on the board', board.shown.length, `Ranked by Discord reports ${over}: ${s.minReports}+ reports, up to ${s.maxIssues}. Pinned ones always go on, at the top. Open one to change how it’s shown.`)}
+          <div class="ki-list">
+            ${board.shown.length ? list(board.shown, 'shown') : html`<p class="ki-empty">Nothing qualifies right now. Members see: “${s.emptyText?.trim() || TEXT_DEFAULTS.empty}”</p>`}
+            ${edit ? html`<form method="post" action="${b}/add" class="ki-add">${csrfField(ctx.csrf)}
+              <span class="ki-ico" aria-hidden="true">${icon('plus', 14)}</span>
+              <label class="sr-only" for="ki-add">GitHub issue link</label><input id="ki-add" type="text" name="issue" placeholder="Pin any issue of your apps: paste its GitHub link" required>
+              ${submitBtn('Pin it', { size: 'sm', icon: 'star', loading: 'Adding…' })}
+            </form>` : ''}
+          </div>
+          ${board.below.length ? html`${head('below', 'Also reported', board.below.length, `Not on the board: fewer than ${s.minReports} reports, or past the ${s.maxIssues} shown. Pin one to put it on.`)}<div class="ki-list">${list(board.below, 'below')}</div>` : ''}
+          ${board.hidden.length ? html`${head('hidden', 'Hidden', board.hidden.length, 'Never on the board, whatever their reports.')}<div class="ki-list">${list(board.hidden, 'hidden')}</div>` : ''}
+          ${head('settings', 'Settings', null, 'How the board is made. Open one to change it; the preview follows.')}
+          <div class="ki-list">${settings}</div>
+        </div>
+        ${preview}
+      </div>`;
+    return web.render(reply, ctx, 'Known issues · Bot features', 'bot', body, { width: 'full' });
   });
 
   app.post('/w/:wid/bot/known-issues/settings', async (req, reply) => {
@@ -241,7 +318,11 @@ export function registerBotFeatureRoutes(app: FastifyInstance, web: Web): void {
     const wid = ctx.workspace.id;
     const body = (req.body ?? {}) as Record<string, unknown>;
     const str = (k: string) => (typeof body[k] === 'string' ? (body[k] as string) : undefined);
+    // A row of the page sends only its own part; switches left out of it keep what they were.
+    const section = SECTIONS.find((x) => x === str('section')) ?? null;
+    const has = (x: Section) => !section || section === x;
     try {
+      if (str('section') !== undefined && !section) throw new UserFacingError('Reload the page and try again.');
       const current = await getKnownIssuesSettings(deps.db, wid);
       let channel = { id: current.channelId, name: current.channelName };
       const chosen = str('channel_id');
@@ -273,7 +354,7 @@ export function registerBotFeatureRoutes(app: FastifyInstance, web: Web): void {
       }
       const next: KnownIssuesSettings = {
         ...current,
-        enabled: body.enabled !== undefined,
+        enabled: has('power') ? body.enabled !== undefined : current.enabled,
         channelId: channel.id,
         channelName: channel.name,
         appIds: str('apps') === '1' ? (picked.length === apps.length ? null : picked) : current.appIds,
@@ -281,26 +362,30 @@ export function registerBotFeatureRoutes(app: FastifyInstance, web: Web): void {
         minReports: Math.min(LIMITS.minReports[1], Math.max(LIMITS.minReports[0], Math.round(Number(str('min_reports') ?? current.minReports)) || current.minReports)),
         maxIssues: Math.min(LIMITS.maxIssues[1], Math.max(LIMITS.maxIssues[0], Math.round(Number(str('max_issues') ?? current.maxIssues)) || current.maxIssues)),
         fixedDays: Math.min(LIMITS.fixedDays[1], Math.max(LIMITS.fixedDays[0], Math.round(Number(str('fixed_days') ?? current.fixedDays)) || 0)),
-        includePrivate: body.include_private !== undefined,
-        groupByApp: body.group_by_app !== undefined,
-        showCounts: body.show_counts !== undefined,
+        includePrivate: has('content') ? body.include_private !== undefined : current.includePrivate,
+        groupByApp: has('message') ? body.group_by_app !== undefined : current.groupByApp,
+        showCounts: has('message') ? body.show_counts !== undefined : current.showCounts,
         titleText: keep(text('title_text', TEXT_LIMITS.title, TEXT_DEFAULTS.title), current.titleText) || null,
         // An empty introduction is kept as empty (nothing above the list).
         introText: keep(text('intro_text', TEXT_LIMITS.intro, TEXT_DEFAULTS.intro), current.introText),
         emptyText: keep(text('empty_text', TEXT_LIMITS.empty, TEXT_DEFAULTS.empty), current.emptyText) || null,
         statusText,
-        reportButton: body.report_button !== undefined,
+        reportButton: has('button') ? body.report_button !== undefined : current.reportButton,
         reportButtonLabel: keep(text('report_button_label', TEXT_LIMITS.reportButton, TEXT_DEFAULTS.reportButton), current.reportButtonLabel) || null,
       };
       if (next.enabled && !next.channelId) throw new UserFacingError('Choose the channel for the board, then turn it on.');
       await saveKnownIssuesSettings(deps.db, wid, next);
       await refreshBoardSoon(deps, wid);
-      setFlash(reply, 'success', next.enabled && !current.enabled ? 'The board is on. Publish it from the Board view.' : 'Settings saved');
+      const published = (await checkBoard(deps, wid, null, { live: false })).state === 'published';
+      setFlash(reply, 'success', next.enabled === current.enabled ? (section === 'channel' && !next.enabled && next.channelId ? 'Saved. Turn the board on at the top, then publish it.' : 'Saved')
+        : next.enabled ? (published ? 'The board is on and kept up to date' : 'The board is on. Publish it to post it in Discord.')
+        : published ? 'The board is off. It stays in Discord, but isn’t kept up to date.' : 'The board is off');
     } catch (err) {
       if (!(err instanceof UserFacingError)) throw err;
       setFlash(reply, 'error', err.message);
     }
-    return reply.redirect(`${base(ctx)}?view=settings`);
+    // Back to the row that was saved, open.
+    return reply.redirect(section && section !== 'power' ? `${base(ctx)}#s-${section}` : base(ctx));
   });
 
   app.post('/w/:wid/bot/known-issues/publish', async (req, reply) => {
@@ -349,7 +434,8 @@ export function registerBotFeatureRoutes(app: FastifyInstance, web: Web): void {
     await setIssueOverride(deps.db, wid, repoId, number, change[0]);
     await refreshBoardSoon(deps, wid);
     setFlash(reply, 'success', change[1]);
-    return reply.redirect(base(ctx));
+    // Back to the issue, wherever it is now (pinned onto the board, hidden).
+    return reply.redirect(`${base(ctx)}#i-${repoId}-${number}`);
   });
 
   app.post('/w/:wid/bot/known-issues/add', async (req, reply) => {
@@ -365,7 +451,7 @@ export function registerBotFeatureRoutes(app: FastifyInstance, web: Web): void {
     await setIssueOverride(deps.db, wid, app.repo_id, ref.number, { pinned: true });
     await refreshBoardSoon(deps, wid);
     setFlash(reply, 'success', `#${ref.number} is pinned to the board`);
-    return reply.redirect(base(ctx));
+    return reply.redirect(`${base(ctx)}#i-${app.repo_id}-${ref.number}`);
   });
 
   app.get('/w/:wid/bot/known-issues/issue/:repo/:number', async (req, reply) => {
@@ -410,7 +496,7 @@ export function registerBotFeatureRoutes(app: FastifyInstance, web: Web): void {
     await setIssueOverride(deps.db, wid, repo.repo_id, Number(p.number), { title: clean(body.title, TEXT_LIMITS.issueTitle), note: clean(body.note, TEXT_LIMITS.note) });
     await refreshBoardSoon(deps, wid);
     setFlash(reply, 'success', 'Saved');
-    return reply.redirect(base(ctx));
+    return reply.redirect(`${base(ctx)}#i-${repo.repo_id}-${p.number}`);
   });
 }
 

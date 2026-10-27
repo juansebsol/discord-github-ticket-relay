@@ -5,7 +5,6 @@
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { announcementCounts, getAnnouncementSettings } from '../../announcements/settings.js';
-import { checkBoard, getKnownIssuesSettings } from '../../bot-features/known-issues.js';
 import { checkContributorPanel, getContributorSettings } from '../../domain/contributors.js';
 import type { Queryable } from '../../db/database.js';
 import { checkPanel, type PanelState } from '../../domain/panel.js';
@@ -211,11 +210,10 @@ async function toolState(web: Web, ctx: WorkspaceRequestContext, tool: ToolName,
     };
   }
   if (tool === 'bot') {
-    const [ki, conn] = await Promise.all([getKnownIssuesSettings(db, wid), getDiscordConnection(db, wid)]);
-    const board = await checkBoard(web.deps, wid, conn, { live: false });
+    // Each feature's page shows whether it's on; the header only says what the tool is.
     return {
-      status: !ki.enabled ? pill('Off', 'neutral') : board.state === 'published' ? pill('Live', 'ok') : board.state === 'missing' ? pill('Board deleted', 'warn') : pill('Not published', 'neutral'),
-      description: 'Extra things the bot does in your Discord, each turned on when you want it. First: a known-issues board.',
+      status: '',
+      description: 'Extra things the bot does in your Discord. Each one is off until you turn it on.',
       actions: [],
       counts: {},
     };

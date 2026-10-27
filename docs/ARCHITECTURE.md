@@ -171,6 +171,10 @@ Discord endpoint, OAuth), one or more queue workers, and an optional triage work
   notes. The posted message (`known_issue_boards`) is looked at every 10 minutes by the worker's
   index loop, and right after a change in the console, and edited only when its content (all but
   the "Updated" time) changed; deleted in Discord, it's marked so and posted again on request.
+  Its page is one page: the board's card (on and off, publish), then the issues and each part of
+  the settings as rows that open to edit. A row's form sends `section`, and the settings route
+  changes only that part (switches of other parts keep their value); a form without it saves
+  every field.
 - **No Discord gateway.** The bot is driven entirely by Discord's HTTP interactions endpoint and
   REST API. It needs no privileged intents and no slash-command registration.
 - **GitHub App auth.** Short-lived installation tokens are minted from the app's private key

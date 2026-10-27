@@ -343,7 +343,7 @@ async function botCard({ web, ctx, dc }: Shared): Promise<ToolCard> {
       { label: 'Hidden', value: kept.filter((o) => o.hidden).length, area: 'known-issues', href: `${b}/bot/known-issues#hidden` },
     ],
     go: [
-      ...(!s.enabled && can(ctx.membership, 'known-issues.edit') ? [{ area: 'known-issues' as const, label: 'Set up the board', href: `${b}/bot/known-issues?view=settings`, primary: true }] : []),
+      ...(!s.enabled && can(ctx.membership, 'known-issues.edit') ? [{ area: 'known-issues' as const, label: 'Set up the board', href: `${b}/bot/known-issues`, primary: true }] : []),
       { area: 'known-issues', label: 'Known issues' },
     ],
   };

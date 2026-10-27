@@ -176,6 +176,44 @@ describe('Known issues: the board in Discord', () => {
   });
 });
 
+describe('Known issues: saving one row of the page', () => {
+  it('changes only that row’s part, and goes back to it', async () => {
+    await turnOn({ include_private: '1' });
+    const before = await getKnownIssuesSettings(env.db, ws.workspace.id);
+    expect(before).toMatchObject({ enabled: true, includePrivate: true, groupByApp: true, showCounts: true, reportButton: true });
+
+    // Status wording: the switches of other rows stay as they were.
+    const res = await post('/bot/known-issues/settings', { section: 'status', status_open: '👀 On it' });
+    expect(res.headers.location).toBe(`${w()}/bot/known-issues#s-status`);
+    expect(await getKnownIssuesSettings(env.db, ws.workspace.id)).toMatchObject({ ...before, statusText: { open: '👀 On it' } });
+
+    // Message: its own switches follow the form.
+    await post('/bot/known-issues/settings', { section: 'message', title_text: 'Known issues', show_counts: '1' });
+    expect(await getKnownIssuesSettings(env.db, ws.workspace.id)).toMatchObject({ enabled: true, includePrivate: true, groupByApp: false, showCounts: true, reportButton: true });
+
+    // The switch on the card turns only the board off.
+    const off = await post('/bot/known-issues/settings', { section: 'power' });
+    expect(off.headers.location).toBe(`${w()}/bot/known-issues`);
+    expect(await getKnownIssuesSettings(env.db, ws.workspace.id)).toMatchObject({ enabled: false, includePrivate: true, reportButton: true, channelId: boardChannel });
+
+    // A part that doesn't exist changes nothing.
+    await post('/bot/known-issues/settings', { section: 'everything', enabled: '1' });
+    expect((await getKnownIssuesSettings(env.db, ws.workspace.id)).enabled).toBe(false);
+  });
+
+  it('goes back to the issue after pinning, hiding or editing it', async () => {
+    const crash = await reported('Export crashes the app', 2);
+    await sync();
+    await turnOn();
+    const at = `${w()}/bot/known-issues#i-${repo().id}-${crash.number}`;
+    expect((await post('/bot/known-issues/issue', { repo: String(repo().id), number: String(crash.number), action: 'hide' })).headers.location).toBe(at);
+    expect((await post(`/bot/known-issues/issue/${repo().id}/${crash.number}`, { title: 'Exporting crashes', note: '' })).headers.location).toBe(at);
+    const body = (await page('/bot/known-issues')).body;
+    expect(body).toContain(`<details class="ki-row" id="i-${repo().id}-${crash.number}" data-flash>`);
+    expect(body).toMatch(/id="hidden"><h2>Hidden<span class="ki-count">1<\/span>/);
+  });
+});
+
 describe('Known issues: pages and access', () => {
   it('has a page and settings with a preview; moderators need access, and Edit to change it', async () => {
     await reported('Export crashes the app', 2);
@@ -184,9 +222,13 @@ describe('Known issues: pages and access', () => {
     expect(board1.statusCode).toBe(200);
     expect(board1.body).toContain('Preview of the known-issues board in Discord');
     expect(board1.body).toContain('Publish board');
-    const settings = await page('/bot/known-issues?view=settings');
-    expect(settings.body).toContain('Left out: VectorCraft');
-    expect(settings.body).toContain('The bot can post in #known-issues');
+    // One page: the board's card, the issues and the settings as rows, all closed until opened.
+    expect(board1.body).toContain('Known-issues board');
+    expect(board1.body).toContain('Left out: VectorCraft');
+    expect(board1.body).toContain('The bot can post in #known-issues');
+    expect(board1.body).toContain('<details class="ki-row ki-set" id="s-content" data-flash>');
+    expect(board1.body).not.toMatch(/<details class="ki-row[^"]*"[^>]*\bopen\b/);
+    expect((await page('/bot/known-issues?view=settings')).body).toContain('id="s-channel"');
     expect((await page('/bot')).headers.location).toBe(`${w()}/bot/known-issues`);
     expect((await page('')).body).toContain('Bot features');
 
