@@ -201,9 +201,10 @@ export function registerTriageOverviewRoutes(app: FastifyInstance, web: Web): vo
           <div class="an-ch"><h2 id="ov-read-h">Read per day</h2><span class="small muted">${picked ? picked.name : 'all apps'} · tickets and issues Claude triaged</span></div>
           ${chart(w, { title: 'Read per day', unit: 'Read', series: [{ name: 'Discord tickets', slot: 1, values: d.tickets }, { name: 'Opened on GitHub', slot: 2, values: d.issues }] })}
         </section>`}
-        ${labelsCard(ctx, c, labels, missing, { search, runs, app: picked?.id ?? null })}
         ${activityCard(ctx, c, d, { apps, picked: picked?.id ?? null, range, app: (id) => href({ app: id }) })}
-        <p class="small muted an-foot">Labels are what the open issues have on GitHub now, from the issue sync. What triage did counts the tickets and issues it read in the period, ${RANGE_NAMES[range] === 'All' ? 'since it was turned on' : 'by the day it read them'}; the “+” numbers are suggestions still waiting in Review. Times are in your time zone (${tz}).</p>
+        <h2 class="ov-split">Right now on GitHub<span>${picked ? picked.name : 'all apps'} · the period above doesn’t change this</span></h2>
+        ${labelsCard(ctx, c, labels, missing, { search, runs, app: picked?.id ?? null })}
+        <p class="small muted an-foot">What triage did counts the tickets and issues it read in the period, ${RANGE_NAMES[range] === 'All' ? 'since it was turned on' : 'by the day it read them'}; the “+” numbers are suggestions still waiting in Review. Labels are what the open issues have on GitHub now, from the issue sync, whoever added them. Times are in your time zone (${tz}).</p>
       </div>`;
     return web.render(reply, ctx, 'Overview · AI triage', 'triage', body, { width: 'full' });
   });

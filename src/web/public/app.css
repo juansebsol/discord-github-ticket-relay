@@ -2161,6 +2161,8 @@ th.bf-had { width: 16%; }
 .ov-labels .an-ch { align-items: center; }
 .p-crit { background: var(--danger); } .p-high { background: var(--viz-2); } .p-med { background: var(--viz-1); } .p-low { background: var(--faint); }
 .ov-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.ov-split { display: flex; align-items: baseline; gap: 4px 10px; flex-wrap: wrap; margin: 20px 0 0; padding-top: 20px; border-top: 1px solid var(--border); font-size: 15px; font-weight: 600; }
+.ov-split span { font-size: 13px; font-weight: 400; color: var(--muted); }
 .ov-none { margin: 0; }
 
 /* Grouped tables (labels on open issues, what triage did): a group per category, every bar on one scale. */
