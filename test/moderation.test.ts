@@ -3,6 +3,7 @@ import { ensureRepos } from '../src/domain/issue-index.js';
 import { acceptSubmission } from '../src/domain/submissions.js';
 import { createInvite } from '../src/domain/workspaces.js';
 import { drainModerationJobs } from '../src/moderation/actions.js';
+import { liveIdle } from '../src/moderation/live.js';
 import { saveReason, setModerationEnabled } from '../src/moderation/settings.js';
 import { form, get, grant, makeAdmin, makeApp, makeWorkspace, resetDb, testDb, type Admin, type ConfiguredWorkspace, type TestEnv } from './helpers.js';
 
@@ -17,6 +18,7 @@ const issue = (num: number) => repo().issues.find((i) => i.number === num)!;
 const key = (num: number) => `${ws.repoIds[0]}-${num}`;
 
 beforeEach(async () => {
+  await liveIdle();
   await resetDb();
   env = await makeApp();
   ws = await makeWorkspace(env);
@@ -127,14 +129,58 @@ describe('Moderation › Ticket management', () => {
   it('shows the whole history: the Discord ticket, Ticket Relay and the GitHub conversation', async () => {
     const { dup } = await setup();
     issue(dup.issue_number).comments = ['Same here on **3.4.1**.'];
+    // The page doesn't wait for GitHub: its side is filled in once read.
     const r = await page(`?open=${key(dup.issue_number)}`);
     expect(r.body).toContain('filed this from Discord');
-    expect(r.body).toMatch(/It breaks every time \(\d+\)\./);
-    expect(r.body).toContain('<span class="actor">octo-commenter</span> commented');
-    expect(r.body).toContain('<strong>3.4.1</strong>');
+    expect(r.body).toContain('Loading the text from GitHub…');
+    expect(r.body).toMatch(/data-src="[^"]*\/moderation\/history\?item=/);
+    const h = await page(`/history?item=${key(dup.issue_number)}`);
+    expect(h.headers['x-live-partial']).toBe('1');
+    expect(h.body).toMatch(/It breaks every time \(\d+\)\./);
+    expect(h.body).toContain('<span class="actor">octo-commenter</span> commented');
+    expect(h.body).toContain('<strong>3.4.1</strong>');
+    expect(h.body).not.toContain('data-mod-loading');
+    // Kept here: the next time it opens, it's all there at once.
+    const again = await page(`?open=${key(dup.issue_number)}`);
+    expect(again.body).toMatch(/It breaks every time \(\d+\)\./);
+    expect(again.body).toContain('<span class="actor">octo-commenter</span> commented');
+    expect(again.body).not.toContain('data-mod-loading');
     expect(r.body).toContain('Open in Discord');
     expect(r.body).toMatch(/https:\/\/discord\.com\/users\/r\d+/);
     expect(r.body).toContain('Open on GitHub');
+  });
+
+  it('shows GitHub’s side kept here at once, reads it again in the background and ahead in the list, and forgets it after a change', async () => {
+    const { original, dup, other } = await setup();
+    await page(`/history?item=${key(dup.issue_number)}`);
+    // Out of date: shown at once while GitHub is read again, with a note when the top changed.
+    await env.db.query('UPDATE issue_live SET fetched_at = fetched_at - 120000');
+    issue(dup.issue_number).title = 'Renamed on GitHub';
+    const stale = await page(`?open=${key(dup.issue_number)}`);
+    expect(stale.body).toContain('Checking GitHub for anything new…');
+    expect(stale.body).toMatch(/It breaks every time \(\d+\)\./);
+    const src = /data-src="([^"]+)"/.exec(stale.body)![1]!.replace(/&amp;/g, '&');
+    const fresh = await env.server.inject({ method: 'GET', url: src, ...get(ws.owner) });
+    expect(fresh.body).toContain('It changed on GitHub since this page was loaded.');
+    await liveIdle();
+    const renamed = await page(`?open=${key(dup.issue_number)}`);
+    expect(renamed.body).toContain('Renamed on GitHub');
+    expect(renamed.body).not.toContain('data-mod-loading');
+
+    // The next ones in the list are read ahead.
+    await env.db.query('DELETE FROM issue_live');
+    const list = await page('');
+    const keys = [...list.body.matchAll(/name="item" value="(\d+-\d+)"/g)].map((m) => m[1]!);
+    expect(keys.length).toBeGreaterThanOrEqual(3);
+    await liveIdle();
+    const kept = (await env.db.query<{ k: string }>(`SELECT repo_id || '-' || number AS k FROM issue_live WHERE issue_enc IS NOT NULL`)).rows.map((r) => r.k);
+    expect(kept).toEqual(expect.arrayContaining(keys.slice(0, 3)));
+
+    // After a moderator changes it, it's read from GitHub again.
+    await post('/close', { item: key(other.issue_number), reason: 'notPlanned', back: `${w()}/moderation` });
+    const forgotten = await page(`?queue=closed&open=${key(other.issue_number)}`);
+    expect(forgotten.body).toContain('Loading the text from GitHub…');
+    void original;
   });
 
   it('marks a duplicate, groups it under the original in Repeat bugs, and closes it with the admins’ comment', async () => {

@@ -2315,6 +2315,11 @@ a.lt-row:hover .lt-go { color: var(--text); }
 .mod-sec-h h3 { margin: 0; font-size: 14px; line-height: 20px; font-weight: 600; }
 /* One history: Discord, Ticket Relay and GitHub. */
 .mod-history { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 14px; }
+.mod-history-box { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+/* While GitHub's side is read: a line under the history, its spinner in the markers' column. */
+.mod-loading { display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: 12px; align-items: center; margin: 0; }
+.mod-loading .mod-spin { justify-self: center; animation: spin 1s linear infinite; }
+@media (prefers-reduced-motion: reduce) { .mod-loading .mod-spin { animation: none; } }
 .mod-h { display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: 12px; align-items: start; font-size: 13px; line-height: 20px; position: relative; }
 .mod-h:not(:last-child)::before { content: ''; position: absolute; left: 11.5px; top: 28px; bottom: -10px; width: 1px; background: var(--border); }
 .mod-h .actor { font-weight: 500; }

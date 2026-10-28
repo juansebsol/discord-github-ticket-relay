@@ -14,6 +14,7 @@ import { labelColor } from '../domain/ticket-types.js';
 import { UserFacingError, type AppRow, type Deps, type SubmissionRow } from '../domain/types.js';
 import { GitHubApiError, type CloseReason, type IssueDetail } from '../github/client.js';
 import { GITHUB_RESERVE } from '../triage/engine.js';
+import { forgetLive } from './live.js';
 import { fillTemplate, getModerationSettings, LIMITS, REASON_DEFAULTS, type ModerationSettings, type ReasonKey } from './settings.js';
 import type { IssueKey } from './queue.js';
 
@@ -399,6 +400,7 @@ async function processItem(deps: Deps, item: { job_id: string; repo_id: number; 
     const settings = await getModerationSettings(db, job.workspace_id);
     if (!settings.enabled) return void (await finish('skipped', 'Moderation was turned off'));
     const r = await closeOne(deps, t, settings, { reason: job.reason, duplicateOf: job.duplicate_of, postComment: Boolean(job.post_comment), note: job.note ?? '', userId: job.created_by, jobId: job.id });
+    await forgetLive(db, t);
     await finish(r.status === 'closed' ? 'done' : 'skipped', r.status === 'closed' ? null : r.note);
   } catch (err) {
     if (err instanceof GitHubApiError && err.isRateLimit) return await wait(new Date(Date.now() + (err.retryAfterSeconds ?? 60) * 1000));

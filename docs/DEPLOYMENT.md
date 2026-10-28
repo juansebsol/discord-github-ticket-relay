@@ -118,6 +118,8 @@ Housekeeping runs in every worker every 10 minutes:
 - Created and closed submissions lose stored text after the workspace retention period
   (default 30 days). Failed and uncertain ones keep it for at least 90 days.
 - Expired sessions, OAuth states and Discord interaction tokens are deleted.
+- Moderation › Ticket management keeps an encrypted copy of each GitHub issue a moderator opens
+  (its text and comments), so it shows at once. A copy is deleted 30 days after it was last read.
 
 ## Logging
 

@@ -2560,6 +2560,26 @@
         var el = k.length === 1 ? document.querySelector('[data-mod-key="' + k + '"]') : null;
         if (el && !el.disabled) { e.preventDefault(); el.click(); }
       });
+      // The history, once GitHub's side is read (the page came with the copy kept here, or none).
+      var hist = mod.querySelector('[data-mod-history][data-src]');
+      if (hist) {
+        fetch(hist.getAttribute('data-src'), { credentials: 'same-origin', headers: { accept: 'text/html' } })
+          .then(function (res) {
+            if (!res.ok || res.headers.get('x-live-partial') !== '1') throw new Error('not history');
+            return res.text();
+          })
+          .then(function (markup) {
+            hist.innerHTML = markup;
+            hist.removeAttribute('data-src');
+            localTimes(hist);
+          })
+          .catch(function () {
+            var line = hist.querySelector('[data-mod-loading-text]');
+            if (line) line.textContent = 'GitHub couldn’t be reached, so this may be out of date. Reload to try again.';
+            var spin = hist.querySelector('[data-mod-loading] .mod-spin');
+            if (spin) spin.remove();
+          });
+      }
     }
     // Saved replies: the text of the one picked.
     $$('[data-reply-form]').forEach(function (form) {

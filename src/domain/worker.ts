@@ -1,4 +1,5 @@
 import { drainModerationJobs } from '../moderation/actions.js';
+import { KEEP_DAYS as LIVE_KEEP_DAYS } from '../moderation/live.js';
 import { runFileCleanup } from './files.js';
 import { claimNext } from './submissions.js';
 import type { Processor } from './processor.js';
@@ -74,9 +75,10 @@ export class Worker {
 
 /**
  * Housekeeping: expires one-time states and sessions, drops interaction tokens once
- * Discord no longer accepts them, and purges stored ticket text after each workspace's
- * retention period. Unresolved (failed/uncertain) text is kept up to 90 days so admins
- * can still recover it.
+ * Discord no longer accepts them, purges stored ticket text after each workspace's
+ * retention period (unresolved, failed or uncertain, text is kept up to 90 days so admins
+ * can still recover it), and drops Ticket management's copies of GitHub issues nobody
+ * opened for 30 days.
  */
 export async function runMaintenance(deps: Pick<Deps, 'db' | 'log'>): Promise<void> {
   const { db } = deps;
@@ -93,4 +95,6 @@ export async function runMaintenance(deps: Pick<Deps, 'db' | 'log'>): Promise<vo
      )`,
   );
   if (purged.rowCount) deps.log.info({ count: purged.rowCount }, 'purged stored ticket text past retention');
+  // Ticket management's copies of GitHub issues nobody opened for a while.
+  await db.query('DELETE FROM issue_live WHERE fetched_at < now_ms() - $1', [LIVE_KEEP_DAYS * 86400000]);
 }

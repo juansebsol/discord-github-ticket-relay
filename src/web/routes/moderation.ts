@@ -15,7 +15,8 @@ import {
   activeJobs, canUndo, changeLabels, checkOriginal, closeOne, getAction, markDuplicate, MAX_JOB, modTarget, notDuplicate, postReply, recordPin, reopenOne, startCloseJob, stopJob, undoAction,
   type JobProgress, type ModActionRow,
 } from '../../moderation/actions.js';
-import { forgetLive, loadDetail, type Detail, type HistoryItem } from '../../moderation/detail.js';
+import { detailSig, loadDetail, type Detail, type HistoryItem } from '../../moderation/detail.js';
+import { forgetLive, warmLive } from '../../moderation/live.js';
 import {
   closedRows, duplicateGroups, isQueue, keyOf, parseKey, parseSearch, QUEUES, queueCounts, queueRows, QUIET_DAYS,
   type ClosedRow, type DuplicateGroup, type IssueKey, type QueueKey, type QueueLabels, type QueueRow, type QueueScope, type Source,
@@ -280,11 +281,11 @@ function historyList(d: Detail, names: Map<string, string>): SafeHtml {
     const time = html`<span class="when">${ago(h.at)}</span>`;
     if (h.kind === 'filed') {
       return html`<li class="mod-h">${avatar(h.reporter, 24)}<div class="mod-h-b"><div class="mod-h-l"><span><span class="actor">${h.reporter}</span>${h.username ? html` <span class="muted">@${h.username}</span>` : ''} filed this from Discord${h.channel ? ` in #${h.channel}` : ''}</span>${time}</div>
-        <div class="mod-text">${d.text ? ticketText(d.text, d.repoUrl) : html`<p class="small muted">${d.liveError === 'missing' ? 'The GitHub issue was deleted, so its text is gone too.' : 'The text couldn’t be loaded from GitHub right now.'}</p>`}</div></div></li>`;
+        <div class="mod-text">${d.text ? ticketText(d.text, d.repoUrl) : html`<p class="small muted">${d.liveError === 'missing' ? 'The GitHub issue was deleted, so its text is gone too.' : d.loading ? 'Loading the text from GitHub…' : 'The text couldn’t be loaded from GitHub right now.'}</p>`}</div></div></li>`;
     }
     if (h.kind === 'opened') {
       return html`<li class="mod-h">${avatar(h.author ?? '?', 24)}<div class="mod-h-b"><div class="mod-h-l"><span><span class="actor">${h.author ?? 'Someone'}</span> opened this on GitHub</span>${time}</div>
-        <div class="mod-text">${d.text ? ticketText(d.text, d.repoUrl) : html`<p class="small muted">${d.liveError === 'missing' ? 'This issue was deleted on GitHub.' : 'The text couldn’t be loaded from GitHub right now.'}</p>`}</div></div></li>`;
+        <div class="mod-text">${d.text ? ticketText(d.text, d.repoUrl) : html`<p class="small muted">${d.liveError === 'missing' ? 'This issue was deleted on GitHub.' : d.loading ? 'Loading the text from GitHub…' : 'The text couldn’t be loaded from GitHub right now.'}</p>`}</div></div></li>`;
     }
     if (h.kind === 'event') {
       const v = eventView({ id: 0, at: h.at, kind: h.event.kind, detail: h.event.detail }, subject, names);
@@ -299,7 +300,17 @@ function historyList(d: Detail, names: Map<string, string>): SafeHtml {
   };
   return html`<ol class="mod-history">${d.history.map(item)}</ol>
     ${d.historyMore ? html`<p class="small muted">GitHub has more than this. <a href="${d.url}" target="_blank" rel="noopener noreferrer">See the rest on GitHub</a>.</p>` : ''}
-    ${d.liveError === 'error' ? notice('warn', null, 'GitHub couldn’t be reached, so its comments aren’t shown. Reload to try again.') : ''}`;
+    ${d.loading
+      ? html`<p class="mod-loading small muted" data-mod-loading>${icon('loader-circle', 14, 'mod-spin')}<span><span data-mod-loading-text>${d.live ? 'Checking GitHub for anything new…' : 'Loading the comments and activity from GitHub…'}</span> <a href="" class="nojs">Reload</a></span></p>`
+      : d.liveError === 'error'
+        ? notice('warn', null, d.live && d.liveAt ? `GitHub couldn’t be reached just now, so this is GitHub’s side as it was ${timeAgo(d.liveAt)}. Reload to try again.` : 'GitHub couldn’t be reached, so its comments aren’t shown. Reload to try again.')
+        : ''}`;
+}
+
+/** The history, filled in by the page once GitHub's side is read when the copy kept here is out of date. */
+function historyBox(ctx: WorkspaceRequestContext, d: Detail, names: Map<string, string>): SafeHtml {
+  const src = d.loading ? `${ctx.base}/moderation/history?item=${keyOf(d.key)}&s=${detailSig(d)}` : null;
+  return html`<div class="mod-history-box" data-mod-history ${src ? html`data-src="${src}"` : ''}>${historyList(d, names)}</div>`;
 }
 
 function issueCard(o: { href: string; github: string; icon: IconName; tone: string; eyebrow: string; title: string; sub: string }): SafeHtml {
@@ -416,7 +427,7 @@ function detailPane(ctx: WorkspaceRequestContext, d: Detail, names: Map<string, 
       ${verdictBox(ctx, d, { act: o.act, back: o.back, settings: o.settings, listOf: o.listOf })}
       <div class="mod-d-cols">
         <section class="mod-d-main" aria-label="History"><div class="mod-sec-h"><h3>History</h3><span class="small muted">Discord, Ticket Relay and GitHub, in order</span></div>
-          ${historyList(d, names)}${replyBox}</section>
+          ${historyBox(ctx, d, names)}${replyBox}</section>
         ${facts(ctx, d, { act: o.act, listOf: o.listOf })}
       </div>
     </div>
@@ -577,6 +588,8 @@ export function registerModerationRoutes(app: FastifyInstance, web: Web): void {
       ? await loadDetail(deps, wid, openParsed, { ticket: (id) => web.triage.getResult(wid, id), issue: () => web.triage.getIssueResult(wid, openParsed.repoId, openParsed.number) })
       : null;
     const at = openKey ? keys.indexOf(openKey) : -1;
+    const ahead = (at >= 0 ? keys.slice(at + 1, at + 3) : keys.filter((k) => k !== openKey).slice(0, 2)).map(parseKey).filter((k): k is IssueKey => k !== null);
+    warmLive(deps, wid, { now: detail?.loading ? detail.key : null, ahead });
     const nextKey = at >= 0 ? keys[at + 1] ?? null : keys[0] ?? null;
     const prevKey = at > 0 ? keys[at - 1]! : null;
     const listOf = (k: IssueKey) => listHref(ctx, s, { open: keyOf(k) });
@@ -636,6 +649,22 @@ export function registerModerationRoutes(app: FastifyInstance, web: Web): void {
       </div>
       ${act ? closeDialogs(ctx, settings, { detail, back: afterClose, listBack: listHref(ctx, s, { open: null }), repoLabels }) : ''}`;
     return web.render(reply, ctx, 'Ticket management', 'moderation', body, { width: 'full' });
+  });
+
+  // The open ticket's history once GitHub's side is read (the page shows the copy kept here first).
+  app.get('/w/:wid/moderation/history', async (req, reply) => {
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'moderation.view' });
+    if (!ctx) return reply;
+    const wid = ctx.workspace.id;
+    const q = req.query as Record<string, string | undefined>;
+    const k = parseKey(q.item);
+    const settings = await getModerationSettings(deps.db, wid);
+    const d = settings.enabled && k ? await loadDetail(deps, wid, k, { ticket: (id) => web.triage.getResult(wid, id), issue: () => web.triage.getIssueResult(wid, k.repoId, k.number) }, { fresh: true }) : null;
+    reply.header('x-live-partial', '1').type('text/html');
+    if (!d) return reply.send(String(notice('warn', null, 'This ticket couldn’t be loaded. Reload to try again.')));
+    const names = await userNames(deps.db, d.userIds);
+    const changed = q.s && q.s !== detailSig(d) ? notice('info', null, html`It changed on GitHub since this page was loaded. <a href="">Reload</a> to see it.`) : '';
+    return reply.send(String(html`${changed}${historyList(d, names)}`));
   });
 
   app.get('/w/:wid/moderation/jobs/status', async (req, reply) => {
@@ -706,7 +735,7 @@ export function registerModerationRoutes(app: FastifyInstance, web: Web): void {
     if (keys.length === 1) {
       const t = await modTarget(deps, wid, keys[0]!);
       const r = await closeOne(deps, t, settings, { ...input, userId: ctx.user.id });
-      forgetLive(keys[0]!);
+      await forgetLive(deps.db, keys[0]!);
       if (r.status === 'skipped') return { message: `${r.note}, so nothing changed.`, tone: 'warn' };
       return { message: `Closed ${t.repo}#${t.number} as ${reasonName(reason)}${input.duplicateOf && reason === 'duplicate' ? ` of #${input.duplicateOf}` : ''}${r.commented ? ', with the comment' : ''}. You can undo it from the ticket or the Mod log for 15 minutes.` };
     }
@@ -725,7 +754,7 @@ export function registerModerationRoutes(app: FastifyInstance, web: Web): void {
     const k = keyFrom(body);
     const t = await modTarget(deps, ctx.workspace.id, k);
     const r = await reopenOne(deps, t, ctx.user.id);
-    forgetLive(k);
+    await forgetLive(deps.db, k);
     return { message: r === 'already' ? 'It was already open.' : `Reopened ${t.repo}#${t.number}.`, tone: r === 'already' ? 'warn' : 'success', back: backWith(ctx, body, k) };
   });
 
@@ -736,7 +765,7 @@ export function registerModerationRoutes(app: FastifyInstance, web: Web): void {
     const back = workspacePath(ctx, body.back, ['/moderation']) ?? areaHref(ctx, 'moderation');
     try {
       const { action: a, t } = await undoAction(deps, ctx.workspace.id, (req.params as { id: string }).id, ctx.user.id);
-      forgetLive(t);
+      await forgetLive(deps.db, t);
       setFlash(reply, 'success', a.kind === 'close' ? `Undone: ${t.repo}#${t.number} is open again${a.comment_id ? ' and the comment was deleted' : ''}.` : 'Undone: the reply was deleted.');
       return reply.redirect(back);
     } catch (err) {
@@ -758,7 +787,7 @@ export function registerModerationRoutes(app: FastifyInstance, web: Web): void {
       }
     };
     const r = await notDuplicate(deps, t, settings, { dismiss, triageLabel: triageSettings.config.duplicate.label || null, userId: ctx.user.id });
-    forgetLive(k);
+    await forgetLive(deps.db, k);
     return { message: `Kept open: it’s no longer listed as a duplicate${r.removed.length ? `, and ${r.removed.join(', ')} was taken off` : ''}.`, back: backWith(ctx, body, k) };
   });
 
@@ -773,7 +802,7 @@ export function registerModerationRoutes(app: FastifyInstance, web: Web): void {
     const k = keyFrom(body);
     const t = await modTarget(deps, ctx.workspace.id, k);
     const name = await postReply(deps, t, settings, one(body.reply), ctx.user.id);
-    forgetLive(k);
+    await forgetLive(deps.db, k);
     return { message: `Posted “${name}” on GitHub. You can undo it from the Mod log for 15 minutes.`, back: backWith(ctx, body, k) };
   });
 
@@ -782,7 +811,7 @@ export function registerModerationRoutes(app: FastifyInstance, web: Web): void {
     const t = await modTarget(deps, ctx.workspace.id, k);
     const keep = new Set(many(body.keep));
     const r = await changeLabels(deps, t, { add: many(body.add), remove: many(body.had).filter((l) => !keep.has(l)), userId: ctx.user.id });
-    forgetLive(k);
+    await forgetLive(deps.db, k);
     return { message: [r.added.length ? `Added ${r.added.join(', ')}` : '', r.removed.length ? `took off ${r.removed.join(', ')}` : ''].filter(Boolean).join(' and ').replace(/^t/, 'T') + '.', back: backWith(ctx, body, k) };
   });
 

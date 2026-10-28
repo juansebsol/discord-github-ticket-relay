@@ -1,57 +1,22 @@
 /**
  * Everything Ticket management shows about one issue: the ticket and what was filed, triage's
  * verdict, the original it duplicates with its fix, similar issues, and one history from
- * Discord, Ticket Relay and GitHub in order. GitHub's side is read live (and kept a minute).
+ * Discord, Ticket Relay and GitHub in order. GitHub's side comes from the copy kept in the
+ * database (live.ts), read again in the background when it's out of date.
  */
+import { createHash } from 'node:crypto';
 import type { Queryable } from '../db/database.js';
 import { ftsQuery, getIndexed, searchIndex, type IndexedIssue, type SearchHit } from '../domain/issue-index.js';
 import { pullsForIssues, releaseOf, repoReleases, type IndexedPull, type Release } from '../domain/pull-index.js';
 import { getGitHubConnection, getDiscordConnection, listApps } from '../domain/store.js';
 import { decryptPayload, listEvents } from '../domain/submissions.js';
 import type { AppRow, Deps, SubmissionRow } from '../domain/types.js';
-import { GitHubApiError, type IssueDetail, type TimelineEvent } from '../github/client.js';
+import type { IssueDetail, TimelineEvent } from '../github/client.js';
 import { parseIssueBody } from '../github/issue-content.js';
 import type { IssueTriageRow, TriageAction, TriageResultRow } from '../triage/engine.js';
 import { ticketFor, type ModActionRow } from './actions.js';
+import { isFresh, refreshLive, storedLive, type Live } from './live.js';
 import type { IssueKey } from './queue.js';
-
-const LIVE_TIMEOUT_MS = 5000;
-const CACHE_MS = 60_000;
-const CACHE_MAX = 300;
-
-type Live = { issue: IssueDetail; events: TimelineEvent[]; more: boolean } | { error: 'missing' | 'error' };
-
-/** GitHub's side of recently opened issues, so moving through a list stays quick. */
-const cache = new Map<string, { at: number; live: Live }>();
-
-export function forgetLive(key: IssueKey): void {
-  cache.delete(`${key.repoId}-${key.number}`);
-}
-
-async function loadLive(deps: Deps, installationId: number, app: AppRow, number: number): Promise<Live> {
-  const k = `${app.repo_id}-${number}`;
-  const hit = cache.get(k);
-  if (hit && Date.now() - hit.at < CACHE_MS) return hit.live;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  let live: Live;
-  try {
-    const gh = deps.github!;
-    const [issue, timeline] = await Promise.race([
-      Promise.all([gh.getIssueDetail(installationId, app.repo_owner, app.repo_name, number), gh.listIssueTimeline(installationId, app.repo_owner, app.repo_name, number)]),
-      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('timeout')), LIVE_TIMEOUT_MS); }),
-    ]);
-    live = { issue, events: timeline.events, more: timeline.more };
-  } catch (err) {
-    live = { error: err instanceof GitHubApiError && (err.status === 404 || err.status === 410) ? 'missing' : 'error' };
-  } finally {
-    clearTimeout(timer);
-  }
-  if (!('error' in live && live.error === 'error')) {
-    if (cache.size >= CACHE_MAX) cache.delete(cache.keys().next().value!);
-    cache.set(k, { at: Date.now(), live });
-  }
-  return live;
-}
 
 export type HistoryItem =
   | { kind: 'filed'; at: Date; reporter: string; username: string | null; channel: string | null }
@@ -75,6 +40,9 @@ export interface Detail {
   repoUrl: string;
   indexed: IndexedIssue | null;
   live: IssueDetail | null;
+  /** When GitHub's side was read (null: not yet), and whether it's being read again now. */
+  liveAt: Date | null;
+  loading: boolean;
   liveError: 'missing' | 'error' | null;
   ticket: SubmissionRow | null;
   /** The ticket's text (from the GitHub issue, else stored until it's filed), or an issue's body. */
@@ -142,16 +110,36 @@ async function openDuplicates(db: Queryable, workspaceId: string, repoId: number
   return Number(rows[0]?.n ?? 0);
 }
 
-export async function loadDetail(deps: Deps, workspaceId: string, key: IssueKey, triage: { ticket: (id: string) => Promise<TriageResultRow | null>; issue: () => Promise<IssueTriageRow | null> }): Promise<Detail | null> {
+export async function loadDetail(
+  deps: Deps,
+  workspaceId: string,
+  key: IssueKey,
+  triage: { ticket: (id: string) => Promise<TriageResultRow | null>; issue: () => Promise<IssueTriageRow | null> },
+  o: { fresh?: boolean } = {},
+): Promise<Detail | null> {
   const { db } = deps;
   const [apps, conn, dc] = await Promise.all([listApps(db, workspaceId), getGitHubConnection(db, workspaceId), getDiscordConnection(db, workspaceId)]);
   const inRepo = apps.filter((a) => a.repo_id === key.repoId);
   if (!inRepo.length) return null;
   const [indexed, ticket] = await Promise.all([getIndexed(db, key.repoId, [key.number]).then((m) => m.get(key.number) ?? null), ticketFor(db, workspaceId, key.repoId, key.number)]);
   const app = inRepo.find((a) => a.id === ticket?.app_id) ?? inRepo.find((a) => a.name === indexed?.app_name) ?? inRepo[0]!;
-  const live = deps.github && conn ? await loadLive(deps, conn.installation_id, app, key.number) : ({ error: 'error' } as const);
-  if (!indexed && !ticket && 'error' in live) return null;
-  const issue = 'error' in live ? null : live.issue;
+  // The page shows the copy kept here, whatever its age, and reads GitHub only when there's nothing
+  // else to show; the history (o.fresh) waits for a copy under a minute old.
+  const stored = await storedLive(deps, key);
+  let live: Live | null = stored?.live ?? null;
+  let liveAt = stored?.fetchedAt ?? null;
+  let loading = false;
+  let unreachable = false;
+  if (!deps.github || !conn) unreachable = true;
+  else if (o.fresh ? !isFresh(stored) : !stored && !indexed && !ticket) {
+    const read = await refreshLive(deps, conn.installation_id, app, key.number);
+    if ('error' in read && read.error === 'error') unreachable = true;
+    else [live, liveAt] = [read, new Date()];
+  } else loading = !isFresh(stored);
+  if (!indexed && !ticket && (!live || 'error' in live)) return null;
+  const issue = live && !('error' in live) ? live.issue : null;
+  const events = live && !('error' in live) ? live : null;
+  const liveError = live && 'error' in live ? live.error : unreachable ? 'error' : null;
   if (issue?.isPullRequest) return null;
 
   const triageRow = ticket ? await triage.ticket(ticket.id) : await triage.issue();
@@ -209,9 +197,9 @@ export async function loadDetail(deps: Deps, workspaceId: string, key: IssueKey,
   }
   const modTimes = actions.filter((a) => a.kind === 'close' || a.kind === 'reopen' || a.kind === 'labels').map((a) => a.at.getTime());
   const nearMod = (at: Date) => modTimes.some((t) => Math.abs(t - at.getTime()) < 120_000);
-  if (!('error' in live)) {
-    const events = live.events.filter((e) => !((e.kind === 'closed' || e.kind === 'reopened' || e.kind === 'labeled' || e.kind === 'unlabeled') && e.actor?.endsWith('[bot]') && nearMod(e.at)));
-    history.push(...groupLabels(events));
+  if (events) {
+    const shown = events.events.filter((e) => !((e.kind === 'closed' || e.kind === 'reopened' || e.kind === 'labeled' || e.kind === 'unlabeled') && e.actor?.endsWith('[bot]') && nearMod(e.at)));
+    history.push(...groupLabels(shown));
   }
   for (const a of actions) history.push({ kind: 'mod', at: a.at, action: a });
   history.sort((a, b) => a.at.getTime() - b.at.getTime());
@@ -219,13 +207,19 @@ export async function loadDetail(deps: Deps, workspaceId: string, key: IssueKey,
   const lastClose = actions.find((a) => a.kind === 'close' && !a.undone_at) ?? null;
   const state = issue?.state ?? indexed?.state ?? 'open';
   return {
-    key, app, repoUrl: `https://github.com/${app.repo_owner}/${app.repo_name}`, indexed, live: issue, liveError: 'error' in live ? live.error : null, ticket, text, title,
+    key, app, repoUrl: `https://github.com/${app.repo_owner}/${app.repo_name}`, indexed, live: issue, liveAt, loading, liveError, ticket, text, title,
     state, stateReason: issue?.stateReason ?? indexed?.state_reason ?? null, labels: issue?.labels ?? indexed?.labels ?? [],
     url: issue?.url ?? indexed?.html_url ?? `https://github.com/${app.repo_owner}/${app.repo_name}/issues/${key.number}`,
     verdict, original, pull, pullRelease: pull?.merged_at && releases ? releaseOf(pull.merged_at, releases) : null, similar, reporterTickets,
     discord: ticket ? { profile: `https://discord.com/users/${ticket.reporter_discord_id}`, channel: ticket.discord_guild_id && ticket.discord_channel_id ? `https://discord.com/channels/${ticket.discord_guild_id}/${ticket.discord_channel_id}` : null } : null,
-    history, historyMore: 'error' in live ? false : live.more,
+    history, historyMore: events?.more ?? false,
     lastClose: state === 'closed' ? lastClose : null,
     userIds: actions.flatMap((a) => [a.user_id, a.undone_by]).concat(history.flatMap((h) => (h.kind === 'event' && typeof h.event.detail.by === 'string' ? [h.event.detail.by] : []))).filter((x): x is string => Boolean(x)),
   };
+}
+
+/** What the page shows from GitHub at the top (title, state, labels), to tell when a fresher read changed it. */
+export function detailSig(d: Pick<Detail, 'title' | 'state' | 'stateReason' | 'labels' | 'liveError'>): string {
+  const text = [d.title, d.state, d.stateReason ?? '', [...d.labels].sort().join('\n'), d.liveError === 'missing' ? 'missing' : ''].join('\u0000');
+  return createHash('sha256').update(text).digest('base64url').slice(0, 12);
 }
