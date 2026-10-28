@@ -426,6 +426,53 @@
     if (clear) clear.addEventListener('click', function (e) { e.preventDefault(); input.value = ''; run(); input.focus(); });
     run();
   });
+
+  // AI triage › Overview: the labels table shows one category, or the labels a search finds. The
+  // groups that show open; clearing it puts each group back as it was.
+  $$('[data-lt]').forEach(function (table) {
+    var tools = $('[data-lt-tools]', table);
+    var find = $('[data-lt-find]', table);
+    var nothing = $('[data-lt-none]', table);
+    var groups = $$('[data-lt-group]', table);
+    var buttons = $$('[data-lt-show]', table);
+    if (!tools || !find) return;
+    tools.hidden = false;
+    var show = 'all';
+    var saved = null;
+    function run() {
+      var q = find.value.trim().toLowerCase();
+      var filtered = Boolean(q) || show !== 'all';
+      if (filtered && !saved) saved = groups.map(function (g) { return g.open; });
+      var any = false;
+      groups.forEach(function (g) {
+        var hits = 0;
+        $$('.lt-rows > li', g).forEach(function (li) {
+          var name = li.getAttribute('data-lt-name');
+          var hit = !q || (name !== null && name.indexOf(q) !== -1);
+          li.hidden = !hit;
+          if (hit) hits++;
+        });
+        var on = (show === 'all' || g.getAttribute('data-lt-group') === show) && (!q || hits > 0);
+        g.hidden = !on;
+        if (on) any = true;
+        if (on && filtered) g.open = true;
+      });
+      if (!filtered && saved) {
+        groups.forEach(function (g, i) { g.open = saved[i]; });
+        saved = null;
+      }
+      $$('[data-lt-extra]', table).forEach(function (el) { el.hidden = filtered; });
+      if (nothing) nothing.hidden = any;
+    }
+    buttons.forEach(function (b) {
+      b.addEventListener('click', function () {
+        show = b.getAttribute('data-lt-show');
+        buttons.forEach(function (x) { x.setAttribute('aria-pressed', x === b ? 'true' : 'false'); });
+        run();
+      });
+    });
+    find.addEventListener('input', run);
+  });
   $$('[data-toggle-filters]').forEach(function (b) {
     b.addEventListener('click', function () {
       var target = document.getElementById(b.getAttribute('data-toggle-filters'));

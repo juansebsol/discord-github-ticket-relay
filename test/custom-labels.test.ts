@@ -239,9 +239,12 @@ describe('AI triage › Overview', () => {
     expect(res.body).toContain('Labels on open issues');
     expect(res.body).toContain('3 open issues');
     // Priority, the custom categories with what still has none, and a backfill for them.
-    expect(res.body).toMatch(/medium<\/a><b>3<\/b>/);
-    expect(res.body).toContain('<h3 id="ov-g-kind1">Kind</h3>');
-    expect(res.body).toContain('None yet');
+    expect(res.body).toMatch(/medium: 3 open issues, 100%/);
+    expect(res.body).toContain('data-lt-group="g-kind1" open');
+    expect(res.body).toContain('<span class="lt-gname">Kind</span>');
+    expect(res.body).toContain('<span class="lt-nolabel warn">None yet</span>');
+    // Bars are SVG: the CSP blocks inline styles, which drew them empty.
+    expect(res.body).not.toContain('style="');
     expect(res.body).toContain('/triage/runs?what=labels&amp;group=kind1');
     expect(res.body).toContain(encodeURIComponent('label:"parity"'));
     expect(res.body).toContain('What triage did');

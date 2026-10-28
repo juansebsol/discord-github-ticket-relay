@@ -254,6 +254,29 @@ export function labelTag(name: string): SafeHtml {
   return html`<span class="tag label"><span class="dot c${String(c)}"></span>${name}</span>`;
 }
 
+/**
+ * A bar in parts, each a share (0–100) of its length, coloured by its class in app.css. Drawn in SVG:
+ * the CSP blocks inline widths. A `hatch` part is striped instead, with `meterDefs()` once on the page.
+ */
+export function meter(parts: { pct: number; cls?: string; hatch?: 'warn' | 'muted' }[], o: { h?: number; title?: string } = {}): SafeHtml {
+  const h = o.h ?? 6;
+  const round = parts.length === 1 ? raw(` rx="${String(h / 2)}"`) : '';
+  let x = 0;
+  const rects = parts.map((p) => {
+    const at = x;
+    const w = Math.max(0, Math.min(100 - at, p.pct));
+    x += w;
+    return w ? html`<rect x="${at.toFixed(2)}%" width="${w.toFixed(2)}%" height="${String(h)}"${p.cls ? html` class="${p.cls}"` : ''}${p.hatch ? raw(` fill="url(#mh-${p.hatch})"`) : ''}${round}></rect>` : '';
+  });
+  return html`<svg class="meter" width="100%" height="${String(h)}" ${o.title ? html`role="img" aria-label="${o.title}"` : raw('aria-hidden="true"')} focusable="false"><rect class="meter-track" width="100%" height="${String(h)}"></rect>${rects}</svg>`;
+}
+
+/** The stripes of `hatch` meter parts. */
+export function meterDefs(): SafeHtml {
+  const stripes = (id: string) => `<pattern id="mh-${id}" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect class="mh-bg ${id}" width="6" height="6"></rect><rect class="mh-fg ${id}" width="2" height="6"></rect></pattern>`;
+  return raw(`<svg class="meter-defs" width="0" height="0" aria-hidden="true" focusable="false"><defs>${stripes('warn')}${stripes('muted')}</defs></svg>`);
+}
+
 /** A Discord role chip; `index` picks a stable color from the role palette. */
 export function roleTag(name: string, index: number): SafeHtml {
   return html`<span class="tag role"><span class="dot r${String(index % 6)}"></span>@${name}</span>`;

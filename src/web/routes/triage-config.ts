@@ -31,7 +31,7 @@ import {
 } from '../../triage/settings.js';
 import { setFlash } from '../session.js';
 import type { Web, WorkspaceRequestContext } from '../server.js';
-import { csrfField, empty, icon, iconBtn, labelTag, linkBtn, menu, notice, pageHeader, pill, postBtn, segRadios, selectWrap, submitBtn, timeAgo, type Tone } from '../ui.js';
+import { csrfField, empty, icon, iconBtn, labelTag, linkBtn, menu, meter, notice, pageHeader, pill, postBtn, segRadios, selectWrap, submitBtn, timeAgo, type Tone } from '../ui.js';
 import { openLabels, openMissing } from '../../triage/label-stats.js';
 import { textField } from './panel.js';
 import { areaHref, canOpen, knowledgeHref, pageLink, toolHeader, toolHref } from './tool.js';
@@ -146,7 +146,7 @@ export function registerTriageConfigRoutes(app: FastifyInstance, web: Web): void
         </span>
         <span class="cl-side">
           <span class="cl-modes">${pill(`Discord: ${MODE_NAMES[g.mode]}`, MODE_TONE[g.mode])}${pill(`GitHub: ${MODE_NAMES[ghMode]}`, MODE_TONE[ghMode])}</span>
-          ${open.open ? html`<span class="cl-cov" title="${`${n(open.open - none)} of ${n(open.open)} open issues have a ${g.name} label`}"><span class="cl-cover-bar" aria-hidden="true"><i style="width:${String(done)}%"></i></span><span><b>${String(done)}%</b> labelled${none ? html`<span class="muted"> · ${n(none)} have none</span>` : ''}</span></span>` : ''}
+          ${open.open ? html`<span class="cl-cov" title="${`${n(open.open - none)} of ${n(open.open)} open issues have a ${g.name} label`}"><span class="cl-cover-bar">${meter([{ pct: done, cls: 'cl-cover-fill' }])}</span><span><b>${String(done)}%</b> labelled${none ? html`<span class="muted"> · ${n(none)} have none</span>` : ''}</span></span>` : ''}
           <span class="btn sm cl-open" aria-hidden="true"><span class="o">${edit ? 'Edit' : 'Details'}</span><span class="c">Close</span></span>
         </span>
       </summary>

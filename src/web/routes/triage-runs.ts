@@ -53,6 +53,7 @@ import {
   labelTag,
   linkBtn,
   menu,
+  meter,
   notice,
   pageHeader,
   pill,
@@ -675,7 +676,7 @@ export function registerTriageRunRoutes(app: FastifyInstance, web: Web): void {
         ${totals.length
           ? html`<ul class="bf-bars">${totals.map((t) => html`<li>
               <span class="bf-bar-l">${labelTag(t.label)}<span class="xs muted">${t.category}</span></span>
-              <span class="bf-bar" aria-hidden="true"><i class="sure" style="width:${String((t.sure / most) * 100)}%"></i><i class="unsure" style="width:${String((t.unsure / most) * 100)}%"></i></span>
+              <span class="bf-bar">${meter([{ pct: (t.sure / most) * 100, cls: 'sure' }, { pct: (t.unsure / most) * 100, cls: 'unsure' }], { h: 10 })}</span>
               <span class="bf-bar-n"><b>${n(t.sure)}</b>${t.unsure ? html` <span class="muted">+${n(t.unsure)}</span>` : ''}${t.added ? html` <span class="ok-text" title="Added on GitHub">· ${n(t.added)} added</span>` : ''}</span>
             </li>`)}</ul>`
           : html`<p class="small muted">${counts.pending ? 'Labels show up here as Claude reads each ticket.' : 'Claude found no labels to add.'}</p>`}

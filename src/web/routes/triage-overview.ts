@@ -12,9 +12,9 @@ import { listApps } from '../../domain/store.js';
 import { html, raw, type SafeHtml } from '../../lib/html.js';
 import { openLabels, openMissing, type OpenLabels } from '../../triage/label-stats.js';
 import { triageOverview, type TriageOverview } from '../../triage/overview.js';
-import { FLAGS, getTriageSettings, groupKind, PRIORITIES, tokenCost, type LabelGroup, type TriageConfig } from '../../triage/settings.js';
+import { FLAGS, getTriageSettings, groupKind, PRIORITIES, tokenCost, type TriageConfig } from '../../triage/settings.js';
 import type { Web, WorkspaceRequestContext } from '../server.js';
-import { empty, labelTag, linkBtn, notice, segLinks, selectWrap } from '../ui.js';
+import { empty, icon, labelTag, linkBtn, meter, meterDefs, notice, plural, segLinks, selectWrap } from '../ui.js';
 import { compact, delta, type Better } from './analytics.js';
 import { areaHref, canOpen, toolHeader } from './tool.js';
 import { FLAG_COPY } from './triage.js';
@@ -47,7 +47,7 @@ function bars(items: Bar[], o: { of: number; empty: string; max?: number }): Saf
   const most = Math.max(1, ...shown.map((b) => b.n));
   return html`<ul class="ov-bars${shown.some((b) => b.note) ? ' wide' : ''}">${shown.map((b) => {
     const inner = html`<span class="ov-bar-l">${b.label}</span>
-      <span class="ov-bar-t" aria-hidden="true"><i class="${b.tone ?? ''}" style="width:${String(Math.max(b.n ? 1.5 : 0, (b.n / most) * 100))}%"></i></span>
+      <span class="ov-bar-t">${meter([{ pct: b.n ? Math.max(1.5, (b.n / most) * 100) : 0, cls: b.tone ?? 'v1' }], { h: 8 })}</span>
       <span class="ov-bar-n"><b>${n(b.n)}</b><span class="muted">${pct(b.n, o.of)}</span>${b.note ? html`<span class="ov-bar-x">${b.note}</span>` : ''}</span>`;
     return html`<li>${b.href ? html`<a class="ov-bar" href="${b.href}" target="_blank" rel="noopener noreferrer" title="See them on GitHub">${inner}</a>` : html`<div class="ov-bar">${inner}</div>`}</li>`;
   })}</ul>`;
@@ -165,51 +165,85 @@ export function registerTriageOverviewRoutes(app: FastifyInstance, web: Web): vo
     </div>`;
   }
 
+  /**
+   * Every label on the open issues as one table, a group per category (priority, each custom
+   * category, triage's own, the rest), each bar out of all open issues. app.js adds the category
+   * filter and the label search.
+   */
   function labelsCard(ctx: WorkspaceRequestContext, c: TriageConfig, l: OpenLabels, missing: Map<string, number>, o: { search: (terms: string) => string; runs: string | null; app: string | null }): SafeHtml {
     const has = (name: string) => l.byLabel.get(name.toLowerCase()) ?? 0;
     const gh = (name: string) => o.search(`label:"${name}"`);
-    const prio = PRIORITIES.map((p) => ({ p, name: c.priority.labels[p], n: has(c.priority.labels[p]) }));
+    const without = (names: string[]) => o.search(names.map((x) => `-label:"${x}"`).join(' '));
+    const prio = PRIORITIES.map((p) => ({ name: c.priority.labels[p], n: has(c.priority.labels[p]) }));
     const prioritized = prio.reduce((t, x) => t + x.n, 0);
-    const noPriority = Math.max(0, l.open - prioritized);
-    const flagLabels = [...new Map(FLAGS.filter((f) => c[f].label.trim()).map((f) => [c[f].label.toLowerCase(), { name: c[f].label, title: FLAG_COPY[f].title }])).values()];
-    const known = new Set([...prio.map((x) => x.name.toLowerCase()), ...flagLabels.map((x) => x.name.toLowerCase()), ...c.labelGroups.flatMap((g) => g.options.map((x) => x.label.toLowerCase()))]);
+    const flagLabels = [...new Map(FLAGS.filter((f) => c[f].label.trim()).map((f) => [c[f].label.toLowerCase(), c[f].label])).values()];
+    const known = new Set([...prio.map((x) => x.name.toLowerCase()), ...flagLabels.map((x) => x.toLowerCase()), ...c.labelGroups.flatMap((g) => g.options.map((x) => x.label.toLowerCase()))]);
     const others = [...l.byLabel].filter(([k]) => !known.has(k)).sort((a, b) => b[1] - a[1]).map(([k, v]) => ({ name: l.names.get(k) ?? k, n: v }));
-    const backfill = (g: LabelGroup) => (o.runs ? `${o.runs}?what=labels&group=${encodeURIComponent(g.id)}` : null);
-    const category = (g: LabelGroup) => {
-      const none = missing.get(g.id) ?? 0;
-      const link = backfill(g);
-      return html`<section class="ov-sec" aria-labelledby="ov-g-${g.id}">
-        <div class="ov-sec-h"><h3 id="ov-g-${g.id}">${g.name}</h3><span class="xs muted">custom labels</span>${link && none ? linkBtn(link, `Backfill ${n(none)}`, { size: 'sm', variant: 'ghost', icon: 'history', title: `Add ${g.name} labels to the open tickets and issues that have none` }) : ''}</div>
-        ${bars([
-          ...g.options.map((x) => ({ label: labelTag(x.label), n: has(x.label), href: gh(x.label) })).sort((a, b) => b.n - a.n),
-          { label: html`<span class="ov-none-l">None yet</span>`, n: none, href: o.search(g.options.map((x) => `-label:"${x.label}"`).join(' ')), tone: 'none' },
-        ], { of: l.open, empty: 'No labels in this category.' })}
-      </section>`;
+    const byCount = (a: { n: number }, b: { n: number }) => b.n - a.n;
+
+    interface Row { name: string; n: number; href: string; none?: 'warn' | 'muted' }
+    interface Group { key: string; name: string; short?: string; kind: string; open: boolean; rows: Row[]; empty: string; cover?: { labelled: number; word: string; hatch: 'warn' | 'muted' }; backfill?: { href: string; none: number; name: string } | null }
+    const groups: Group[] = [
+      {
+        key: 'priority', name: 'Priority', kind: 'set by triage', open: true, empty: '',
+        cover: { labelled: prioritized, word: 'have one', hatch: 'muted' },
+        rows: [...prio.map((x) => ({ ...x, href: gh(x.name) })), { name: 'No priority', n: Math.max(0, l.open - prioritized), href: without(prio.map((x) => x.name)), none: 'muted' }],
+      },
+      ...c.labelGroups.map((g): Group => {
+        const none = missing.get(g.id) ?? 0;
+        const runs = o.runs ? `${o.runs}?what=labels&group=${encodeURIComponent(g.id)}` : null;
+        return {
+          key: `g-${g.id}`, name: g.name, kind: 'custom labels', open: true, empty: 'No labels in this category.',
+          cover: { labelled: Math.max(0, l.open - none), word: 'labelled', hatch: 'warn' },
+          backfill: runs && none ? { href: runs, none, name: g.name } : null,
+          rows: [...g.options.map((x) => ({ name: x.label, n: has(x.label), href: gh(x.label) })).sort(byCount), { name: 'None yet', n: none, href: without(g.options.map((x) => x.label)), none: 'warn' }],
+        };
+      }),
+      { key: 'triage', name: 'From triage', kind: 'its own labels', open: false, empty: 'Triage adds no labels of its own.', rows: flagLabels.map((x) => ({ name: x, n: has(x), href: gh(x) })).sort(byCount) },
+      { key: 'other', name: 'Your other labels', short: 'Other', kind: 'added by people or ticket types', open: false, empty: 'None.', rows: others.slice(0, 50).map((x) => ({ ...x, href: gh(x.name) })) },
+    ];
+
+    const share = (x: number) => (x ? Math.max(0.6, (x / l.open) * 100) : 0);
+    const row = (r: Row) => html`<li ${r.none ? '' : html`data-lt-name="${r.name.toLowerCase()}"`}>
+      <a class="lt-row${r.n ? '' : ' zero'}" href="${r.href}" target="_blank" rel="noopener noreferrer" aria-label="${`${r.name}: ${n(r.n)} open issues, ${pct(r.n, l.open)}. See them on GitHub`}">
+        <span class="lt-l">${r.none ? html`<span class="lt-nolabel ${r.none}">${r.name}</span>` : labelTag(r.name)}</span>
+        <span class="lt-n">${n(r.n)}</span>
+        <span class="lt-bar"><span class="lt-track">${meter([r.none ? { pct: share(r.n), hatch: r.none } : { pct: share(r.n), cls: 'lt-fill' }])}</span><span class="lt-pct">${pct(r.n, l.open)}</span></span>
+        <span class="lt-go">${icon('arrow-up-right', 14)}</span>
+      </a>
+    </li>`;
+    const group = (g: Group) => {
+      const labels = g.rows.filter((r) => !r.none);
+      const top = [...labels].sort(byCount).slice(0, 3);
+      const cover = g.cover;
+      const done = cover && l.open ? (cover.labelled / l.open) * 100 : 0;
+      return html`<details class="lt-group" data-lt-group="${g.key}" ${g.open ? raw('open') : ''}>
+        <summary class="lt-gh">
+          <span class="lt-chev" aria-hidden="true">${icon('chevron-right', 14)}</span>
+          <span class="lt-gname">${g.name}</span>
+          <span class="lt-kind">${g.kind}</span>
+          ${cover ? html`<span class="lt-cov${done < 50 ? ' low' : ''}" title="${`${n(cover.labelled)} of ${n(l.open)} open issues`}"><span class="lt-cov-bar">${meter([{ pct: done, cls: 'lt-cov-fill' }, { pct: 100 - done, hatch: cover.hatch }])}</span><b>${pct(cover.labelled, l.open)}</b> ${cover.word}</span>` : ''}
+          ${labels.length ? html`<span class="lt-sum">${plural(labels.length, 'label')}${top.map((t) => html` · ${t.name} <b>${n(t.n)}</b>`)}${labels.length > 3 ? ` · +${String(labels.length - 3)} more` : ''}</span>` : ''}
+          ${g.backfill ? html`<span class="lt-act">${linkBtn(g.backfill.href, `Backfill ${n(g.backfill.none)}`, { size: 'sm', variant: 'secondary', icon: 'history', title: `Add ${g.backfill.name} labels to the open tickets and issues that have none` })}</span>` : ''}
+        </summary>
+        ${g.rows.length ? html`<ul class="lt-rows">${g.rows.map(row)}</ul>` : html`<p class="lt-nil">${g.empty}</p>`}
+      </details>`;
     };
+    const noCustom = c.labelGroups.length ? '' : html`<div class="lt-empty" data-lt-extra>${empty('tags', 'No custom labels yet', html`Sort every ticket into your own labels, such as bug, parity or plugins.`, canOpen(ctx.membership, 'triage.labels') ? linkBtn(areaHref(ctx, 'triage.labels'), 'Add custom labels', { size: 'sm', trail: 'arrow-right' }) : null)}</div>`;
+
     return html`<section class="card an-card ov-labels" aria-labelledby="ov-labels-h">
       <div class="an-ch"><h2 id="ov-labels-h">Labels on open issues</h2><span class="small muted">${n(l.open)} open issues · as on GitHub now · click a label to see its issues</span>
         ${canOpen(ctx.membership, 'triage.labels') ? html`<span class="ov-ch-a">${linkBtn(areaHref(ctx, 'triage.labels'), 'Custom labels', { size: 'sm', variant: 'ghost', trail: 'arrow-right' })}</span>` : ''}</div>
-      ${l.open ? html`
-      <div class="ov-prio">
-        <div class="ov-prio-h"><h3>Priority</h3><span class="xs muted">${pct(prioritized, l.open)} of open issues have one</span></div>
-        <div class="ov-stack" role="img" aria-label="${prio.map((x) => `${x.name}: ${x.n}`).join(', ')}, no priority: ${String(noPriority)}">
-          ${prio.map((x) => (x.n ? html`<a class="${PRIORITY_TONE[x.p]}" href="${gh(x.name)}" target="_blank" rel="noopener noreferrer" style="flex-grow:${String(x.n)}" title="${x.name}: ${n(x.n)}"></a>` : ''))}
-          ${noPriority ? html`<span class="p-none" style="flex-grow:${String(noPriority)}" title="No priority: ${n(noPriority)}"></span>` : ''}
+      ${l.open ? html`<div class="lt" data-lt>${meterDefs()}
+        <div class="lt-tools" data-lt-tools hidden>
+          <div class="seg" role="group" aria-label="Show">${[{ key: 'all', label: 'All' }, ...groups.map((g) => ({ key: g.key, label: g.short ?? g.name }))].map((s) => html`<button type="button" class="seg-item" data-lt-show="${s.key}" aria-pressed="${s.key === 'all' ? 'true' : 'false'}">${s.label}</button>`)}</div>
+          <span class="search sm">${icon('search', 14)}<input type="search" placeholder="Find a label" aria-label="Find a label" data-lt-find></span>
         </div>
-        <ul class="ov-legend">${prio.map((x) => html`<li><i class="${PRIORITY_TONE[x.p]}"></i><a href="${gh(x.name)}" target="_blank" rel="noopener noreferrer">${x.name}</a><b>${n(x.n)}</b><span class="muted">${pct(x.n, l.open)}</span></li>`)}
-          <li><i class="p-none"></i><span>No priority</span><b>${n(noPriority)}</b><span class="muted">${pct(noPriority, l.open)}</span></li></ul>
-      </div>
-      <div class="ov-cols">
-        <section class="ov-sec" aria-labelledby="ov-tri-h">
-          <div class="ov-sec-h"><h3 id="ov-tri-h">From triage</h3><span class="xs muted">its own labels</span></div>
-          ${bars(flagLabels.map((x) => ({ label: html`<span title="${x.title}">${labelTag(x.name)}</span>`, n: has(x.name), href: gh(x.name) })).sort((a, b) => b.n - a.n), { of: l.open, empty: 'Triage adds no labels of its own.' })}
-        </section>
-        ${c.labelGroups.map(category)}
-        ${c.labelGroups.length ? '' : html`<section class="ov-sec ov-empty-cat">${empty('tags', 'No custom labels yet', html`Sort every ticket into your own labels, such as bug, parity or plugins.`, canOpen(ctx.membership, 'triage.labels') ? linkBtn(areaHref(ctx, 'triage.labels'), 'Add custom labels', { size: 'sm', trail: 'arrow-right' }) : null)}</section>`}
-        <section class="ov-sec" aria-labelledby="ov-oth-h">
-          <div class="ov-sec-h"><h3 id="ov-oth-h">Your other labels</h3><span class="xs muted">added by people or ticket types</span></div>
-          ${bars(others.map((x) => ({ label: labelTag(x.name), n: x.n, href: gh(x.name) })), { of: l.open, empty: 'None.', max: 15 })}
-        </section>
+        <div class="lt-table">
+          <div class="lt-head" aria-hidden="true"><span>Label</span><span class="lt-n">Open issues</span><span class="lt-bar"><span class="lt-scale"><i>0</i><i class="t25">25%</i><i class="t50">50%</i><i class="t75">75%</i><i class="t100">100%</i></span><span class="lt-pct">Share</span></span><span></span></div>
+          ${groups[0] ? group(groups[0]) : ''}${noCustom}${groups.slice(1).map(group)}
+          <p class="lt-nil lt-nomatch" data-lt-none hidden>No label matches.</p>
+        </div>
       </div>` : html`<p class="small muted ov-none">No open issues${o.app ? ' in this app’s repository' : ''}, or the issue sync hasn’t run yet.</p>`}
     </section>`;
   }
@@ -222,7 +256,7 @@ export function registerTriageOverviewRoutes(app: FastifyInstance, web: Web): vo
       ${rows.length
         ? html`<ul class="ov-bars two">${rows.map((a) => html`<li><div class="ov-bar">
             <span class="ov-bar-l">${actionTitle(c, a.kind, a.category)}</span>
-            <span class="ov-bar-t" aria-hidden="true"><i class="a" style="width:${String((a.applied / most) * 100)}%"></i><i class="s" style="width:${String((a.suggested / most) * 100)}%"></i></span>
+            <span class="ov-bar-t">${meter([{ pct: (a.applied / most) * 100, cls: 'a' }, { pct: (a.suggested / most) * 100, cls: 's' }], { h: 8 })}</span>
             <span class="ov-bar-n"><b>${n(a.applied)}</b>${a.suggested ? html`<span class="muted">+${n(a.suggested)}</span>` : ''}</span>
           </div></li>`)}</ul>`
         : html`<p class="small muted ov-none">Nothing in this period.</p>`}
