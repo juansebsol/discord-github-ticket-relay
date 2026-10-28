@@ -52,6 +52,7 @@ const CAPABILITIES: [string, string, string, string][] = [
   ['Discord tickets: act on tickets, panel, ticket types, files and settings', 'yes', 'yes', 'maybe'],
   ['GitHub issues', 'yes', 'yes', 'maybe'],
   ['AI triage: review suggestions and change its pages', 'yes', 'yes', 'maybe'],
+  ['Moderation: close, reopen and sort out tickets on GitHub', 'yes', 'yes', 'maybe'],
   ['Contributor roles', 'yes', 'yes', 'maybe'],
   ['Announcements: write and post messages in Discord', 'yes', 'yes', 'maybe'],
   ['Bot features: the known-issues board and GitHub releases', 'yes', 'yes', 'maybe'],
@@ -64,7 +65,7 @@ const CAPABILITIES: [string, string, string, string][] = [
 ];
 
 /** Short tool names for the access tags in the members table. */
-const TOOL_TAGS: Record<Tool, string> = { tickets: 'Tickets', issues: 'Issues', repos: 'Repos', analytics: 'Analytics', triage: 'Triage', contributors: 'Roles', announcements: 'Announce', bot: 'Bot', setup: 'Apps', workspace: 'Health' };
+const TOOL_TAGS: Record<Tool, string> = { tickets: 'Tickets', issues: 'Issues', repos: 'Repos', analytics: 'Analytics', triage: 'Triage', moderation: 'Mod', contributors: 'Roles', announcements: 'Announce', bot: 'Bot', setup: 'Apps', workspace: 'Health' };
 const LEVEL_NAMES: Record<AccessLevel, string> = { none: 'No access', view: 'View', edit: 'Edit' };
 const SET_NAMES: Record<AccessLevel, string> = { none: 'No access', view: 'View all', edit: 'Edit all' };
 

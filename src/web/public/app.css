@@ -2245,3 +2245,134 @@ a.lt-row:hover .lt-go { color: var(--text); }
 .run-est-cost { font: 600 20px/26px var(--font); font-variant-numeric: tabular-nums; color: var(--text); }
 .run-prog { justify-content: space-between; flex-wrap: wrap; gap: 4px 16px; }
 .run-cost { font-variant-numeric: tabular-nums; }
+
+/* ---- Moderation › Ticket management: the list on the left, the open ticket on the right ------ */
+
+.mod-top { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px; }
+.mod-filters { margin-left: auto; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.mod-filters .search { width: 260px; }
+.mod-orig { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.mod-split { display: grid; grid-template-columns: minmax(300px, 420px) minmax(0, 1fr); gap: 16px; align-items: start; }
+/* The list keeps its place while the ticket scrolls. */
+.mod-list { position: sticky; top: 16px; max-height: calc(100vh - 32px); display: flex; flex-direction: column; }
+.mod-list > .mod-rows, .mod-list > .mod-groups { overflow-y: auto; min-height: 0; flex: 1 1 auto; }
+.mod-bulk { flex: none; }
+.mod-more { flex: none; padding: 10px 16px; border-top: 1px solid var(--border); font-size: 12px; color: var(--muted); }
+.mod-rows, .mod-groups { list-style: none; margin: 0; padding: 0; }
+.mod-row { display: flex; gap: 10px; align-items: flex-start; padding: 0 0 0 14px; border-top: 1px solid var(--border); position: relative; }
+.mod-rows > .mod-row:first-child { border-top: 0; }
+.mod-row > .rule-check { margin: 14px 0 0; flex: none; }
+.mod-row-a { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; padding: 11px 14px 11px 0; color: inherit; text-decoration: none; }
+.mod-row:not(:has(> .rule-check)) .mod-row-a { padding-left: 0; }
+.mod-row:hover { background: var(--surface-2); }
+.mod-row-a:hover { text-decoration: none; }
+.mod-row.open { background: var(--nav-active); box-shadow: inset 3px 0 0 var(--accent); }
+.mod-row-l1 { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.mod-row-t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; line-height: 20px; font-weight: 500; color: var(--text); }
+.mod-row-age { flex: none; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.mod-row-l2 { font-size: 12px; line-height: 16px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mod-row-c { display: flex; flex-wrap: wrap; gap: 6px; }
+.mod-chip { display: inline-flex; align-items: center; height: 20px; padding: 0 7px; border-radius: var(--r-full); border: 1px solid var(--border); background: var(--surface-2); font: 600 11px/1 var(--font); color: var(--text); white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.mod-chip.accent { background: var(--accent-soft); border-color: var(--info-border); color: var(--accent-text); }
+.mod-chip.ok { background: var(--ok-soft); border-color: var(--ok-border); color: var(--ok-text); }
+.mod-chip.warn { background: var(--warn-soft); border-color: var(--warn-border); color: var(--warn-text); }
+.mod-chip.danger { background: var(--danger-soft); border-color: var(--danger-border); color: var(--danger-text); }
+/* Repeat bugs: each original, then its duplicates. */
+.mod-group + .mod-group { border-top: 1px solid var(--border-strong); }
+.mod-group-h { display: flex; gap: 12px; align-items: flex-start; padding: 12px 14px; background: var(--surface-2); }
+.mod-group-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.mod-group-t { font-size: 13px; line-height: 20px; font-weight: 600; color: var(--text); overflow-wrap: anywhere; }
+.mod-group-s { font-size: 12px; line-height: 16px; color: var(--muted); }
+.mod-group-fix { font-size: 12px; line-height: 16px; color: var(--muted); }
+.mod-group-fix.ok { color: var(--ok-text); }
+.mod-group-fix.warn { color: var(--warn-text); }
+.mod-group-fix.accent { color: var(--accent-text); }
+.mod-group-side { flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
+.mod-group-n { font: 600 16px/20px var(--font); font-variant-numeric: tabular-nums; }
+.mod-group .mod-rows > .mod-row:first-child { border-top: 1px solid var(--border); }
+.mod-group-more { display: block; padding: 8px 14px; border-top: 1px solid var(--border); font-size: 12px; }
+
+/* The open ticket. */
+.mod-detail { display: flex; flex-direction: column; min-height: 320px; }
+.mod-d-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 16px; border-bottom: 1px solid var(--border); }
+.mod-d-actions { margin-left: auto; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.mod-d-b { padding: 16px 20px 20px; display: flex; flex-direction: column; gap: 16px; }
+.mod-d-t { margin: 0; font-size: 18px; line-height: 26px; font-weight: 600; overflow-wrap: anywhere; }
+.mod-d-meta { margin-top: 6px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; font-size: 12px; line-height: 16px; color: var(--muted); }
+.mod-verdict { border: 1px solid var(--info-border); background: var(--accent-soft); border-radius: var(--r); padding: 14px; display: flex; flex-direction: column; gap: 12px; }
+.mod-v-h { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 13px; line-height: 20px; }
+.ic.accent { color: var(--accent-text); }
+.mod-refs { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }
+.mod-ref { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--surface); min-width: 0; }
+.mod-ref > .ic { flex: none; margin-top: 2px; }
+.mod-ref-b { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.mod-ref-e { font-size: 12px; line-height: 16px; color: var(--muted); }
+.mod-ref-t { font-size: 13px; line-height: 20px; font-weight: 600; color: var(--text); overflow-wrap: anywhere; }
+.mod-ref-s { font-size: 12px; line-height: 16px; color: var(--muted); }
+.mod-d-cols { display: flex; flex-wrap: wrap; gap: 20px; align-items: flex-start; }
+.mod-d-main { flex: 999 1 380px; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
+.mod-sec-h { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; }
+.mod-sec-h h3 { margin: 0; font-size: 14px; line-height: 20px; font-weight: 600; }
+/* One history: Discord, Ticket Relay and GitHub. */
+.mod-history { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 14px; }
+.mod-h { display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: 12px; align-items: start; font-size: 13px; line-height: 20px; position: relative; }
+.mod-h:not(:last-child)::before { content: ''; position: absolute; left: 11.5px; top: 28px; bottom: -10px; width: 1px; background: var(--border); }
+.mod-h .actor { font-weight: 500; }
+.mod-h .extra { font-size: 12px; line-height: 16px; color: var(--muted); margin-top: 2px; }
+.mod-h-b { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.mod-h-l { display: flex; gap: 8px; justify-content: space-between; align-items: baseline; min-width: 0; }
+.mod-h-l > span:first-child { min-width: 0; overflow-wrap: anywhere; }
+.mod-h-l .tag.label { vertical-align: middle; }
+.mod-h .when { flex: none; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.mod-text, .mod-bubble { border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--surface-2); padding: 12px; min-width: 0; overflow-wrap: anywhere; }
+.mod-bubble { background: var(--surface); }
+.mod-md { max-width: none; }
+.mod-md > :first-child { margin-top: 0; }
+.mod-md img { max-width: 100%; height: auto; }
+.mod-md pre { overflow-x: auto; }
+.mod-answers { margin: 10px 0 0; display: grid; grid-template-columns: minmax(100px, 160px) minmax(0, 1fr); gap: 4px 12px; font-size: 13px; }
+.mod-answers dt { color: var(--muted); }
+.mod-answers dd { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.mod-reply { border: 1px solid var(--border); border-radius: var(--r-sm); padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+.mod-reply-h { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.mod-reply-h label { font-size: 13px; font-weight: 600; }
+.mod-reply-h .select { margin-left: auto; min-width: 200px; }
+.mod-reply-text { margin: 0; padding: 10px 12px; border-radius: var(--r-sm); background: var(--surface-2); font-size: 13px; line-height: 20px; color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; }
+.mod-reply .row.end, .mod-form + .card-f .end { justify-content: flex-end; }
+/* What's known about it, on the right. */
+.mod-facts { flex: 1 1 220px; min-width: 0; display: flex; flex-direction: column; gap: 14px; font-size: 13px; line-height: 20px; }
+.mod-f { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.mod-f-k { font-size: 12px; line-height: 16px; color: var(--muted); }
+.mod-f-v { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; }
+.mod-add { display: inline-flex; align-items: center; gap: 4px; height: 20px; padding: 0 7px; border: 1px dashed var(--border-strong); border-radius: var(--r-xs); background: transparent; color: var(--muted); font: 500 12px/1 var(--font); cursor: pointer; }
+.mod-add:hover { color: var(--text); border-color: var(--border-hover); }
+.mod-similar { padding-top: 12px; border-top: 1px solid var(--border); }
+.mod-similar a { display: flex; flex-direction: column; gap: 1px; color: var(--text); text-decoration: none; }
+.mod-similar a:hover > span:first-child { text-decoration: underline; }
+.mod-similar a > span:last-child { font-size: 12px; line-height: 16px; }
+.mod-keys { margin-top: auto; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; padding: 10px 16px; border-top: 1px solid var(--border); font-size: 12px; color: var(--muted); }
+.mod-keys kbd { display: inline-block; min-width: 18px; padding: 0 5px; border: 1px solid var(--border-strong); border-radius: var(--r-xs); font: 500 11px/16px var(--font); text-align: center; color: var(--text); background: var(--surface); }
+/* Closing: the reasons, then what happens on GitHub for the one picked. */
+.mod-reasons { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.mod-gh { border: 1px solid var(--border); border-radius: var(--r-sm); padding: 12px; display: flex; flex-direction: column; gap: 8px; color: var(--text); }
+.mod-gh-h { font-size: 13px; font-weight: 600; }
+.mod-gh p { margin: 0; }
+.mod-check { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text); cursor: pointer; }
+.mod-check input { margin: 0; accent-color: var(--accent); }
+.mod-label-list { margin: 0; padding: 0; border: 0; display: flex; flex-direction: column; gap: 8px; }
+.mod-form { display: flex; flex-direction: column; gap: 14px; }
+.mod-form .setting { padding: 0; }
+@media (max-width: 960px) {
+  .mod-split { grid-template-columns: minmax(0, 1fr); }
+  .mod-list { position: static; max-height: 60vh; }
+  .mod-filters { margin-left: 0; width: 100%; }
+  .mod-filters .search { flex: 1; width: auto; }
+}
+@media (max-width: 560px) {
+  .mod-filters .search { flex: 1 1 100%; }
+  .mod-reasons { grid-template-columns: minmax(0, 1fr); }
+  .mod-d-b { padding: 14px 16px 16px; }
+  .mod-d-actions { margin-left: 0; width: 100%; }
+  .mod-reply-h .select { margin-left: 0; width: 100%; }
+  .mod-answers { grid-template-columns: minmax(0, 1fr); }
+}

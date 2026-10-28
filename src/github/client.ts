@@ -59,6 +59,8 @@ export interface IssueDetail {
   authorIsBot: boolean;
   /** GitHub's avatar for the author (only from avatars.githubusercontent.com). */
   authorAvatar: string | null;
+  /** A pull request (the issues API answers for those too). */
+  isPullRequest?: boolean;
 }
 
 function toIssueDetail(data: any): IssueDetail {
@@ -76,7 +78,48 @@ function toIssueDetail(data: any): IssueDetail {
     author: typeof data.user?.login === 'string' ? data.user.login : null,
     authorIsBot: data.user?.type === 'Bot' || /\[bot\]$/.test(String(data.user?.login ?? '')),
     authorAvatar: typeof data.user?.avatar_url === 'string' && data.user.avatar_url.startsWith('https://avatars.githubusercontent.com/') ? data.user.avatar_url.slice(0, 300) : null,
+    isPullRequest: Boolean(data.pull_request),
   };
+}
+
+/** Why an issue is closed, as GitHub names it. */
+export type CloseReason = 'completed' | 'not_planned' | 'duplicate';
+
+/** One entry of an issue's timeline (Moderation › Ticket management shows them with the ticket). */
+export type TimelineEvent =
+  | { kind: 'comment'; id: number; at: Date; actor: string | null; association: string | null; body: string; url: string | null }
+  | { kind: 'labeled' | 'unlabeled'; at: Date; actor: string | null; label: string }
+  | { kind: 'closed'; at: Date; actor: string | null; reason: string | null }
+  | { kind: 'reopened'; at: Date; actor: string | null }
+  | { kind: 'duplicate'; at: Date; actor: string | null }
+  | { kind: 'mentioned'; at: Date; actor: string | null; number: number; title: string; url: string; isPull: boolean; state: 'open' | 'closed'; merged: boolean; repo: string | null };
+
+function toTimelineEvent(e: any): TimelineEvent | null {
+  const at = new Date(typeof e?.created_at === 'string' ? e.created_at : typeof e?.updated_at === 'string' ? e.updated_at : 0);
+  const actor = typeof e?.actor?.login === 'string' ? e.actor.login : typeof e?.user?.login === 'string' ? e.user.login : null;
+  switch (e?.event) {
+    case 'commented':
+      return { kind: 'comment', id: Number(e.id) || 0, at, actor, association: typeof e.author_association === 'string' ? e.author_association : null, body: typeof e.body === 'string' ? e.body : '', url: typeof e.html_url === 'string' ? e.html_url : null };
+    case 'labeled':
+    case 'unlabeled':
+      return typeof e.label?.name === 'string' ? { kind: e.event, at, actor, label: e.label.name } : null;
+    case 'closed':
+      return { kind: 'closed', at, actor, reason: typeof e.state_reason === 'string' ? e.state_reason : null };
+    case 'reopened':
+      return { kind: 'reopened', at, actor };
+    case 'marked_as_duplicate':
+      return { kind: 'duplicate', at, actor };
+    case 'cross-referenced': {
+      const i = e.source?.issue;
+      if (!i || typeof i.number !== 'number' || typeof i.html_url !== 'string') return null;
+      return {
+        kind: 'mentioned', at, actor, number: i.number, title: String(i.title ?? ''), url: i.html_url, isPull: Boolean(i.pull_request),
+        state: i.state === 'closed' ? 'closed' : 'open', merged: typeof i.pull_request?.merged_at === 'string', repo: typeof i.repository?.full_name === 'string' ? i.repository.full_name : null,
+      };
+    }
+    default:
+      return null;
+  }
 }
 
 /** A pull request, as GitHub lists it among the issues. */
@@ -572,13 +615,47 @@ export class GitHubClient {
     );
   }
 
-  async createComment(installationId: number, owner: string, repo: string, issueNumber: number, body: string): Promise<void> {
-    await this.request(
+  /** Posts a comment; returns its id (null if GitHub didn't say). */
+  async createComment(installationId: number, owner: string, repo: string, issueNumber: number, body: string): Promise<number | null> {
+    const { data } = await this.request(
       'POST',
       `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/${issueNumber}/comments`,
       await this.asInstallation(installationId),
       { body },
     );
+    return typeof data?.id === 'number' ? data.id : null;
+  }
+
+  /** Deletes a comment (one already gone counts as deleted). */
+  async deleteComment(installationId: number, owner: string, repo: string, commentId: number): Promise<void> {
+    try {
+      await this.request('DELETE', `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/comments/${commentId}`, await this.asInstallation(installationId));
+    } catch (err) {
+      if (!(err instanceof GitHubApiError && err.status === 404)) throw err;
+    }
+  }
+
+  /** Takes a label off an issue (one it doesn't have counts as removed). */
+  async removeLabel(installationId: number, owner: string, repo: string, issueNumber: number, label: string): Promise<void> {
+    try {
+      await this.request('DELETE', `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/${issueNumber}/labels/${encodeURIComponent(label)}`, await this.asInstallation(installationId));
+    } catch (err) {
+      if (!(err instanceof GitHubApiError && err.status === 404)) throw err;
+    }
+  }
+
+  /**
+   * The start of an issue's timeline, oldest first: comments, labels, closing and reopening, and
+   * the issues and pull requests that mention it. `more` says whether GitHub has more.
+   */
+  async listIssueTimeline(installationId: number, owner: string, repo: string, issueNumber: number, perPage = 100): Promise<{ events: TimelineEvent[]; more: boolean }> {
+    const { data } = await this.request(
+      'GET',
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/${issueNumber}/timeline?per_page=${perPage}`,
+      await this.asInstallation(installationId),
+    );
+    const items = (data ?? []) as any[];
+    return { events: items.map(toTimelineEvent).filter((e): e is TimelineEvent => e !== null), more: items.length >= perPage };
   }
 
   /** Replaces the issue's body (used to keep its Attachments section current). */
@@ -591,13 +668,29 @@ export class GitHubClient {
     );
   }
 
-  /** Closes an issue as "not planned". */
-  async closeIssue(installationId: number, owner: string, repo: string, issueNumber: number): Promise<void> {
+  /**
+   * Closes an issue ("not planned" unless another reason is given). Where GitHub doesn't take
+   * "duplicate" yet, it's closed as not planned. Returns the reason it was closed with.
+   */
+  async closeIssue(installationId: number, owner: string, repo: string, issueNumber: number, reason: CloseReason = 'not_planned'): Promise<CloseReason> {
+    const path = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/${issueNumber}`;
+    const auth = await this.asInstallation(installationId);
+    try {
+      await this.request('PATCH', path, auth, { state: 'closed', state_reason: reason });
+      return reason;
+    } catch (err) {
+      if (!(reason === 'duplicate' && err instanceof GitHubApiError && err.status === 422)) throw err;
+      await this.request('PATCH', path, auth, { state: 'closed', state_reason: 'not_planned' });
+      return 'not_planned';
+    }
+  }
+
+  async reopenIssue(installationId: number, owner: string, repo: string, issueNumber: number): Promise<void> {
     await this.request(
       'PATCH',
       `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/${issueNumber}`,
       await this.asInstallation(installationId),
-      { state: 'closed', state_reason: 'not_planned' },
+      { state: 'open' },
     );
   }
 

@@ -16,6 +16,8 @@ import { analyticsRepos, getAnalyticsSettings } from '../../analytics/recorder.j
 import { postCounts } from '../../announcements/posts.js';
 import { announcementCounts, getAnnouncementSettings } from '../../announcements/settings.js';
 import { checkBoard, getBoardRow, getKnownIssuesSettings } from '../../bot-features/known-issues.js';
+import { queueCounts } from '../../moderation/queue.js';
+import { getModerationSettings } from '../../moderation/settings.js';
 import type { StepState } from '../layout.js';
 import { setFlash } from '../session.js';
 import type { Web, WorkspaceRequestContext } from '../server.js';
@@ -44,7 +46,7 @@ import { areaHref, canOpen, canOpenIssue, firstPage, panelPill, repoSyncState, T
 // ---- Overview -----------------------------------------------------------------------------------
 
 /** The tools with a card on the overview, in sidebar order. */
-const OVERVIEW_TOOLS: readonly ToolName[] = ['analytics', 'repos', 'tickets', 'issues', 'triage', 'contributors', 'announcements', 'bot'];
+const OVERVIEW_TOOLS: readonly ToolName[] = ['analytics', 'repos', 'tickets', 'issues', 'triage', 'moderation', 'contributors', 'announcements', 'bot'];
 
 const DAY_MS = 86_400_000;
 /** Latest goes back this far for issues opened on GitHub (the others are newest first by index). */
@@ -347,7 +349,29 @@ async function botCard({ web, ctx, dc }: Shared): Promise<ToolCard> {
   };
 }
 
-const CARDS: Record<ToolName, (s: Shared) => Promise<ToolCard>> = { tickets: ticketsCard, issues: issuesCard, repos: reposCard, analytics: analyticsCard, triage: triageCard, contributors: contributorsCard, announcements: announcementsCard, bot: botCard };
+async function moderationCard({ web, ctx, apps }: Shared): Promise<ToolCard> {
+  const { db } = web.deps;
+  const b = ctx.base;
+  const wid = ctx.workspace.id;
+  const [settings, triage] = await Promise.all([getModerationSettings(db, wid), getTriageSettings(db, wid)]);
+  const lower = (xs: string[]) => xs.filter(Boolean).map((x) => x.toLowerCase());
+  const counts = settings.enabled
+    ? await queueCounts(db, { workspaceId: wid, apps, source: 'all' }, { spam: lower([settings.reasons.find((r) => r.key === 'spam')?.label ?? '', triage.config.spam.label]), needsInfo: lower([triage.config.needsInfo.label]) })
+    : null;
+  return {
+    tool: 'moderation',
+    meta: settings.enabled ? 'Close, reopen and sort out tickets and issues on GitHub' : 'Off',
+    status: settings.enabled ? pill('On', 'ok') : pill('Off', 'neutral'),
+    stats: [
+      { label: 'Repeat bugs', value: counts?.repeat ?? 0, area: 'moderation', href: `${b}/moderation?queue=repeat`, tone: counts?.repeat ? 'accent' : undefined, title: 'Open duplicates, grouped under their original' },
+      { label: 'Fixed, still open', value: counts?.fixed ?? 0, area: 'moderation', href: `${b}/moderation?queue=fixed`, title: 'A merged pull request fixes them, or triage found they were already fixed' },
+      { label: 'Closed by mods, 30 days', value: counts?.closed ?? 0, area: 'mod-log', href: `${b}/moderation/log?kind=close` },
+    ],
+    go: [{ area: settings.enabled ? 'moderation' : 'mod-replies', label: settings.enabled ? 'Open Ticket management' : 'Set up Moderation', primary: !settings.enabled && can(ctx.membership, 'manage') }],
+  };
+}
+
+const CARDS: Record<ToolName, (s: Shared) => Promise<ToolCard>> = { tickets: ticketsCard, issues: issuesCard, repos: reposCard, analytics: analyticsCard, triage: triageCard, moderation: moderationCard, contributors: contributorsCard, announcements: announcementsCard, bot: botCard };
 
 // ---- Latest: what just happened, across the tools ------------------------------------------------
 

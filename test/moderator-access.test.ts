@@ -117,7 +117,7 @@ describe('Members › Moderator access', () => {
     expect(body).toContain(`<form id="acc-${mod.user.id}" method="post" action="${w()}/members/${mod.user.id}/access" data-async hidden>`);
     expect(body).toContain(`<section class="acc-editor" id="mod-${mod.user.id}" data-mod="${mod.user.id}"`);
     expect(body).toContain(`<span class="nm" id="acc-name-${mod.user.id}">mia</span>`);
-    expect(body).toContain('2 of 28 pages open · 1 editable');
+    expect(body).toContain('2 of 31 pages open · 1 editable');
     // No Access / View / Edit per page: the Inbox can't be turned off, Activity has nothing to edit.
     const radios = (name: string) => [...body.matchAll(new RegExp(`<input type="radio" name="${name.replace('.', '\\.')}" value="(\\w+)" form="acc-${mod.user.id}"[^>]*?( checked)?>`, 'g'))].map((m) => `${m[1]}${m[2] ? '*' : ''}`);
     for (const a of AREA_KEYS) expect(radios(a).length, a).toBeGreaterThan(1);

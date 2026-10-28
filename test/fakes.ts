@@ -14,7 +14,7 @@ export interface FakeRepo {
   has_issues: boolean;
   archived: boolean;
   labels: string[];
-  issues: { number: number; title: string; body: string; labels: string[]; created_at: string; updated_at?: string; user: string; state?: 'open' | 'closed'; state_reason?: string | null; closed_at?: string | null; comments?: string[]; bodyEdits?: number; reactions?: number; association?: string }[];
+  issues: { number: number; title: string; body: string; labels: string[]; created_at: string; updated_at?: string; user: string; state?: 'open' | 'closed'; state_reason?: string | null; closed_at?: string | null; comments?: string[]; commentIds?: number[]; bodyEdits?: number; reactions?: number; association?: string }[];
   /** Files on the default branch, by path (README.md, docs/FAQ.md…). */
   files?: Record<string, string>;
   releases?: { tag: string; name?: string; published_at?: string; body?: string; draft?: boolean; prerelease?: boolean; assets?: { name: string; downloads: number }[] }[];
@@ -92,6 +92,7 @@ export class FakeGitHub {
   /** GitHub refuses the star count (answers with the repository nulled and a FORBIDDEN error, as it does for fields the app may not read). */
   starCountForbidden = false;
   appSlug = 'ticket-relay';
+  private commentCounter = 0;
 
   addInstallation(id: number, login: string, repos: Partial<FakeRepo>[], type = 'Organization') {
     const ids: number[] = [];
@@ -376,12 +377,44 @@ export class FakeGitHub {
       const link: Record<string, string> = n > 1 ? { link: `<https://api.github.com${path}?author=${author}&per_page=1&page=2>; rel="next", <https://api.github.com${path}?author=${author}&per_page=1&page=${n}>; rel="last"` } : {};
       return json(200, n ? [{ sha: 'abc' }] : [], link);
     }
+    // Moderation: deleting a comment, taking a label off, and the issue's timeline.
+    if ((m = /^\/repos\/([^/]+)\/([^/]+)\/issues\/comments\/(\d+)$/.exec(path)) && method === 'DELETE') {
+      const r = this.repoByName(decodeURIComponent(m[1]!), decodeURIComponent(m[2]!));
+      if (!accessible(r)) return json(404, { message: 'Not Found' });
+      for (const i of r!.issues) {
+        const at = (i.commentIds ?? []).indexOf(Number(m[3]));
+        if (at >= 0) {
+          i.comments!.splice(at, 1);
+          i.commentIds!.splice(at, 1);
+          return json(204, undefined);
+        }
+      }
+      return json(404, { message: 'Not Found' });
+    }
+    if ((m = /^\/repos\/([^/]+)\/([^/]+)\/issues\/(\d+)\/labels\/(.+)$/.exec(path)) && method === 'DELETE') {
+      const r = this.repoByName(decodeURIComponent(m[1]!), decodeURIComponent(m[2]!));
+      const issue = r?.issues.find((i) => i.number === Number(m![3]));
+      const name = decodeURIComponent(m[4]!);
+      if (!accessible(r) || !issue || !issue.labels.includes(name)) return json(404, { message: 'Label does not exist' });
+      issue.labels = issue.labels.filter((l) => l !== name);
+      return json(200, issue.labels.map((l) => ({ name: l })));
+    }
+    if ((m = /^\/repos\/([^/]+)\/([^/]+)\/issues\/(\d+)\/timeline$/.exec(path))) {
+      const r = this.repoByName(decodeURIComponent(m[1]!), decodeURIComponent(m[2]!));
+      const issue = r?.issues.find((i) => i.number === Number(m![3]));
+      if (!accessible(r) || !issue) return json(404, { message: 'Not Found' });
+      const at = issue.updated_at ?? issue.created_at;
+      return json(200, [
+        ...(issue.comments ?? []).map((body, n) => ({ event: 'commented', id: issue.commentIds?.[n] ?? n + 1, body, user: { login: 'octo-commenter' }, author_association: 'NONE', created_at: at, html_url: `https://github.com/${r!.owner}/${r!.name}/issues/${issue.number}#issuecomment-${n + 1}` })),
+        ...(issue.state === 'closed' ? [{ event: 'closed', actor: { login: 'ticket-relay[bot]' }, state_reason: issue.state_reason ?? null, created_at: issue.closed_at ?? at }] : []),
+      ]);
+    }
     if ((m = /^\/repos\/([^/]+)\/([^/]+)\/issues\/(\d+)(\/labels|\/comments)?$/.exec(path))) {
       const r = this.repoByName(decodeURIComponent(m[1]!), decodeURIComponent(m[2]!));
       const issue = r?.issues.find((i) => i.number === Number(m![3]));
       if (!accessible(r) || !issue) return json(404, { message: 'Not Found' });
       if (method !== 'GET') issue.updated_at = new Date(Math.max(Date.now(), Date.parse(issue.updated_at ?? issue.created_at) + 1)).toISOString();
-      if (m[4] === '/comments' && method === 'GET') return json(200, (issue.comments ?? []).map((c, n) => ({ id: n + 1, body: c })));
+      if (m[4] === '/comments' && method === 'GET') return json(200, (issue.comments ?? []).map((c, n) => ({ id: issue.commentIds?.[n] ?? n + 1, body: c })));
       if (m[4] === '/labels' && method === 'POST') {
         for (const l of body.labels as string[]) {
           if (!r!.labels.includes(l)) r!.labels.push(l);
@@ -391,7 +424,11 @@ export class FakeGitHub {
       }
       if (m[4] === '/comments' && method === 'POST') {
         (issue.comments ??= []).push(body.body);
-        return json(201, { id: issue.comments.length });
+        // Ids that stay put when an earlier comment is deleted.
+        issue.commentIds ??= issue.comments.slice(0, -1).map((_, n) => n + 1);
+        const id = 1000 + ++this.commentCounter;
+        issue.commentIds.push(id);
+        return json(201, { id });
       }
       if (method === 'PATCH') {
         if (body.state) {

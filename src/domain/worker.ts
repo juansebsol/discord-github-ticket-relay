@@ -1,3 +1,4 @@
+import { drainModerationJobs } from '../moderation/actions.js';
 import { runFileCleanup } from './files.js';
 import { claimNext } from './submissions.js';
 import type { Processor } from './processor.js';
@@ -5,8 +6,9 @@ import type { Deps } from './types.js';
 
 /**
  * Background worker. Polls the submissions table for due work (new submissions,
- * scheduled retries, reconciliation checks and rows whose previous worker died) and runs
- * periodic maintenance. Any number of instances can run concurrently.
+ * scheduled retries, reconciliation checks and rows whose previous worker died), closes what
+ * moderators asked to close in bulk, and runs periodic maintenance. Any number of instances
+ * can run concurrently.
  */
 export class Worker {
   private running = false;
@@ -48,6 +50,8 @@ export class Worker {
     while (this.running) {
       try {
         await Promise.all(Array.from({ length: concurrency }, () => this.drain()));
+        // Moderators' bulk closes, one issue at a time, after the tickets waiting to be filed.
+        await drainModerationJobs(this.deps);
         if (Date.now() - this.lastMaintenance > (this.opts.maintenanceMs ?? 10 * 60_000)) {
           this.lastMaintenance = Date.now();
           await runMaintenance(this.deps);

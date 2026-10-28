@@ -35,6 +35,8 @@ const NAMES = [
   'chart-line', 'star',
   // Announcements
   'megaphone', 'bell-off',
+  // Moderation
+  'shield', 'reply', 'keyboard', 'pin',
 ];
 
 const require = createRequire(import.meta.url);

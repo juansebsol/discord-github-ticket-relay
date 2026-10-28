@@ -135,6 +135,7 @@ export function layout(ctx: PageContext, opts: { title: string; active: string; 
         ${tool(access, 'tickets', attention)}
         ${tool(access, 'issues')}
         ${tool(access, 'triage', review)}
+        ${tool(access, 'moderation')}
         ${tool(access, 'contributors')}
         ${tool(access, 'announcements')}
         ${tool(access, 'bot')}

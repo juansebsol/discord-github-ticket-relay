@@ -19,7 +19,7 @@ import { html, raw, type SafeHtml } from '../../lib/html.js';
 import { setFlash } from '../session.js';
 import type { Web } from '../server.js';
 import { questionAnchor } from '../../triage/knowledge.js';
-import { knowledgeLink, toolHeader, viewOnlyText } from './tool.js';
+import { canOpen, knowledgeLink, toolHeader, viewOnlyText } from './tool.js';
 import { viewOnlyFooter } from './triage.js';
 import {
   avatar,
@@ -173,7 +173,10 @@ const LEGACY_FILTERS: Record<string, string> = { created: 'filed', pending: 'ope
 
 type EventRow = Awaited<ReturnType<typeof listEvents>>[number];
 
-function eventView(e: EventRow, s: SubmissionRow, names: Map<string, string>): { icon?: IconName; tone?: string; actor?: string; text: SafeHtml } {
+/** What a ticket's activity needs to know about it (Moderation shows issues opened on GitHub the same way). */
+export type EventSubject = Pick<SubmissionRow, 'repo_owner' | 'repo_name' | 'issue_number' | 'reporter_display_name' | 'source' | 'resolution_note'>;
+
+export function eventView(e: EventRow, s: EventSubject, names: Map<string, string>): { icon?: IconName; tone?: string; actor?: string; text: SafeHtml } {
   const d = e.detail;
   const by = typeof d.by === 'string' ? names.get(d.by) ?? 'An admin' : 'An admin';
   const repo = `${s.repo_owner}/${s.repo_name}`;
@@ -239,6 +242,10 @@ function eventView(e: EventRow, s: SubmissionRow, names: Map<string, string>): {
     }
     case 'triage_dismissed':
       return { actor: by, text: html`<span class="actor">${by}</span> dismissed the triage suggestion: ${(d.actions as string[] | undefined)?.join(', ') ?? ''}` };
+    case 'mod_closed':
+      return { actor: by, text: html`<span class="actor">${by}</span> closed it on GitHub: ${typeof d.reason === 'string' ? d.reason : 'closed'}${typeof d.duplicate_of === 'number' ? ` of #${d.duplicate_of}` : ''}` };
+    case 'mod_reopened':
+      return { actor: by, text: html`<span class="actor">${by}</span> ${d.undo ? 'undid closing it' : 'reopened it on GitHub'}` };
     case 'triage_labels':
       return { icon: 'tags', tone: 'muted', text: html`Custom labels added: ${(d.labels as string[] | undefined)?.join(', ') ?? ''}${typeof d.by === 'string' ? html` · by <span class="actor">${by}</span>` : ''}` };
     default:
@@ -496,7 +503,7 @@ export function registerTicketRoutes(app: FastifyInstance, web: Web): void {
 
     // Header actions depend on the status.
     const linkItem = { dialog: 'link-dialog', label: 'Link existing issue…', icon: 'link' } as const;
-    const closeItem = { dialog: 'close-dialog', label: 'Close ticket…', icon: 'circle-slash', danger: true } as const;
+    const closeItem = { dialog: 'close-dialog', label: 'Close without filing…', icon: 'circle-slash', danger: true } as const;
     const retryConfirm = s.status === 'uncertain'
       ? { title: 'Retry this ticket?', body: 'GitHub is checked first. The issue is only created if none exists yet, so it’s never filed twice.', label: 'Retry' }
       : undefined;
@@ -515,7 +522,10 @@ export function registerTicketRoutes(app: FastifyInstance, web: Web): void {
     } else if (s.status === 'created' && s.issue_url) {
       actions = [
         linkBtn(s.issue_url, 'Open on GitHub', { trail: 'arrow-up-right', external: true }),
-        menu([{ copy: s.issue_url, label: 'Copy issue link', icon: 'copy' }], { size: 'md' }),
+        menu([
+          { copy: s.issue_url, label: 'Copy issue link', icon: 'copy' },
+          canOpen(ctx.membership, 'moderation') && s.issue_number ? { href: `${b}/moderation?open=${s.repo_id}-${s.issue_number}`, label: 'Open in Ticket management', icon: 'shield' } : null,
+        ], { size: 'md' }),
       ];
     }
 
@@ -607,14 +617,14 @@ export function registerTicketRoutes(app: FastifyInstance, web: Web): void {
           submit: submitBtn('Link issue', { variant: 'primary', loading: 'Verifying…' }),
         })}
         ${dialog('close-dialog', {
-          title: 'Close this ticket?',
+          title: 'Close this ticket without filing it?',
           action: `${actionBase}/dismiss`,
           csrf: ctx.csrf,
           body: html`<p>It won’t be filed on GitHub. The reporter isn’t notified.</p>
             ${choices('reason', CLOSE_REASONS, 'Spam')}
             <div class="field"><div class="field-head"><label for="close-note">Note <span class="opt">(optional)</span></label><span class="counter" data-counter-for="close-note">0 / 300</span></div>
               <textarea id="close-note" name="note" maxlength="300" rows="2"></textarea></div>`,
-          submit: submitBtn('Close ticket', { variant: 'danger-solid' }),
+          submit: submitBtn('Close without filing', { variant: 'danger-solid' }),
         })}` : ''}`;
     return web.render(reply, ctx, title, 'tickets', body);
   });

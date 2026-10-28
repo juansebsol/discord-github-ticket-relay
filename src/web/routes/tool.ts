@@ -9,6 +9,7 @@ import type { Queryable } from '../../db/database.js';
 import { checkPanel, type PanelState } from '../../domain/panel.js';
 import { AREAS, areasOf, can, firstArea, hasEdit, TOOL_NAMES, type Area, type MemberAccess, type Tool } from '../../domain/permissions.js';
 import { getDiscordConnection, listApps } from '../../domain/store.js';
+import { getModerationSettings } from '../../moderation/settings.js';
 import { html, type SafeHtml } from '../../lib/html.js';
 import { questionCounts } from '../../triage/knowledge.js';
 import { getTriageSettings, monthlyUsage } from '../../triage/settings.js';
@@ -16,10 +17,10 @@ import type { Web, WorkspaceRequestContext } from '../server.js';
 import { chip, pageHeader, pill, plural, postBtn, tabs, timeAgo, viewOnlyTag, type IconName } from '../ui.js';
 
 /** The tools that have their own item in the sidebar, in order. */
-export type ToolName = 'tickets' | 'issues' | 'repos' | 'analytics' | 'triage' | 'contributors' | 'announcements' | 'bot';
+export type ToolName = 'tickets' | 'issues' | 'repos' | 'analytics' | 'triage' | 'moderation' | 'contributors' | 'announcements' | 'bot';
 
 /** Each tool's icon, in the sidebar, on the overview and on Members. */
-export const TOOL_ICONS: Record<Tool, IconName> = { tickets: 'ticket', issues: 'circle-dot', repos: 'chart-no-axes-column-increasing', analytics: 'chart-line', triage: 'sparkles', contributors: 'award', announcements: 'megaphone', bot: 'bot', setup: 'boxes', workspace: 'activity' };
+export const TOOL_ICONS: Record<Tool, IconName> = { tickets: 'ticket', issues: 'circle-dot', repos: 'chart-no-axes-column-increasing', analytics: 'chart-line', triage: 'sparkles', moderation: 'shield', contributors: 'award', announcements: 'megaphone', bot: 'bot', setup: 'boxes', workspace: 'activity' };
 
 /** Every page's address under /w/:wid. */
 export const AREA_PATHS: Record<Area, string> = {
@@ -41,6 +42,9 @@ export const AREA_PATHS: Record<Area, string> = {
   'triage.knowledge': '/triage/knowledge',
   'triage.runs': '/triage/runs',
   'triage.activity': '/triage/activity',
+  'moderation': '/moderation',
+  'mod-log': '/moderation/log',
+  'mod-replies': '/moderation/replies',
   'verifications': '/contributors',
   'contributor-roles': '/contributors/roles',
   'contributor-panel': '/contributors/panel',
@@ -148,6 +152,7 @@ const VIEW_ONLY: Partial<Record<Area, string>> = {
   'releases': 'You can see the releases and their posts. Posting, editing and skipping them need Edit on GitHub releases. Ask an admin if you need it.',
   'release-settings': 'You can see how GitHub releases are set up. Ask an admin if you need to change it.',
   'release-pings': 'You can see the pings message and its preview. Ask an admin if you need to change, publish or remove it.',
+  'moderation': 'You can read tickets, their history and duplicates. Closing, reopening, marking duplicates, replying and labels need Edit on Ticket management. Ask an admin if you need it.',
   'health': 'You can see how the server is doing. Switching Dev mode needs Edit on Server health. Ask an admin if you need it.',
 };
 
@@ -211,6 +216,15 @@ async function toolState(web: Web, ctx: WorkspaceRequestContext, tool: ToolName,
       actions: [chip(`${c.model} · ${usage.triaged.toLocaleString('en-US')} of ${c.monthlyLimit.toLocaleString('en-US')} this month`, { tone: anyOn && full ? 'warn' : null, title: 'Tickets and issues triaged this month, re-runs included, and the monthly limit' })],
       // Knowledge: questions Claude asked since each app's TRIAGE.md was last saved.
       counts: { 'triage.review': ctx.progress?.review ?? 0, 'triage.knowledge': [...(questions?.values() ?? [])].reduce((n, q) => n + q.fresh, 0) },
+    };
+  }
+  if (tool === 'moderation') {
+    const settings = await getModerationSettings(db, wid);
+    return {
+      status: settings.enabled ? pill('On', 'ok') : pill('Off', 'neutral'),
+      description: 'Close, reopen and sort out tickets and issues without leaving Ticket Relay. The app does it on GitHub, with your admins’ wording, and it’s logged here.',
+      actions: [],
+      counts: {},
     };
   }
   if (tool === 'bot') {

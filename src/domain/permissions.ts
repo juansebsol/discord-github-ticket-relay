@@ -1,7 +1,7 @@
 import type { Role } from './types.js';
 
 /** The tools in the sidebar, in order. Each one has pages (areas) an admin can open to moderators. */
-export const TOOLS = ['analytics', 'repos', 'tickets', 'issues', 'triage', 'contributors', 'announcements', 'bot', 'setup', 'workspace'] as const;
+export const TOOLS = ['analytics', 'repos', 'tickets', 'issues', 'triage', 'moderation', 'contributors', 'announcements', 'bot', 'setup', 'workspace'] as const;
 export type Tool = (typeof TOOLS)[number];
 export type AccessLevel = 'none' | 'view' | 'edit';
 
@@ -39,6 +39,9 @@ export const AREAS = {
   'triage.knowledge': { tool: 'triage', name: 'Knowledge', desc: 'Each app’s TRIAGE.md and the questions Claude asks. Edit: write them.', levels: ['view', 'edit'] },
   'triage.runs': { tool: 'triage', name: 'Re-run', desc: 'Previews and applying their results.', levels: ['view', 'edit'] },
   'triage.activity': { tool: 'triage', name: 'Activity', desc: 'What triage did, live.', levels: ['view'] },
+  'moderation': { tool: 'moderation', name: 'Ticket management', desc: 'Open tickets and issues with their whole history, duplicates and fixes. Edit: close, reopen, mark duplicates, reply from saved replies and change labels.', levels: ['view', 'edit'] },
+  'mod-log': { tool: 'moderation', name: 'Mod log', desc: 'What moderators closed, reopened, marked and replied, and undoing it.', levels: ['view'] },
+  'mod-replies': { tool: 'moderation', name: 'Replies & reasons', desc: 'The close reasons and saved replies moderators post on GitHub. Only admins change them.', levels: ['view'] },
   'verifications': { tool: 'contributors', name: 'Verifications', desc: 'Who verified and their role. Edit: revoke roles.', levels: ['view', 'edit'] },
   'contributor-roles': { tool: 'contributors', name: 'Roles', desc: 'Roles and the contributions they need.', levels: ['view', 'edit'] },
   'contributor-panel': { tool: 'contributors', name: 'Panel', desc: 'The verify panel in Discord. Edit: change, publish or remove it.', levels: ['view', 'edit'] },
@@ -53,7 +56,7 @@ export const AREAS = {
 export type Area = keyof typeof AREAS;
 export const AREA_KEYS = Object.keys(AREAS) as Area[];
 
-export const TOOL_NAMES: Record<Tool, string> = { tickets: 'Discord tickets', issues: 'GitHub issues', repos: 'Repo status', analytics: 'Analytics', triage: 'AI triage', contributors: 'Contributor roles', announcements: 'Announcements', bot: 'Bot features', setup: 'Setup', workspace: 'Workspace' };
+export const TOOL_NAMES: Record<Tool, string> = { tickets: 'Discord tickets', issues: 'GitHub issues', repos: 'Repo status', analytics: 'Analytics', triage: 'AI triage', moderation: 'Moderation', contributors: 'Contributor roles', announcements: 'Announcements', bot: 'Bot features', setup: 'Setup', workspace: 'Workspace' };
 
 /** A tool's pages, in order. */
 export function areasOf(tool: Tool): Area[] {

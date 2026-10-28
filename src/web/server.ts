@@ -49,6 +49,7 @@ import { registerAlertRoutes } from './routes/alerts.js';
 import { registerTriageReviewRoutes } from './routes/triage-review.js';
 import { registerTriageOverviewRoutes } from './routes/triage-overview.js';
 import { registerReleaseRoutes } from './routes/releases.js';
+import { registerModerationRoutes } from './routes/moderation.js';
 import { registerMovedRoutes } from './routes/tool.js';
 import { MAX_FILE_BYTES } from '../domain/files.js';
 
@@ -284,6 +285,7 @@ export async function buildServer(deps: Deps, processor: Processor, opts: { logg
   registerTriageRunRoutes(app, web);
   registerTriageActivityRoutes(app, web);
   registerTriageBulkRoutes(app, web);
+  registerModerationRoutes(app, web);
   registerMemberRoutes(app, web);
   registerContributorRoutes(app, web);
   registerAnnouncementRoutes(app, web);

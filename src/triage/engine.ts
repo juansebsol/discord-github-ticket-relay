@@ -705,8 +705,8 @@ const RUN_ITEM_VIEW = `SELECT i.*,
   LEFT JOIN (SELECT repo_id, workspace_id, min(repo_owner) AS repo_owner, min(repo_name) AS repo_name FROM apps GROUP BY repo_id, workspace_id) a ON a.repo_id = i.gh_repo_id AND a.workspace_id = r.workspace_id
   LEFT JOIN issue_index x ON x.repo_id = COALESCE(s.repo_id, i.gh_repo_id) AND x.number = COALESCE(s.issue_number, i.gh_number)`;
 
-/** GitHub calls a re-run leaves free for filing and normal triage: a fifth of the hourly budget, at least 500. */
-const GITHUB_RESERVE = { share: 0.2, min: 500 };
+/** GitHub calls a re-run (or a moderator's bulk close) leaves free for filing and normal triage: a fifth of the hourly budget, at least 500. */
+export const GITHUB_RESERVE = { share: 0.2, min: 500 };
 
 /** A run's saved settings, read with today's defaults for anything added since. */
 function withParsedConfig<T extends { config_used: TriageConfig }>(r: T): T {

@@ -2530,4 +2530,61 @@
       timer = setTimeout(function () { charts.forEach(draw); hbars.forEach(drawH); }, 150);
     });
   })();
+
+  // ---- Moderation › Ticket management: keys, reply previews, a group's close, the original's number ----
+
+  (function () {
+    var mod = document.querySelector('[data-mod-split]');
+    if (mod) {
+      // The open row stays in view in a long list; on a narrow screen the open ticket comes first.
+      var row = mod.querySelector('.mod-row.open');
+      var list = mod.querySelector('.mod-list');
+      if (row && list && list.scrollHeight > list.clientHeight) list.scrollTop = Math.max(0, row.offsetTop - list.clientHeight / 3);
+      var detail = document.getElementById('mod-detail');
+      if (detail && /[?&]open=/.test(location.search) && window.matchMedia('(max-width: 960px)').matches) detail.scrollIntoView({ block: 'start' });
+      document.addEventListener('keydown', function (e) {
+        if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey || e.repeat) return;
+        if (e.target && e.target.closest && e.target.closest('input, textarea, select, [contenteditable]')) return;
+        if (document.querySelector('dialog[open]') || document.querySelector('.menu.open')) return;
+        var k = (e.key || '').toLowerCase();
+        if (k === 'j' || k === 'k') {
+          var href = mod.getAttribute(k === 'j' ? 'data-mod-next' : 'data-mod-prev');
+          if (href) { e.preventDefault(); location.href = href; }
+          return;
+        }
+        if (k === 'r') {
+          var pick = document.getElementById('mod-reply-pick');
+          if (pick) { e.preventDefault(); pick.focus(); }
+          return;
+        }
+        var el = k.length === 1 ? document.querySelector('[data-mod-key="' + k + '"]') : null;
+        if (el && !el.disabled) { e.preventDefault(); el.click(); }
+      });
+    }
+    // Saved replies: the text of the one picked.
+    $$('[data-reply-form]').forEach(function (form) {
+      var pick = form.querySelector('[data-reply-pick]');
+      if (!pick) return;
+      function sync() { $$('[data-reply-text]', form).forEach(function (p) { p.hidden = p.getAttribute('data-reply-text') !== pick.value; }); }
+      pick.addEventListener('change', sync);
+      sync();
+    });
+    // The original's number, as it's typed, in the comment previews.
+    $$('[data-dup-input]').forEach(function (input) {
+      function sync() { $$('[data-dup-ref]', input.form).forEach(function (s) { s.textContent = input.value ? '#' + input.value : '#…'; }); }
+      input.addEventListener('input', sync);
+      sync();
+    });
+    // A group's "Close N…": which group and reason, in the shared dialog (before it opens).
+    document.addEventListener('click', function (e) {
+      var b = e.target.closest && e.target.closest('[data-group]');
+      var d = b && document.getElementById('mod-close-group');
+      if (!d) return;
+      $('[data-group-input]', d).value = b.getAttribute('data-group');
+      $('[data-group-heading]', d).textContent = b.getAttribute('data-group-title');
+      $$('[data-dup-ref]', d).forEach(function (s) { s.textContent = '#' + b.getAttribute('data-group-of'); });
+      var r = d.querySelector('input[name="reason"][value="' + b.getAttribute('data-group-reason') + '"]');
+      if (r) { r.checked = true; r.form.dispatchEvent(new Event('change')); }
+    }, true);
+  })();
 })();
