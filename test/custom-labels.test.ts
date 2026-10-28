@@ -248,6 +248,10 @@ describe('AI triage › Overview', () => {
     expect(res.body).toContain('/triage/runs?what=labels&amp;group=kind1');
     expect(res.body).toContain(encodeURIComponent('label:"parity"'));
     expect(res.body).toContain('What triage did');
+    // What triage did: a group each, in the same table.
+    expect(res.body).toContain('data-lt-group="actions" open');
+    expect(res.body).toContain('<span class="lt-gname">Priority it gave</span>');
+    expect(res.body).toContain('<span class="lt-gname">By app</span>');
     expect(res.body).toContain('Read per day');
     // The sidebar goes here first.
     expect(res.body).toContain(`href="${w()}/triage/overview" class="nav-item" aria-current="page"`);

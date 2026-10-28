@@ -427,20 +427,20 @@
     run();
   });
 
-  // AI triage › Overview: the labels table shows one category, or the labels a search finds. The
-  // groups that show open; clearing it puts each group back as it was.
+  // AI triage › Overview: a grouped table shows one group, or the rows a search finds. The groups
+  // that show open; clearing it puts each group back as it was.
   $$('[data-lt]').forEach(function (table) {
     var tools = $('[data-lt-tools]', table);
     var find = $('[data-lt-find]', table);
     var nothing = $('[data-lt-none]', table);
     var groups = $$('[data-lt-group]', table);
     var buttons = $$('[data-lt-show]', table);
-    if (!tools || !find) return;
+    if (!tools) return;
     tools.hidden = false;
     var show = 'all';
     var saved = null;
     function run() {
-      var q = find.value.trim().toLowerCase();
+      var q = find ? find.value.trim().toLowerCase() : '';
       var filtered = Boolean(q) || show !== 'all';
       if (filtered && !saved) saved = groups.map(function (g) { return g.open; });
       var any = false;
@@ -471,7 +471,7 @@
         run();
       });
     });
-    find.addEventListener('input', run);
+    if (find) find.addEventListener('input', run);
   });
   $$('[data-toggle-filters]').forEach(function (b) {
     b.addEventListener('click', function () {

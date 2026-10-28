@@ -9,7 +9,7 @@ import type { FastifyInstance } from 'fastify';
 import { safeTimeZone, windowOf, type Window } from '../../analytics/time.js';
 import { can } from '../../domain/permissions.js';
 import { listApps } from '../../domain/store.js';
-import { html, raw, type SafeHtml } from '../../lib/html.js';
+import { html, raw, SafeHtml } from '../../lib/html.js';
 import { openLabels, openMissing, type OpenLabels } from '../../triage/label-stats.js';
 import { triageOverview, type TriageOverview } from '../../triage/overview.js';
 import { FLAGS, getTriageSettings, groupKind, PRIORITIES, tokenCost, type TriageConfig } from '../../triage/settings.js';
@@ -31,26 +31,92 @@ const pct = (part: number, whole: number) => {
 /** Where the priority bar's colours come from, most urgent first. */
 const PRIORITY_TONE: Record<(typeof PRIORITIES)[number], string> = { critical: 'p-crit', high: 'p-high', medium: 'p-med', low: 'p-low' };
 
-interface Bar {
+type Part = { pct: number; cls?: string; hatch?: 'warn' | 'muted' };
+
+/** A row of a grouped table: what it is, its number, its bar (out of 100) and its share. */
+interface TableRow {
   label: SafeHtml | string;
-  n: number;
-  href?: string | null;
-  /** Shown after the share (a second number, or a link's words). */
-  note?: SafeHtml | string;
-  tone?: string;
+  count: SafeHtml | string;
+  bar: Part[];
+  share: string;
+  /** What the search finds it by (lowercase); without it a search hides it. */
+  find?: string;
+  /** What the row opens, and how it's read out; `external` opens GitHub in a new tab. */
+  link?: { href: string; aria: string; external: boolean };
+  zero?: boolean;
 }
 
-/** A list of bars on one scale (the longest is full), each with its count and share of `of`. */
-function bars(items: Bar[], o: { of: number; empty: string; max?: number }): SafeHtml {
-  const shown = items.slice(0, o.max ?? 50);
-  if (!shown.length) return html`<p class="small muted ov-none">${o.empty}</p>`;
-  const most = Math.max(1, ...shown.map((b) => b.n));
-  return html`<ul class="ov-bars${shown.some((b) => b.note) ? ' wide' : ''}">${shown.map((b) => {
-    const inner = html`<span class="ov-bar-l">${b.label}</span>
-      <span class="ov-bar-t">${meter([{ pct: b.n ? Math.max(1.5, (b.n / most) * 100) : 0, cls: b.tone ?? 'v1' }], { h: 8 })}</span>
-      <span class="ov-bar-n"><b>${n(b.n)}</b><span class="muted">${pct(b.n, o.of)}</span>${b.note ? html`<span class="ov-bar-x">${b.note}</span>` : ''}</span>`;
-    return html`<li>${b.href ? html`<a class="ov-bar" href="${b.href}" target="_blank" rel="noopener noreferrer" title="See them on GitHub">${inner}</a>` : html`<div class="ov-bar">${inner}</div>`}</li>`;
-  })}</ul>`;
+/** A group of a grouped table, which opens and closes; `summary` shows while it's closed. */
+interface TableGroup {
+  key: string;
+  name: string;
+  /** Its name on the filter. */
+  short?: string;
+  kind: SafeHtml | string;
+  open: boolean;
+  /** After the name: how much of it is covered, or a colour key. */
+  extra?: SafeHtml | string;
+  summary?: SafeHtml | string;
+  action?: SafeHtml | null;
+  rows: TableRow[];
+  empty: string;
+}
+
+/**
+ * Groups of rows as one table, every bar on the same 0–100% scale. app.js adds a filter by group
+ * and, with `find` (the search box's words), a search. Markup among the groups is shown as it is.
+ * The page needs `meterDefs()` once for the striped bars.
+ */
+function groupTable(o: { name: string; head: [string, string, string]; items: (TableGroup | SafeHtml)[]; find?: string; nothing?: string }): SafeHtml {
+  const groups = o.items.filter((g): g is TableGroup => !(g instanceof SafeHtml));
+  const row = (r: TableRow) => {
+    const cells = html`<span class="lt-l">${r.label}</span><span class="lt-n">${r.count}</span>
+      <span class="lt-bar"><span class="lt-track">${meter(r.bar)}</span><span class="lt-pct">${r.share}</span></span>
+      <span class="lt-go">${r.link ? icon(r.link.external ? 'arrow-up-right' : 'chevron-right', 14) : ''}</span>`;
+    const cls = `lt-row${r.zero ? ' zero' : ''}`;
+    return html`<li ${r.find ? html`data-lt-name="${r.find}"` : ''}>${r.link
+      ? html`<a class="${cls}" href="${r.link.href}" aria-label="${r.link.aria}" ${r.link.external ? raw('target="_blank" rel="noopener noreferrer"') : ''}>${cells}</a>`
+      : html`<div class="${cls}">${cells}</div>`}</li>`;
+  };
+  const group = (g: TableGroup) => html`<details class="lt-group" data-lt-group="${g.key}" ${g.open ? raw('open') : ''}>
+      <summary class="lt-gh">
+        <span class="lt-chev" aria-hidden="true">${icon('chevron-right', 14)}</span>
+        <span class="lt-gname">${g.name}</span>
+        <span class="lt-kind">${g.kind}</span>
+        ${g.extra ?? ''}
+        ${g.summary ? html`<span class="lt-sum">${g.summary}</span>` : ''}
+        ${g.action ? html`<span class="lt-act">${g.action}</span>` : ''}
+      </summary>
+      ${g.rows.length ? html`<ul class="lt-rows">${g.rows.map(row)}</ul>` : html`<p class="lt-nil">${g.empty}</p>`}
+    </details>`;
+  return html`<div class="lt" data-lt>
+    <div class="lt-tools" data-lt-tools hidden>
+      <div class="seg" role="group" aria-label="${`Show in ${o.name}`}">${[{ key: 'all', label: 'All' }, ...groups.map((g) => ({ key: g.key, label: g.short ?? g.name }))].map((x) => html`<button type="button" class="seg-item" data-lt-show="${x.key}" aria-pressed="${x.key === 'all' ? 'true' : 'false'}">${x.label}</button>`)}</div>
+      ${o.find ? html`<span class="search sm">${icon('search', 14)}<input type="search" placeholder="${o.find}" aria-label="${o.find}" data-lt-find></span>` : ''}
+    </div>
+    <div class="lt-table">
+      <div class="lt-head" aria-hidden="true"><span>${o.head[0]}</span><span class="lt-n">${o.head[1]}</span><span class="lt-bar"><span class="lt-scale"><i>0</i><i class="t25">25%</i><i class="t50">50%</i><i class="t75">75%</i><i class="t100">100%</i></span><span class="lt-pct">${o.head[2]}</span></span><span></span></div>
+      ${o.items.map((g) => (g instanceof SafeHtml ? g : group(g)))}
+      ${o.find ? html`<p class="lt-nil lt-nomatch" data-lt-none hidden>${o.nothing ?? 'Nothing matches.'}</p>` : ''}
+    </div>
+  </div>`;
+}
+
+/** A bar's length for `part` of `whole`: at least a sliver when there's any. */
+const of = (part: number, whole: number) => (part > 0 && whole > 0 ? Math.max(0.6, (part / whole) * 100) : 0);
+
+/** A closed group's line: the biggest few, after how many there are when `noun` names them. */
+function topSummary(items: { name: string; n: number }[], noun?: string): SafeHtml | string {
+  if (!items.length) return '';
+  const top = [...items].sort((x, y) => y.n - x.n).slice(0, 3);
+  const parts = top.map((t) => html`${t.name} <b>${n(t.n)}</b>`);
+  return html`${noun ? `${plural(items.length, noun)} · ` : ''}${parts.map((p, i) => html`${i ? ' · ' : ''}${p}`)}${items.length > 3 ? ` · +${String(items.length - 3)} more` : ''}`;
+}
+
+/** How much of a group is covered: a small bar, the share and a word. */
+function coverage(part: number, whole: number, word: string, hatch: 'warn' | 'muted', title: string): SafeHtml {
+  const done = whole ? (part / whole) * 100 : 0;
+  return html`<span class="lt-cov${done < 50 ? ' low' : ''}" title="${title}"><span class="lt-cov-bar">${meter([{ pct: done, cls: 'lt-cov-fill' }, { pct: 100 - done, hatch }])}</span><b>${pct(part, whole)}</b> ${word}</span>`;
 }
 
 /** A column chart app.js draws (as on Analytics), stacked by series, with a table view. */
@@ -119,7 +185,7 @@ export function registerTriageOverviewRoutes(app: FastifyInstance, web: Web): vo
     const runs = can(ctx.membership, 'triage.runs.edit') ? areaHref(ctx, 'triage.runs') : null;
     const body = html`
       ${await toolHeader(web, ctx, 'triage', 'triage.overview')}
-      <div class="an ov" data-an-tz="${tz}">
+      <div class="an ov" data-an-tz="${tz}">${meterDefs()}
         <form method="get" action="${base}" class="an-filters" aria-label="Filters">
           ${range !== '30d' ? html`<input type="hidden" name="range" value="${range}">` : ''}
           <label class="sr-only" for="ov-app">App</label>
@@ -136,13 +202,8 @@ export function registerTriageOverviewRoutes(app: FastifyInstance, web: Web): vo
           ${chart(w, { title: 'Read per day', unit: 'Read', series: [{ name: 'Discord tickets', slot: 1, values: d.tickets }, { name: 'Opened on GitHub', slot: 2, values: d.issues }] })}
         </section>`}
         ${labelsCard(ctx, c, labels, missing, { search, runs, app: picked?.id ?? null })}
-        <div class="an-grid ov-grid">
-          ${actionsCard(c, d)}
-          ${sureCard(c, d)}
-          ${skippedCard(d)}
-          ${picked ? '' : appsCard(apps, d)}
-        </div>
-        <p class="small muted an-foot">Labels are what the open issues have on GitHub now, from the issue sync. What triage did counts the tickets and issues it read in the period, ${RANGE_NAMES[range] === 'All' ? 'since it was turned on' : 'by the day it read them'}; “suggested” ones are still waiting in Review. Times are in your time zone (${tz}).</p>
+        ${activityCard(ctx, c, d, { apps, picked: picked?.id ?? null, range, app: (id) => href({ app: id }) })}
+        <p class="small muted an-foot">Labels are what the open issues have on GitHub now, from the issue sync. What triage did counts the tickets and issues it read in the period, ${RANGE_NAMES[range] === 'All' ? 'since it was turned on' : 'by the day it read them'}; the “+” numbers are suggestions still waiting in Review. Times are in your time zone (${tz}).</p>
       </div>`;
     return web.render(reply, ctx, 'Overview · AI triage', 'triage', body, { width: 'full' });
   });
@@ -166,9 +227,8 @@ export function registerTriageOverviewRoutes(app: FastifyInstance, web: Web): vo
   }
 
   /**
-   * Every label on the open issues as one table, a group per category (priority, each custom
-   * category, triage's own, the rest), each bar out of all open issues. app.js adds the category
-   * filter and the label search.
+   * Every label on the open issues, a group per category (priority, each custom category, triage's
+   * own, the rest), each bar out of all open issues, with a label search.
    */
   function labelsCard(ctx: WorkspaceRequestContext, c: TriageConfig, l: OpenLabels, missing: Map<string, number>, o: { search: (terms: string) => string; runs: string | null; app: string | null }): SafeHtml {
     const has = (name: string) => l.byLabel.get(name.toLowerCase()) ?? 0;
@@ -181,118 +241,120 @@ export function registerTriageOverviewRoutes(app: FastifyInstance, web: Web): vo
     const others = [...l.byLabel].filter(([k]) => !known.has(k)).sort((a, b) => b[1] - a[1]).map(([k, v]) => ({ name: l.names.get(k) ?? k, n: v }));
     const byCount = (a: { n: number }, b: { n: number }) => b.n - a.n;
 
-    interface Row { name: string; n: number; href: string; none?: 'warn' | 'muted' }
-    interface Group { key: string; name: string; short?: string; kind: string; open: boolean; rows: Row[]; empty: string; cover?: { labelled: number; word: string; hatch: 'warn' | 'muted' }; backfill?: { href: string; none: number; name: string } | null }
-    const groups: Group[] = [
-      {
-        key: 'priority', name: 'Priority', kind: 'set by triage', open: true, empty: '',
-        cover: { labelled: prioritized, word: 'have one', hatch: 'muted' },
-        rows: [...prio.map((x) => ({ ...x, href: gh(x.name) })), { name: 'No priority', n: Math.max(0, l.open - prioritized), href: without(prio.map((x) => x.name)), none: 'muted' }],
-      },
-      ...c.labelGroups.map((g): Group => {
-        const none = missing.get(g.id) ?? 0;
-        const runs = o.runs ? `${o.runs}?what=labels&group=${encodeURIComponent(g.id)}` : null;
-        return {
-          key: `g-${g.id}`, name: g.name, kind: 'custom labels', open: true, empty: 'No labels in this category.',
-          cover: { labelled: Math.max(0, l.open - none), word: 'labelled', hatch: 'warn' },
-          backfill: runs && none ? { href: runs, none, name: g.name } : null,
-          rows: [...g.options.map((x) => ({ name: x.label, n: has(x.label), href: gh(x.label) })).sort(byCount), { name: 'None yet', n: none, href: without(g.options.map((x) => x.label)), none: 'warn' }],
-        };
-      }),
-      { key: 'triage', name: 'From triage', kind: 'its own labels', open: false, empty: 'Triage adds no labels of its own.', rows: flagLabels.map((x) => ({ name: x, n: has(x), href: gh(x) })).sort(byCount) },
-      { key: 'other', name: 'Your other labels', short: 'Other', kind: 'added by people or ticket types', open: false, empty: 'None.', rows: others.slice(0, 50).map((x) => ({ ...x, href: gh(x.name) })) },
-    ];
-
-    const share = (x: number) => (x ? Math.max(0.6, (x / l.open) * 100) : 0);
-    const row = (r: Row) => html`<li ${r.none ? '' : html`data-lt-name="${r.name.toLowerCase()}"`}>
-      <a class="lt-row${r.n ? '' : ' zero'}" href="${r.href}" target="_blank" rel="noopener noreferrer" aria-label="${`${r.name}: ${n(r.n)} open issues, ${pct(r.n, l.open)}. See them on GitHub`}">
-        <span class="lt-l">${r.none ? html`<span class="lt-nolabel ${r.none}">${r.name}</span>` : labelTag(r.name)}</span>
-        <span class="lt-n">${n(r.n)}</span>
-        <span class="lt-bar"><span class="lt-track">${meter([r.none ? { pct: share(r.n), hatch: r.none } : { pct: share(r.n), cls: 'lt-fill' }])}</span><span class="lt-pct">${pct(r.n, l.open)}</span></span>
-        <span class="lt-go">${icon('arrow-up-right', 14)}</span>
-      </a>
-    </li>`;
-    const group = (g: Group) => {
-      const labels = g.rows.filter((r) => !r.none);
-      const top = [...labels].sort(byCount).slice(0, 3);
-      const cover = g.cover;
-      const done = cover && l.open ? (cover.labelled / l.open) * 100 : 0;
-      return html`<details class="lt-group" data-lt-group="${g.key}" ${g.open ? raw('open') : ''}>
-        <summary class="lt-gh">
-          <span class="lt-chev" aria-hidden="true">${icon('chevron-right', 14)}</span>
-          <span class="lt-gname">${g.name}</span>
-          <span class="lt-kind">${g.kind}</span>
-          ${cover ? html`<span class="lt-cov${done < 50 ? ' low' : ''}" title="${`${n(cover.labelled)} of ${n(l.open)} open issues`}"><span class="lt-cov-bar">${meter([{ pct: done, cls: 'lt-cov-fill' }, { pct: 100 - done, hatch: cover.hatch }])}</span><b>${pct(cover.labelled, l.open)}</b> ${cover.word}</span>` : ''}
-          ${labels.length ? html`<span class="lt-sum">${plural(labels.length, 'label')}${top.map((t) => html` · ${t.name} <b>${n(t.n)}</b>`)}${labels.length > 3 ? ` · +${String(labels.length - 3)} more` : ''}</span>` : ''}
-          ${g.backfill ? html`<span class="lt-act">${linkBtn(g.backfill.href, `Backfill ${n(g.backfill.none)}`, { size: 'sm', variant: 'secondary', icon: 'history', title: `Add ${g.backfill.name} labels to the open tickets and issues that have none` })}</span>` : ''}
-        </summary>
-        ${g.rows.length ? html`<ul class="lt-rows">${g.rows.map(row)}</ul>` : html`<p class="lt-nil">${g.empty}</p>`}
-      </details>`;
-    };
-    const noCustom = c.labelGroups.length ? '' : html`<div class="lt-empty" data-lt-extra>${empty('tags', 'No custom labels yet', html`Sort every ticket into your own labels, such as bug, parity or plugins.`, canOpen(ctx.membership, 'triage.labels') ? linkBtn(areaHref(ctx, 'triage.labels'), 'Add custom labels', { size: 'sm', trail: 'arrow-right' }) : null)}</div>`;
+    // A label, or what has none of a category's labels (`none`).
+    const row = (r: { name: string; n: number; href: string; none?: 'warn' | 'muted' }): TableRow => ({
+      label: r.none ? html`<span class="lt-nolabel ${r.none}">${r.name}</span>` : labelTag(r.name),
+      find: r.none ? undefined : r.name.toLowerCase(),
+      count: n(r.n),
+      bar: [r.none ? { pct: of(r.n, l.open), hatch: r.none } : { pct: of(r.n, l.open), cls: 'lt-fill' }],
+      share: pct(r.n, l.open),
+      link: { href: r.href, external: true, aria: `${r.name}: ${n(r.n)} open issues, ${pct(r.n, l.open)}. See them on GitHub` },
+      zero: !r.n,
+    });
+    const labelled = (labels: { name: string; n: number }[]) => topSummary(labels, 'label');
+    const items: (TableGroup | SafeHtml)[] = [{
+      key: 'priority', name: 'Priority', kind: 'set by triage', open: true, empty: '',
+      extra: coverage(prioritized, l.open, 'have one', 'muted', `${n(prioritized)} of ${n(l.open)} open issues`),
+      summary: labelled(prio),
+      rows: [...prio.map((x) => row({ ...x, href: gh(x.name) })), row({ name: 'No priority', n: Math.max(0, l.open - prioritized), href: without(prio.map((x) => x.name)), none: 'muted' })],
+    }];
+    if (!c.labelGroups.length) {
+      items.push(html`<div class="lt-empty" data-lt-extra>${empty('tags', 'No custom labels yet', html`Sort every ticket into your own labels, such as bug, parity or plugins.`, canOpen(ctx.membership, 'triage.labels') ? linkBtn(areaHref(ctx, 'triage.labels'), 'Add custom labels', { size: 'sm', trail: 'arrow-right' }) : null)}</div>`);
+    }
+    for (const g of c.labelGroups) {
+      const none = missing.get(g.id) ?? 0;
+      const done = Math.max(0, l.open - none);
+      const labels = g.options.map((x) => ({ name: x.label, n: has(x.label) })).sort(byCount);
+      items.push({
+        key: `g-${g.id}`, name: g.name, kind: 'custom labels', open: true, empty: 'No labels in this category.',
+        extra: coverage(done, l.open, 'labelled', 'warn', `${n(done)} of ${n(l.open)} open issues`),
+        summary: labelled(labels),
+        action: o.runs && none ? linkBtn(`${o.runs}?what=labels&group=${encodeURIComponent(g.id)}`, `Backfill ${n(none)}`, { size: 'sm', variant: 'secondary', icon: 'history', title: `Add ${g.name} labels to the open tickets and issues that have none` }) : null,
+        rows: [...labels.map((x) => row({ ...x, href: gh(x.name) })), row({ name: 'None yet', n: none, href: without(g.options.map((x) => x.label)), none: 'warn' })],
+      });
+    }
+    const flags = flagLabels.map((x) => ({ name: x, n: has(x) })).sort(byCount);
+    const rest = others.slice(0, 50);
+    items.push(
+      { key: 'triage', name: 'From triage', kind: 'its own labels', open: false, empty: 'Triage adds no labels of its own.', summary: labelled(flags), rows: flags.map((x) => row({ ...x, href: gh(x.name) })) },
+      { key: 'other', name: 'Your other labels', short: 'Other', kind: 'added by people or ticket types', open: false, empty: 'None.', summary: labelled(rest), rows: rest.map((x) => row({ ...x, href: gh(x.name) })) },
+    );
 
     return html`<section class="card an-card ov-labels" aria-labelledby="ov-labels-h">
       <div class="an-ch"><h2 id="ov-labels-h">Labels on open issues</h2><span class="small muted">${n(l.open)} open issues · as on GitHub now · click a label to see its issues</span>
         ${canOpen(ctx.membership, 'triage.labels') ? html`<span class="ov-ch-a">${linkBtn(areaHref(ctx, 'triage.labels'), 'Custom labels', { size: 'sm', variant: 'ghost', trail: 'arrow-right' })}</span>` : ''}</div>
-      ${l.open ? html`<div class="lt" data-lt>${meterDefs()}
-        <div class="lt-tools" data-lt-tools hidden>
-          <div class="seg" role="group" aria-label="Show">${[{ key: 'all', label: 'All' }, ...groups.map((g) => ({ key: g.key, label: g.short ?? g.name }))].map((s) => html`<button type="button" class="seg-item" data-lt-show="${s.key}" aria-pressed="${s.key === 'all' ? 'true' : 'false'}">${s.label}</button>`)}</div>
-          <span class="search sm">${icon('search', 14)}<input type="search" placeholder="Find a label" aria-label="Find a label" data-lt-find></span>
-        </div>
-        <div class="lt-table">
-          <div class="lt-head" aria-hidden="true"><span>Label</span><span class="lt-n">Open issues</span><span class="lt-bar"><span class="lt-scale"><i>0</i><i class="t25">25%</i><i class="t50">50%</i><i class="t75">75%</i><i class="t100">100%</i></span><span class="lt-pct">Share</span></span><span></span></div>
-          ${groups[0] ? group(groups[0]) : ''}${noCustom}${groups.slice(1).map(group)}
-          <p class="lt-nil lt-nomatch" data-lt-none hidden>No label matches.</p>
-        </div>
-      </div>` : html`<p class="small muted ov-none">No open issues${o.app ? ' in this app’s repository' : ''}, or the issue sync hasn’t run yet.</p>`}
+      ${l.open
+        ? groupTable({ name: 'labels', head: ['Label', 'Open issues', 'Share'], items, find: 'Find a label', nothing: 'No label matches.' })
+        : html`<p class="small muted ov-none">No open issues${o.app ? ' in this app’s repository' : ''}, or the issue sync hasn’t run yet.</p>`}
     </section>`;
   }
 
-  function actionsCard(c: TriageConfig, d: TriageOverview): SafeHtml {
-    const rows = d.actions.filter((a) => a.applied + a.suggested > 0);
-    const most = Math.max(1, ...rows.map((a) => a.applied + a.suggested));
-    return html`<section class="card an-card" aria-labelledby="ov-act-h">
-      <div class="an-ch"><h2 id="ov-act-h">What triage did</h2><span class="small muted"><span class="ov-key a"></span>applied <span class="ov-key s"></span>suggested</span></div>
-      ${rows.length
-        ? html`<ul class="ov-bars two">${rows.map((a) => html`<li><div class="ov-bar">
-            <span class="ov-bar-l">${actionTitle(c, a.kind, a.category)}</span>
-            <span class="ov-bar-t">${meter([{ pct: (a.applied / most) * 100, cls: 'a' }, { pct: (a.suggested / most) * 100, cls: 's' }], { h: 8 })}</span>
-            <span class="ov-bar-n"><b>${n(a.applied)}</b>${a.suggested ? html`<span class="muted">+${n(a.suggested)}</span>` : ''}</span>
-          </div></li>`)}</ul>`
+  /**
+   * What triage did in the period, a group each: its actions (applied, and suggested ones still
+   * waiting in Review), the priority it gave, how sure it was, what it skipped and, for all apps,
+   * each app (which opens the page on that app).
+   */
+  function activityCard(ctx: WorkspaceRequestContext, c: TriageConfig, d: TriageOverview, o: { apps: { id: string; name: string; repo_id: number }[]; picked: string | null; range: (typeof RANGES)[number]; app: (id: string) => string }): SafeHtml {
+    const read = d.total;
+    const review = canOpen(ctx.membership, 'triage.review') ? areaHref(ctx, 'triage.review') : null;
+    const acts = d.actions.filter((a) => a.applied + a.suggested > 0).map((a) => ({ ...a, name: actionTitle(c, a.kind, a.category), n: a.applied + a.suggested }));
+    const prio = PRIORITIES.map((p) => ({ p, name: p, n: d.priority[p] ?? 0 }));
+    const prioTotal = prio.reduce((t, x) => t + x.n, 0);
+    const sure = d.confidence.map((b) => ({ name: b.band, n: b.n }));
+    const sureTotal = sure.reduce((t, b) => t + b.n, 0);
+    const skipped = d.skipped.map((r) => ({ name: r.reason, n: r.n }));
+    const skippedTotal = skipped.reduce((t, r) => t + r.n, 0);
+    const byRepo = new Map<number, { id: string; name: string }[]>();
+    for (const a of o.apps) byRepo.set(a.repo_id, [...(byRepo.get(a.repo_id) ?? []), a]);
+    const perApp = [...byRepo].map(([repo, list]) => ({ id: list[0]!.id, name: list.map((a) => a.name).join(', '), ...(d.byRepo.get(repo) ?? { triaged: 0, applied: 0 }) })).sort((x, y) => y.triaged - x.triaged);
+    const plain = (x: { name: string; n: number }, whole: number, cls = 'lt-fill'): TableRow => ({ label: x.name, count: n(x.n), bar: [{ pct: of(x.n, whole), cls }], share: pct(x.n, whole), zero: !x.n });
+
+    const items: TableGroup[] = [
+      {
+        key: 'actions', name: 'Actions', kind: `of the ${n(read)} read`, open: true, empty: 'Nothing in this period.',
+        extra: html`<span class="lt-keys" aria-hidden="true"><i class="lt-key a"></i>applied<i class="lt-key s"></i>waiting in Review</span>`,
+        summary: topSummary(acts),
+        action: review && d.review ? linkBtn(review, `Review ${n(d.review)}`, { size: 'sm', variant: 'secondary', icon: 'inbox', title: 'Tickets and issues with suggestions waiting for someone' }) : null,
+        rows: acts.map((a) => ({
+          label: a.name,
+          count: html`${n(a.applied)}${a.suggested ? html`<span class="lt-plus" title="Waiting in Review">+${n(a.suggested)}</span>` : ''}`,
+          bar: [{ pct: of(a.applied, read), cls: 'lt-fill' }, { pct: of(a.suggested, read), cls: 'lt-wait' }],
+          share: pct(a.n, read),
+        })),
+      },
+      {
+        key: 'priority', name: 'Priority it gave', short: 'Priority', kind: `of the ${n(prioTotal)} it gave one`, open: true, empty: 'Nothing in this period.',
+        summary: topSummary(prio),
+        rows: prio.map((x) => ({ ...plain(x, prioTotal), label: html`<span class="lt-prio"><span class="ov-dot ${PRIORITY_TONE[x.p]}"></span>${x.p}</span>` })),
+      },
+      {
+        key: 'sure', name: 'How sure it was', short: 'How sure', kind: `automatic at ${String(c.threshold)}%+`, open: false, empty: 'Nothing in this period.',
+        summary: topSummary(sure),
+        rows: sure.map((x) => plain(x, sureTotal)),
+      },
+      {
+        key: 'skipped', name: 'Skipped', kind: `${n(skippedTotal)} not triaged`, open: skippedTotal > 0, empty: 'Nothing was skipped in this period.',
+        summary: topSummary(skipped),
+        rows: skipped.map((x) => plain(x, skippedTotal, 'lt-skip')),
+      },
+    ];
+    if (!o.picked) {
+      items.push({
+        key: 'apps', name: 'By app', kind: `of the ${n(read)} read · open one to see only it`, open: true, empty: 'No apps yet.',
+        summary: topSummary(perApp.map((a) => ({ name: a.name, n: a.triaged })), 'app'),
+        rows: perApp.slice(0, 30).map((a) => ({
+          ...plain({ name: a.name, n: a.triaged }, read),
+          label: html`${a.name}${a.applied ? html`<span class="lt-sub">${n(a.applied)} actions</span>` : ''}`,
+          link: { href: o.app(a.id), external: false, aria: `${a.name}: ${n(a.triaged)} read, ${pct(a.triaged, read)}. Show only ${a.name}` },
+        })),
+      });
+    }
+    const when = o.range === 'all' ? 'since triage was turned on' : `in the last ${RANGE_NAMES[o.range]}`;
+    return html`<section class="card an-card ov-did" aria-labelledby="ov-did-h">
+      <div class="an-ch"><h2 id="ov-did-h">What triage did</h2><span class="small muted">${o.picked ? o.apps.find((a) => a.id === o.picked)?.name ?? 'this app' : 'all apps'} · tickets and issues Claude read ${when}</span></div>
+      ${read || skippedTotal
+        ? groupTable({ name: 'what triage did', head: ['', 'Tickets', 'Share'], items })
         : html`<p class="small muted ov-none">Nothing in this period.</p>`}
-    </section>`;
-  }
-
-  function sureCard(c: TriageConfig, d: TriageOverview): SafeHtml {
-    const total = d.confidence.reduce((t, b) => t + b.n, 0);
-    const prio = PRIORITIES.map((p) => ({ p, n: d.priority[p] ?? 0 }));
-    const read = prio.reduce((t, x) => t + x.n, 0);
-    return html`<section class="card an-card" aria-labelledby="ov-sure-h">
-      <div class="an-ch"><h2 id="ov-sure-h">Priority Claude gave</h2><span class="small muted">automatic at ${String(c.threshold)}%+</span></div>
-      ${read
-        ? html`${bars(prio.map((x) => ({ label: html`<span class="ov-dot ${PRIORITY_TONE[x.p]}"></span>${x.p}`, n: x.n, tone: PRIORITY_TONE[x.p] })), { of: read, empty: '' })}
-          <h3 class="ov-sub">How sure it was</h3>
-          ${bars(d.confidence.map((b) => ({ label: b.band, n: b.n, tone: 'conf' })), { of: total, empty: '' })}`
-        : html`<p class="small muted ov-none">Nothing in this period.</p>`}
-    </section>`;
-  }
-
-  function skippedCard(d: TriageOverview): SafeHtml {
-    const total = d.skipped.reduce((t, r) => t + r.n, 0);
-    return html`<section class="card an-card" aria-labelledby="ov-skip-h">
-      <div class="an-ch"><h2 id="ov-skip-h">Skipped</h2><span class="small muted">${n(total)} not triaged</span></div>
-      ${bars(d.skipped.map((r) => ({ label: r.reason, n: r.n, tone: 'skip' })), { of: total, empty: 'Nothing was skipped in this period.' })}
-    </section>`;
-  }
-
-  function appsCard(apps: { id: string; name: string; repo_id: number }[], d: TriageOverview): SafeHtml {
-    const byRepo = new Map<number, string[]>();
-    for (const a of apps) byRepo.set(a.repo_id, [...(byRepo.get(a.repo_id) ?? []), a.name]);
-    const rows = [...byRepo].map(([repo, names]) => ({ name: names.join(', '), ...(d.byRepo.get(repo) ?? { triaged: 0, applied: 0 }) })).sort((a, b) => b.triaged - a.triaged);
-    return html`<section class="card an-card" aria-labelledby="ov-apps-h">
-      <div class="an-ch"><h2 id="ov-apps-h">By app</h2><span class="small muted">read in this period</span></div>
-      ${bars(rows.map((r) => ({ label: r.name, n: r.triaged, note: r.applied ? `${n(r.applied)} actions` : undefined })), { of: d.total, empty: 'Nothing in this period.', max: 30 })}
     </section>`;
   }
 }
-
