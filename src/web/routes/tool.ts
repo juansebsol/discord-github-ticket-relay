@@ -4,7 +4,6 @@
  * page of a tool shares. Addresses from before the tools had their own place still work.
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { announcementCounts, getAnnouncementSettings } from '../../announcements/settings.js';
 import { checkContributorPanel, getContributorSettings } from '../../domain/contributors.js';
 import type { Queryable } from '../../db/database.js';
 import { checkPanel, type PanelState } from '../../domain/panel.js';
@@ -46,9 +45,10 @@ export const AREA_PATHS: Record<Area, string> = {
   'contributor-roles': '/contributors/roles',
   'contributor-panel': '/contributors/panel',
   'announcements': '/announcements',
-  'announcement-settings': '/announcements/settings',
-  'announcement-pings': '/announcements/pings',
   'known-issues': '/bot/known-issues',
+  'releases': '/bot/releases',
+  'release-settings': '/bot/releases/settings',
+  'release-pings': '/bot/releases/pings',
   'apps': '/apps',
   'health': '/health',
 };
@@ -110,10 +110,13 @@ export async function repoSyncState(db: Queryable, repoIds: readonly number[]): 
   return { problem, loading, oldest, text: repoIds.length ? `${plural(repoIds.length, 'repository', 'repositories')} · ${state}` : 'No repositories yet' };
 }
 
-/** Where a tool's sidebar item and breadcrumb go: the first of its pages this person can open. */
+/**
+ * Where a tool's sidebar item and breadcrumb go: the first of its pages this person can open (Bot
+ * features: its page listing the features).
+ */
 export function toolHref(ctx: Pick<WorkspaceRequestContext, 'base' | 'membership'>, tool: Tool): string | null {
   const first = firstPage(ctx.membership, tool);
-  return first ? areaHref(ctx, first) : null;
+  return first ? (tool === 'bot' ? `${ctx.base}/bot` : areaHref(ctx, first)) : null;
 }
 
 /** A link to a page, or just its text for someone who can't open it. */
@@ -140,10 +143,11 @@ const VIEW_ONLY: Partial<Record<Area, string>> = {
   'ticket-settings': 'You can see the spam and duplicate limits. Ask an admin if you need to change them.',
   'contributor-roles': 'You can see the roles and what counts. Ask an admin if you need to change them.',
   'contributor-panel': 'You can see the panel and its preview. Ask an admin if you need to change, publish or remove it.',
-  'announcements': 'You can see the releases and their posts. Posting, editing and skipping them need Edit on Posts. Ask an admin if you need it.',
-  'announcement-settings': 'You can see how announcements are set up. Ask an admin if you need to change it.',
-  'announcement-pings': 'You can see the pings message and its preview. Ask an admin if you need to change, publish or remove it.',
-  'known-issues': 'You can see the known-issues board and its settings. Changing them, pinning or hiding issues, and publishing need Edit on Known issues. Ask an admin if you need it.',
+  'announcements': 'You can see the announcements and where they were posted. Writing, posting and deleting them need Edit on Announcements. Ask an admin if you need it.',
+  'known-issues': 'You can see the known-issues board and its settings. Changing them, pinning or hiding issues, and publishing need Edit on the Known-issues board. Ask an admin if you need it.',
+  'releases': 'You can see the releases and their posts. Posting, editing and skipping them need Edit on GitHub releases. Ask an admin if you need it.',
+  'release-settings': 'You can see how GitHub releases are set up. Ask an admin if you need to change it.',
+  'release-pings': 'You can see the pings message and its preview. Ask an admin if you need to change, publish or remove it.',
   'health': 'You can see how the server is doing. Switching Dev mode needs Edit on Server health. Ask an admin if you need it.',
 };
 
@@ -219,12 +223,11 @@ async function toolState(web: Web, ctx: WorkspaceRequestContext, tool: ToolName,
     };
   }
   if (tool === 'announcements') {
-    const [s, counts] = await Promise.all([getAnnouncementSettings(db, wid), announcementCounts(db, wid)]);
     return {
-      status: !s.enabled ? pill('Off', 'neutral') : s.mode === 'auto' ? pill('Automatic', 'ok') : pill('Review first', 'ok'),
-      description: `Posts each app’s new GitHub releases in Discord${s.channelName ? ` (#${s.channelName})` : ''}, with release notes Claude makes friendlier and an optional role ping.`,
+      status: '',
+      description: 'Write a message, pick the channels, and the bot posts it there. Change it or delete it later, everywhere at once.',
       actions: [],
-      counts: { announcements: counts.waiting + counts.failed },
+      counts: {},
     };
   }
   const [settings, conn] = await Promise.all([getContributorSettings(db, wid), getDiscordConnection(db, wid)]);
@@ -303,4 +306,9 @@ export function registerMovedRoutes(app: FastifyInstance): void {
   moved('/tickets/issues/triage', () => '/issues/github');
   moved('/tickets/issues/sync', () => '/issues/sync');
   moved('/tickets/issues/*', (rest) => (rest ? `/issues/${rest}` : '/issues'));
+  // GitHub releases were Announcements before Announcements became the team's own messages.
+  moved('/announcements/settings', () => '/bot/releases/settings');
+  moved('/announcements/test', () => '/bot/releases/test');
+  moved('/announcements/pings', () => '/bot/releases/pings');
+  moved('/announcements/pings/remove', () => '/bot/releases/pings/remove');
 }

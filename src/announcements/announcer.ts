@@ -3,7 +3,7 @@
  * (GraphQL, on the budget filing doesn't use), has Claude write friendlier notes, and posts them in
  * Discord: right away in Automatic mode, or when someone posts them in Review first. Runs in the
  * triage worker's polling loop, like Repo status and Analytics. A release counts once per
- * workspace and repository; only releases published after Announcements was turned on are new.
+ * workspace and repository; only releases published after GitHub releases was turned on are new.
  */
 import { randomUUID } from 'node:crypto';
 import type { Queryable } from '../db/database.js';

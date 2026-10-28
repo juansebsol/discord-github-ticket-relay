@@ -24,7 +24,7 @@ export interface Queryable {
 }
 
 const DATE_COLUMN = /(^|_)at$/;
-const JSON_COLUMNS = new Set(['labels', 'warnings', 'data', 'detail', 'triage_config', 'verdict', 'applied_actions', 'suggestions', 'form', 'last_run_summary', 'stats', 'auto_actions', 'before', 'scope', 'config_used', 'filter', 'access', 'auto_sources', 'auto_answers', 'auto_live', 'closes', 'team_answers', 'raw', 'repos', 'mentions', 'release_files', 'buttons', 'app_ids', 'status_text']);
+const JSON_COLUMNS = new Set(['labels', 'warnings', 'data', 'detail', 'triage_config', 'verdict', 'applied_actions', 'suggestions', 'form', 'last_run_summary', 'stats', 'auto_actions', 'before', 'scope', 'config_used', 'filter', 'access', 'auto_sources', 'auto_answers', 'auto_live', 'closes', 'team_answers', 'raw', 'repos', 'mentions', 'release_files', 'buttons', 'app_ids', 'status_text', 'targets']);
 const BOOLEAN_COLUMNS = new Set(['enabled', 'repo_private', 'contributor_enabled', 'auto_cleanup', 'closed_enabled', 'spam_enabled', 'age_enabled', 'apply_suggestions', 'apply_inbox_only', 'github_enabled', 'draft', 'include_prereleases', 'notes_button', 'ping_enabled', 'manual', 'include_private', 'group_by_app', 'show_counts', 'report_button', 'pinned', 'hidden']);
 
 function toParam(value: unknown): unknown {

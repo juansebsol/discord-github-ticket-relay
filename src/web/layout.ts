@@ -115,10 +115,10 @@ export function layout(ctx: PageContext, opts: { title: string; active: string; 
   const a = opts.active;
   const attention = p?.attention ? badge(p.attention) : '';
   const manage = access ? can(access, 'manage') : false;
-  /** A tool opens on the first of its pages this person can see; with none, it's locked. */
+  /** A tool opens on the first of its pages this person can see (Bot features: its list); with none, it's locked. */
   const tool = (m: MemberAccess, name: ToolName, trail: SafeHtml | string = '') => {
     const first = firstPage(m, name);
-    return first ? navItem(areaHref(base, first), TOOL_NAMES[name], TOOL_ICONS[name], a === name, trail) : lockedNavItem(TOOL_NAMES[name], TOOL_ICONS[name], { grantable: true });
+    return first ? navItem(name === 'bot' ? `${base}/bot` : areaHref(base, first), TOOL_NAMES[name], TOOL_ICONS[name], a === name, trail) : lockedNavItem(TOOL_NAMES[name], TOOL_ICONS[name], { grantable: true });
   };
   const review = access && p?.review && can(access, 'triage.review.view') ? badge(p.review, 'accent', `${String(p.review)} to review`) : '';
 

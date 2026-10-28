@@ -38,6 +38,7 @@ import { registerTriageBulkRoutes } from './routes/triage-bulk.js';
 import { registerContributorRoutes } from './routes/contributors.js';
 import { registerAnnouncementRoutes } from './routes/announcements.js';
 import { registerBotFeatureRoutes } from './routes/bot-features.js';
+import { registerBotRoutes } from './routes/bot.js';
 import { registerTicketTypeRoutes } from './routes/ticket-types.js';
 import { registerFileRoutes, UPLOAD_ROUTE } from './routes/files.js';
 import { registerIssueRoutes } from './routes/issues.js';
@@ -47,6 +48,7 @@ import { registerHealthRoutes } from './routes/health.js';
 import { registerAlertRoutes } from './routes/alerts.js';
 import { registerTriageReviewRoutes } from './routes/triage-review.js';
 import { registerTriageOverviewRoutes } from './routes/triage-overview.js';
+import { registerReleaseRoutes } from './routes/releases.js';
 import { registerMovedRoutes } from './routes/tool.js';
 import { MAX_FILE_BYTES } from '../domain/files.js';
 
@@ -285,7 +287,9 @@ export async function buildServer(deps: Deps, processor: Processor, opts: { logg
   registerMemberRoutes(app, web);
   registerContributorRoutes(app, web);
   registerAnnouncementRoutes(app, web);
+  registerBotRoutes(app, web);
   registerBotFeatureRoutes(app, web);
+  registerReleaseRoutes(app, web);
   registerTicketTypeRoutes(app, web);
   registerFileRoutes(app, web);
   registerIssueRoutes(app, web);

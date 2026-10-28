@@ -1,898 +1,344 @@
 /**
- * Announcements: each app's new GitHub releases posted in Discord. Posts lists the releases (the
- * ones waiting to be posted first) and each one has its own page to check the notes, edit them and
- * post; Settings chooses review first or automatic, the channel, the notes, the message and pings;
- * Pings panel posts the message members use to get (or drop) the ping roles.
+ * Announcements: write a message, pick the channels, and the bot posts it there. The list has the
+ * drafts and what was posted where; each one opens in the editor beside a preview, to post it,
+ * change it everywhere at once, or delete it from Discord (it becomes a draft again).
  */
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import {
-  announceManually,
-  CHECK_MS,
-  deletePost,
-  postNow,
-  readReleases,
-  rewriteNotes,
-  updatePost,
-  viewOf,
-  type GitHubRelease,
-} from '../../announcements/announcer.js';
-import { announcementPayload, EMPTY_NOTES, githubNotes, NOTES_MAX, resolveButtons, resolveLink, suggestButton, templates, varsFor, type ReleaseView } from '../../announcements/message.js';
-import { classifyAsset } from '../../analytics/assets.js';
-import { checkPingPanel, publishPingPanel, unpublishPingPanel, workspacePingRoles, type PingRole } from '../../announcements/pings.js';
-import {
-  announcedRepos,
-  appAnnounceSettings,
-  APP_DEFAULTS,
-  BUTTON_LIMITS,
-  BUTTONS_MAX,
-  getAnnouncement,
-  getAnnouncementSettings,
-  INSTRUCTIONS_MAX,
-  listAnnouncements,
-  NOTES_BUTTON_DEFAULT,
-  PANEL_DEFAULTS,
-  PANEL_LIMITS,
-  PLACEHOLDERS,
-  saveAnnouncementSettings,
-  saveAppAnnounceSettings,
-  targetFor,
-  TEMPLATE_DEFAULTS,
-  TEMPLATE_LIMITS,
-  type AnnounceButton,
-  type AnnouncementRow,
-  type AnnouncementSettings,
-  type AnnouncementStatus,
-  type AppAnnounceSettings,
-  type RoleMode,
-} from '../../announcements/settings.js';
-import { resolveClaudeKey } from '../../domain/claude-key.js';
+  CARD_COLOR_IDS,
+  CARD_COLORS,
+  deleteDraft,
+  getPost,
+  hasBody,
+  listPosts,
+  POST_BUTTONS_MAX,
+  POST_CHANNELS_MAX,
+  POST_LIMITS,
+  postCounts,
+  publishPost,
+  savePost,
+  unpublishPost,
+  updatePosted,
+  type CardColor,
+  type PostButton,
+  type PostInput,
+  type PostRow,
+} from '../../announcements/posts.js';
+import { getAnnouncement } from '../../announcements/settings.js';
 import { inspectRoles, type RoleInspection } from '../../domain/contributors.js';
 import { inspectGuild, type GuildAccess } from '../../domain/discord-checks.js';
 import { can } from '../../domain/permissions.js';
-import { getDiscordConnection, getGitHubConnection, listApps } from '../../domain/store.js';
-import { UserFacingError, type AppRow } from '../../domain/types.js';
+import { getDiscordConnection } from '../../domain/store.js';
+import { UserFacingError } from '../../domain/types.js';
 import { html, raw, type SafeHtml } from '../../lib/html.js';
-import { botIdentity, botMessage, discordMd, previewCaption, type BotIdentity } from '../discord-preview.js';
+import { botIdentity, botMessage, discordMd, previewCaption } from '../discord-preview.js';
 import { setFlash } from '../session.js';
 import type { Web, WorkspaceRequestContext } from '../server.js';
-import {
-  choices,
-  csrfField,
-  empty,
-  icon,
-  linkBtn,
-  pageHeader,
-  pill,
-  plural,
-  segLinks,
-  selectWrap,
-  setting,
-  submitBtn,
-  switchInput,
-  tag,
-  timeAgo,
-  viewOnlyTag,
-  when,
-  type Tone,
-} from '../ui.js';
-import { checklist, textField } from './panel.js';
-import { areaHref, canOpen, landOn, pageLink, toolHeader, toolHref, viewOnlyText } from './tool.js';
+import { csrfField, empty, icon, linkBtn, notice, pageHeader, pill, plural, segLinks, segRadios, selectWrap, submitBtn, tag, timeAgo, viewOnlyTag } from '../ui.js';
+import { textField } from './panel.js';
+import { landOn, toolHeader, toolHref, viewOnlyText } from './tool.js';
 import { viewOnlyFooter } from './triage.js';
 
-type Check = { status: 'ok' | 'warning' | 'error'; title: string; detail?: string; fix?: { label: string; href: string } };
-
-const STATUS: Record<AnnouncementStatus, { label: string; tone: Tone }> = {
-  writing: { label: 'Writing notes', tone: 'neutral' },
-  waiting: { label: 'Waiting to post', tone: 'warn' },
-  posting: { label: 'Posting', tone: 'neutral' },
-  posted: { label: 'Posted', tone: 'ok' },
-  failed: { label: 'Failed', tone: 'danger' },
-  skipped: { label: 'Skipped', tone: 'closed' },
-};
-const NOTES_BY: Record<string, string> = { claude: 'Claude', github: 'GitHub', edited: 'Edited' };
-
 const SHOWS = [
-  { key: 'all', label: 'All', statuses: null },
-  { key: 'waiting', label: 'To post', statuses: ['writing', 'waiting', 'posting', 'failed'] },
-  { key: 'posted', label: 'Posted', statuses: ['posted'] },
-  { key: 'skipped', label: 'Skipped', statuses: ['skipped'] },
+  { key: 'all', label: 'All' },
+  { key: 'draft', label: 'Drafts' },
+  { key: 'posted', label: 'Posted' },
 ] as const;
-
-const SAMPLE_NOTES = '- **Faster exports**: big projects save in half the time\n- You can now pick where new files are saved\n- Several crash fixes';
 
 /** JSON for app.js (role id → name), safe to embed in a non-executed script element. */
 function roleNamesJson(names: Map<string, string>): SafeHtml {
   return raw(`<script type="application/json" id="role-names">${JSON.stringify(Object.fromEntries(names)).replace(/</g, '\\u003c')}</script>`);
 }
 
-/** Data for a non-executed attribute, read by app.js. */
-const json = (v: unknown) => JSON.stringify(v);
-
-/**
- * An announcement as members will see it. The template parts carry their template and the values
- * (data-tpl, data-tpl-vars), and the buttons the release (data-tpl-release), so app.js redraws them
- * while the fields are edited.
- */
-function announcementPreview(bot: BotIdentity, r: ReleaseView, s: Pick<AnnouncementSettings, 'messageText' | 'titleText' | 'bodyText' | 'buttons' | 'notesButton' | 'notesButtonLabel'>, roleId: string | null, roleNames: Map<string, string>): SafeHtml {
-  const t = templates(s);
-  const vars = varsFor(r, roleId);
-  const payload = announcementPayload(r, s, roleId);
-  const embed = payload.embeds[0]!;
-  const labels = payload.components.flatMap((row) => row.components.map((b) => b.label));
-  const arrow = icon('arrow-up-right', 14);
-  return html`<div data-tpl-vars="${json(vars)}" data-tpl-release="${json({ appId: r.appId, appName: r.appName, tag: r.tag, releaseUrl: r.releaseUrl, files: r.files })}">${botMessage(bot, html`
-    <div class="dp-content" id="pv-message" data-tpl="${t.message}" ${payload.content ? '' : raw('hidden')}>${discordMd(payload.content, roleNames)}</div>
-    <div class="dp-embed">
-      <h4 id="pv-title" data-tpl="${t.title}" data-tpl-plain ${'title' in embed ? '' : raw('hidden')}><span class="dp-a">${'title' in embed ? embed.title : ''}</span></h4>
-      <p id="pv-body" data-tpl="${t.body}">${discordMd('description' in embed ? String(embed.description) : '', roleNames)}</p>
-      ${r.publishedAt ? html`<div class="dp-time">${r.publishedAt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' })}</div>` : ''}
-    </div>
-    <div class="dp-buttons" id="pv-buttons" data-arrow="${arrow.toString()}" ${labels.length ? '' : raw('hidden')}>${labels.map((l) => html`<span class="dp-button grey">${l}${arrow}</span>`)}</div>`, 'Preview of the announcement in Discord')}</div>`;
+/** What the list shows for it: the message's first line, or else the card's title. */
+function headline(p: Pick<PostRow, 'content' | 'card_title' | 'card_text'>): string {
+  const first = (t: string | null | undefined) => (t ?? '').split('\n').map((l) => l.replace(/^#+\s*|[*_`~>]/g, '').trim()).find(Boolean) ?? '';
+  return first(p.content) || first(p.card_title) || first(p.card_text) || 'Empty announcement';
 }
 
-/** The buttons as sent from Settings (rows left empty are dropped). Throws when one is half filled in or its link can't work. */
-function buttonsFrom(body: Record<string, unknown>, apps: AppRow[]): AnnounceButton[] {
-  const list = (v: unknown) => (v === undefined ? [] : Array.isArray(v) ? v.map(String) : [String(v)]);
-  const urls = list(body.btn_url);
-  const appIds = list(body.btn_app);
-  const buttons = list(body.btn_label)
-    .map((label, i) => ({ label: label.trim().slice(0, BUTTON_LIMITS.label), url: (urls[i] ?? '').trim().slice(0, BUTTON_LIMITS.url), appId: apps.some((a) => a.id === appIds[i]) ? appIds[i]! : null }))
-    .filter((b) => b.label || b.url);
-  for (const b of buttons) {
-    if (!b.label) throw new UserFacingError('Give every button a label.');
-    if (!b.url) throw new UserFacingError(`Give the “${b.label}” button a link.`);
-    if (!/^(https?:\/\/|\{(file:|link\}))/i.test(b.url)) throw new UserFacingError(`The “${b.label}” button’s link must start with https://, {link} or {file:…}.`);
-  }
-  if (buttons.length > BUTTONS_MAX) throw new UserFacingError(`Up to ${BUTTONS_MAX} buttons.`);
-  return buttons;
-}
+const discordLink = (guildId: string | null | undefined, channelId: string, messageId: string | null) => (guildId && messageId ? `https://discord.com/channels/${guildId}/${channelId}/${messageId}` : null);
 
 export function registerAnnouncementRoutes(app: FastifyInstance, web: Web): void {
   const { deps } = web;
   const base = (ctx: WorkspaceRequestContext) => `${ctx.base}/announcements`;
 
-  /**
-   * A release to preview the settings with: the newest one announced, preferably of an app that uses
-   * the workspace's channel and role (so the preview follows those fields), else that app's latest
-   * release on GitHub, else a made-up one. `real`: it has the release's actual files.
-   */
-  async function sampleRelease(wid: string, rows: AnnouncementRow[], apps: AppRow[], appSettings: Map<string, AppAnnounceSettings>): Promise<ReleaseView & { real: boolean }> {
-    const ready = rows.filter((r) => r.status !== 'writing');
-    const plain = (appId: string | null) => !appId || (appSettings.get(appId)?.roleMode ?? 'default') === 'default';
-    const latest = ready.find((r) => plain(r.app_id)) ?? ready[0];
-    if (latest) return { ...viewOf(latest), real: true };
-    const app = announcedRepos(apps, appSettings).find((a) => plain(a.id)) ?? apps[0];
-    const gh = app ? await getGitHubConnection(deps.db, wid) : null;
-    if (app && gh?.status === 'active' && deps.github) {
-      const r = await readReleases(deps.github, gh.installation_id, app.repo_owner, app.repo_name, 5).then((list) => list.find((x) => !x.draft && !x.prerelease)).catch(() => undefined);
-      if (r) return { appId: app.id, appName: app.name, tag: r.tag, releaseName: r.name, releaseUrl: r.url, publishedAt: r.publishedAt, notes: SAMPLE_NOTES, files: r.files, real: true };
-    }
-    return {
-      appId: app?.id ?? null, appName: app?.name ?? 'PhotoCraft', tag: 'v1.2.0', releaseName: null,
-      releaseUrl: app ? `https://github.com/${app.repo_owner}/${app.repo_name}/releases` : 'https://github.com',
-      publishedAt: new Date(), notes: SAMPLE_NOTES, files: [], real: false,
-    };
-  }
-
-  // ---- Posts ------------------------------------------------------------------------------------
-
-  function postsTable(ctx: WorkspaceRequestContext, rows: AnnouncementRow[]): SafeHtml {
-    const b = base(ctx);
-    return html`<div class="table-wrap"><table>
-      <thead><tr><th class="col-main">Release</th><th>Status</th><th>Notes</th><th class="num">Released</th></tr></thead>
-      <tbody>${rows.map((r) => {
-        const st = STATUS[r.status];
-        const sub = r.status === 'posted' && r.posted_at ? `${r.posted_by_name ? `Posted by ${r.posted_by_name}` : 'Posted automatically'} ${timeAgo(r.posted_at)}` : r.status === 'failed' ? r.error : r.status === 'writing' ? 'Claude is writing the notes…' : null;
-        return html`<tr>
-          <td><a class="cell-title" href="${b}/${r.id}"><span>${r.app_name}</span> <span class="mono">${r.tag}</span></a>
-            ${r.prerelease ? html` ${tag('Pre-release')}` : ''}${r.manual ? html` ${tag('Added by hand', { title: 'Someone announced this release from Posts › Announce a release' })}` : ''}
-            ${r.release_name && r.release_name !== r.tag ? html`<div class="sub truncate">${r.release_name}</div>` : ''}</td>
-          <td>${pill(st.label, st.tone)}${sub ? html`<div class="sub">${sub}</div>` : ''}</td>
-          <td>${r.notes_by ? html`<span class="small">${NOTES_BY[r.notes_by] ?? r.notes_by}</span>${r.notes_error ? html` <span title="${r.notes_error}">${icon('triangle-alert', 14, 'warn')}</span>` : ''}` : html`<span class="em">—</span>`}</td>
-          <td class="num">${when(r.published_at ?? r.created_at)}</td>
-        </tr>`;
-      })}</tbody></table></div>`;
-  }
+  // ---- The list -------------------------------------------------------------------------------
 
   app.get('/w/:wid/announcements', async (req, reply) => {
     const ctx = await landOn(web, req, reply, 'announcements');
     if (!ctx) return reply;
     const wid = ctx.workspace.id;
     const b = base(ctx);
-    const q = req.query as { show?: string; partial?: string };
     const edit = can(ctx.membership, 'announcements.edit');
-    const [s, all] = await Promise.all([getAnnouncementSettings(deps.db, wid), listAnnouncements(deps.db, wid)]);
-    const counts = Object.fromEntries(SHOWS.map((f) => [f.key, f.statuses ? all.filter((r) => (f.statuses as readonly string[]).includes(r.status)).length : all.length]));
-    const show = SHOWS.find((f) => f.key === q.show) ?? SHOWS[0];
-    const rows = show.statuses ? all.filter((r) => (show.statuses as readonly string[]).includes(r.status)) : all;
-    const busy = all.some((r) => r.status === 'writing' || r.status === 'posting');
-    const list = rows.length ? postsTable(ctx, rows) : html`<div class="card-b"><p class="small muted">Nothing here.</p></div>`;
-    if (q.partial === '1') return reply.header('x-live-partial', '1').header('Cache-Control', 'no-store').type('text/html').send(html`${list}${busy ? '' : raw('<span data-live-reload hidden></span>')}`.toString());
+    const [all, counts, conn] = await Promise.all([listPosts(deps.db, wid), postCounts(deps.db, wid), getDiscordConnection(deps.db, wid)]);
+    const show = SHOWS.find((s) => s.key === (req.query as { show?: string }).show) ?? SHOWS[0];
+    const rows = all.filter((p) => show.key === 'all' || (show.key === 'draft' ? p.status !== 'posted' : p.status === 'posted'));
+    const n = { all: all.length, draft: counts.drafts, posted: counts.posted };
+    const newBtn = edit ? linkBtn(`${b}/new`, 'New announcement', { variant: 'primary', icon: 'plus' }) : null;
 
-    const settingsLink = pageLink(ctx, 'announcement-settings', 'Settings');
+    const row = (p: PostRow) => {
+      const posted = p.status === 'posted';
+      const when = posted && p.posted_at ? `${p.posted_by_name ? `Posted by ${p.posted_by_name}` : 'Posted'} ${timeAgo(p.posted_at)}` : `Draft · changed ${timeAgo(p.updated_at)}`;
+      return html`<a class="pc-row" href="${b}/${p.id}">
+        <span class="ki-ico" aria-hidden="true">${icon(posted ? 'megaphone' : 'pencil', 14)}</span>
+        <span class="ki-main">
+          <span class="ki-title">${headline(p)}</span>
+          <span class="pc-where">${p.targets.length ? p.targets.map((t) => html`<span class="ki-chip mono">#${t.channelName}</span>`) : html`<span class="small muted">No channel yet</span>`}${p.role_name ? tag(`@${p.role_name}`, { cls: 'role' }) : ''}</span>
+        </span>
+        <span class="ki-side"><span class="pc-when small muted">${when}</span>${posted ? pill('Posted', 'ok') : pill('Draft', 'neutral')}${icon('chevron-right', 16, 'muted')}</span>
+      </a>`;
+    };
+
     const body = html`
-      ${await toolHeader(web, ctx, 'announcements', 'announcements', { actions: edit ? linkBtn(`${b}/new`, 'Announce a release', { variant: s.enabled ? 'primary' : undefined, icon: 'plus' }) : null })}
-      ${!s.enabled ? noticeOff(ctx) : ''}
+      ${await toolHeader(web, ctx, 'announcements', 'announcements', { actions: [newBtn] })}
+      ${!conn ? notice('warn', 'Connect Discord first', 'Announcements are posted by the bot in your server’s channels.') : ''}
       ${all.length
-        ? html`<div class="card">
-            <div class="card-h"><div class="row">${segLinks('Show', SHOWS.map((f) => ({ href: f.key === 'all' ? b : `${b}?show=${f.key}`, label: f.label, count: counts[f.key], current: f.key === show.key })))}</div>
-              <span class="small muted">${s.enabled ? `${s.mode === 'auto' ? 'Automatic: posted as soon as the notes are written' : 'Review first: new releases wait here until someone posts them'}. Checked every ${CHECK_MS / 60_000} minutes.` : ''}</span></div>
-            <div class="card-b flush" ${busy ? html`data-live="5000" data-live-src="${`${b}?${new URLSearchParams({ partial: '1', ...(show.key !== 'all' ? { show: show.key } : {}) }).toString()}`}"` : ''}>${list}</div>
-          </div>`
-        : html`<div class="card">${s.enabled
-          ? empty('megaphone', 'No releases yet', html`New releases show up here within ${CHECK_MS / 60_000} minutes of being published on GitHub. To try it now, announce one of the latest releases by hand.`, edit ? linkBtn(`${b}/new`, 'Announce a release', { icon: 'plus' }) : null)
-          : empty('megaphone', 'Announcements are off', html`Turn them on in ${settingsLink} to post each app’s new GitHub releases in Discord.`, can(ctx.membership, 'announcement-settings.edit') ? linkBtn(areaHref(ctx, 'announcement-settings'), 'Set up announcements', { variant: 'primary' }) : null)}</div>`}`;
+        ? html`<div class="pc-top">${segLinks('Show', SHOWS.map((s) => ({ href: s.key === 'all' ? b : `${b}?show=${s.key}`, label: s.label, count: n[s.key], current: s.key === show.key })))}
+            <span class="small muted">${counts.posted30 ? `${plural(counts.posted30, 'announcement')} posted in the last 30 days` : ''}</span></div>
+          <div class="ki-list">${rows.length ? rows.map(row) : html`<p class="ki-empty">Nothing here.</p>`}</div>`
+        : html`<div class="card">${empty('megaphone', 'No announcements yet', 'Write a message, pick the channels, and the bot posts it there. You can change it or delete it later, everywhere at once.', newBtn)}</div>`}`;
     return web.render(reply, ctx, 'Announcements', 'announcements', body, { width: 'full' });
   });
 
-  function noticeOff(ctx: WorkspaceRequestContext): SafeHtml {
-    return html`<div class="notice info" role="status">${icon('info')}<div><div class="n-title">Announcements are off</div><div class="n-text">New releases aren’t checked or posted. You can still announce a release by hand.${can(ctx.membership, 'announcement-settings.edit') ? html` Turn them on in ${pageLink(ctx, 'announcement-settings', 'Settings')}.` : ''}</div></div><span></span></div>`;
-  }
+  // ---- The editor -----------------------------------------------------------------------------
 
-  // ---- Announce a release by hand ---------------------------------------------------------------------
+  async function editor(reply: FastifyReply, ctx: WorkspaceRequestContext, post: PostRow | null) {
+    const wid = ctx.workspace.id;
+    const b = base(ctx);
+    const edit = can(ctx.membership, 'announcements.edit');
+    const [conn, bot] = await Promise.all([getDiscordConnection(deps.db, wid), botIdentity(deps)]);
+    const [guild, roles]: [GuildAccess | null, RoleInspection | null] = conn && deps.discord ? await Promise.all([inspectGuild(deps.discord, conn.guild_id), inspectRoles(deps.discord, conn.guild_id)]) : [null, null];
+    const posted = post?.status === 'posted';
+    const p = post ?? { content: '', card_title: null, card_text: null, card_color: 'blurple' as CardColor, role_id: null, role_name: null, buttons: [] as PostButton[], targets: [] };
+    const chosen = new Set(p.targets.map((t) => t.channelId));
+    const roleList = roles?.ok ? roles.roles.filter((r) => !r.reason?.startsWith('Managed')) : [];
+    const roleNames = new Map<string, string>(roleList.map((r) => [r.id, r.name]));
+    if (p.role_id && !roleNames.has(p.role_id)) roleNames.set(p.role_id, p.role_name ?? 'role');
+    const disabled = edit ? '' : raw('disabled');
+
+    // Where: a box per channel (once posted, the channels it's in).
+    const channels = guild?.ok
+      ? html`${guild.channels.length > 8 ? html`<input type="search" class="pc-filter" placeholder="Find a channel" aria-label="Find a channel" data-filter-rows="#pc-channels">` : ''}
+          <div class="pc-channels" id="pc-channels">${guild.channels.map((c) => html`<label class="pc-ch${c.missing.length ? ' off' : ''}" data-search="${`${c.name} ${c.category ?? ''}`.toLowerCase()}" ${c.missing.length ? html`title="${`The bot is missing: ${c.missing.join(', ')}`}"` : ''}>
+            <input type="checkbox" name="channel_ids" value="${c.id}" ${chosen.has(c.id) ? raw('checked') : ''} ${c.missing.length && !chosen.has(c.id) ? raw('disabled') : ''} ${disabled}>
+            <span class="mono">#${c.name}</span>${c.category ? html`<span class="xs muted">${c.category}</span>` : ''}${c.missing.length ? html`<span class="xs muted">· bot can’t post</span>` : ''}</label>`)}</div>
+          <p class="xs muted pc-note">Up to ${String(POST_CHANNELS_MAX)}. In an announcement channel, it’s also published to the servers that follow it.</p>`
+      : html`<p class="small muted">${conn ? 'Discord can’t be reached right now, so the channels can’t be listed.' : 'Connect Discord first.'}</p>`;
+    const where = posted
+      ? html`<div class="pc-where">${post!.targets.map((t) => {
+          const link = discordLink(conn?.guild_id, t.channelId, t.messageId);
+          return link ? html`<a class="ki-chip mono" href="${link}" target="_blank" rel="noopener noreferrer">#${t.channelName} ${icon('arrow-up-right', 12)}</a>` : html`<span class="ki-chip mono">#${t.channelName}</span>`;
+        })}</div><p class="xs muted pc-note">To post it somewhere else, delete it from Discord first: it becomes a draft again.</p>`
+      : channels;
+
+    const ping = roles?.ok
+      ? selectWrap(html`<select id="pc-role" name="role_id" aria-label="Role to ping" ${disabled}>
+          <option value="" ${p.role_id ? '' : raw('selected')}>No ping</option>
+          ${roleList.map((r) => html`<option value="${r.id}" ${r.id === p.role_id ? raw('selected') : ''}>@${r.name}${!r.mentionable && !roles.canMentionAll ? ' (can’t be pinged yet)' : ''}</option>`)}
+          ${p.role_id && !roleList.some((r) => r.id === p.role_id) ? html`<option value="${p.role_id}" selected>@${p.role_name ?? 'role'}</option>` : ''}
+        </select>`)
+      : html`<span class="small muted">${p.role_name ? `@${p.role_name}` : 'No ping'}</span>`;
+
+    const buttonRow = (x: PostButton | null) => html`<div class="pc-btn" data-row>
+      <input type="text" name="btn_label" value="${x?.label ?? ''}" maxlength="${String(POST_LIMITS.buttonLabel)}" placeholder="Label" aria-label="Button label" ${disabled}>
+      <input type="url" name="btn_url" value="${x?.url ?? ''}" maxlength="${String(POST_LIMITS.buttonUrl)}" placeholder="https://…" pattern="https?://.+" aria-label="Button link" class="mono" spellcheck="false" ${disabled}>
+      ${edit ? html`<button type="button" class="icon-btn sm" data-row-remove aria-label="Remove button" title="Remove button">${icon('x', 16)}</button>` : html`<span></span>`}
+    </div>`;
+    const hasCard = Boolean(p.card_title || p.card_text);
+
+    const form = html`
+      <div class="section">
+        <div class="section-h"><div><h3>Where</h3><div class="desc">${posted ? 'Posted in these channels.' : 'The channels the bot posts it in.'}</div></div></div>
+        ${where}
+      </div>
+      <div class="section">
+        <div class="fields">
+          ${textField({ id: 'pc-content', name: 'content', label: 'Message', value: p.content, max: POST_LIMITS.content, rows: 6, placeholder: 'What do you want to tell everyone?', hint: 'Discord formatting works: **bold**, - list, ## heading, [link](https://…).' })}
+          <div class="field"><label for="pc-role">Ping</label>${ping}<div class="hint">Above the message. Only this role is pinged, never @everyone.${posted ? ' Changing it after posting doesn’t ping anyone.' : ''}</div></div>
+        </div>
+      </div>
+      <details class="section pc-more" ${hasCard ? raw('open') : ''}>
+        <summary><span class="cl-chev" aria-hidden="true">${icon('chevron-right', 14)}</span><span><b>Card</b><span class="small muted"> · optional: a box under the message with a title and a coloured edge</span></span></summary>
+        <div class="fields">
+          ${textField({ id: 'pc-title', name: 'card_title', label: 'Title', value: p.card_title ?? '', max: POST_LIMITS.title, placeholder: 'For example: Version 2.0 is out' })}
+          ${textField({ id: 'pc-text', name: 'card_text', label: 'Text', value: p.card_text ?? '', max: POST_LIMITS.text, rows: 4, placeholder: 'More detail. Discord formatting works.' })}
+          <div class="field"><span class="lbl">Colour</span><div class="pc-colors">${segRadios('card_color', CARD_COLOR_IDS.map((c) => ({ value: c, label: CARD_COLORS[c].name })), p.card_color, 'Card colour')}</div></div>
+        </div>
+      </details>
+      <details class="section pc-more" ${p.buttons.length ? raw('open') : ''}>
+        <summary><span class="cl-chev" aria-hidden="true">${icon('chevron-right', 14)}</span><span><b>Buttons</b><span class="small muted"> · optional: links under it, up to ${String(POST_BUTTONS_MAX)}</span></span></summary>
+        <div class="pc-btns" data-rows data-rows-max="${String(POST_BUTTONS_MAX)}">
+          <input type="hidden" name="buttons" value="1">
+          ${p.buttons.map(buttonRow)}
+          ${edit ? html`<template data-row-template>${buttonRow(null)}</template>` : ''}
+        </div>
+        ${edit ? html`<div class="row cl-add"><button type="button" class="btn sm" data-row-add>${icon('plus', 14)}Add button</button></div>` : p.buttons.length ? '' : html`<p class="small muted">No buttons.</p>`}
+      </details>`;
+
+    const confirmPost = 'data-confirm-title="Post this announcement?" data-confirm-body="The bot posts it in every channel you ticked, and pings the role if you chose one. You can change or delete it afterwards." data-confirm-label="Post now"';
+    const footer = !edit
+      ? viewOnlyFooter('announcements')
+      : posted
+        ? html`<button type="submit" class="btn ghost danger" form="pc-unpost"><span class="lead">${icon('trash-2')}</span><span class="lbl">Delete from Discord</span></button>
+            <div class="end">${submitBtn('Update in Discord', { variant: 'primary', icon: 'refresh-cw', loading: 'Updating…', name: 'intent', value: 'update', attrs: raw('data-dirty-enable') })}</div>`
+        : html`${post ? html`<button type="submit" class="btn ghost danger" form="pc-delete"><span class="lead">${icon('trash-2')}</span><span class="lbl">Delete draft</span></button>` : html`<span></span>`}
+            <div class="end">
+              <span class="row small muted" data-dirty-show hidden><span class="dot c4" aria-hidden="true"></span>Unsaved changes</span>
+              ${submitBtn('Save draft', { name: 'intent', value: 'save', loading: 'Saving…' })}
+              ${submitBtn('Post now', { variant: 'primary', icon: 'send', name: 'intent', value: 'post', loading: 'Posting…', disabled: !guild?.ok, title: guild?.ok ? undefined : 'Connect Discord first', attrs: raw(confirmPost) })}
+            </div>`;
+
+    const preview = html`<div class="panel-preview" data-pc-preview>
+      ${previewCaption(posted && post!.targets[0] ? post!.targets[0].channelName : null, posted ? discordLink(conn?.guild_id, post!.targets[0]!.channelId, post!.targets[0]!.messageId) : null)}
+      ${botMessage(bot, html`
+        <div class="dp-content" id="pc-pv-content" ${p.content.trim() || p.role_id ? '' : raw('hidden')}>${discordMd(p.role_id ? `<@&${p.role_id}>${p.content.trim() ? `\n${p.content.trim()}` : ''}` : p.content.trim(), roleNames)}</div>
+        <div class="dp-embed pc-${p.card_color}" id="pc-pv-card" ${hasCard ? '' : raw('hidden')}><h4 id="pc-pv-title" ${p.card_title ? '' : raw('hidden')}>${p.card_title ?? ''}</h4><p id="pc-pv-text">${discordMd(p.card_text ?? '', roleNames)}</p></div>
+        <div class="dp-buttons" id="pc-pv-buttons" data-arrow="${icon('arrow-up-right', 14).toString()}" ${p.buttons.length ? '' : raw('hidden')}>${p.buttons.map((x) => html`<span class="dp-button grey">${x.label}${icon('arrow-up-right', 14)}</span>`)}</div>
+        <p class="pc-pv-empty" id="pc-pv-empty" ${hasBody(p) || p.role_id ? raw('hidden') : ''}>Your message shows up here as you write it.</p>`, 'Preview of the announcement in Discord')}
+      <p class="dp-note">${posted ? 'Updating edits the messages in place; no one is pinged again.' : 'Members see it like this in every channel it’s posted in.'}</p>
+    </div>`;
+
+    const title = post ? headline(post) : 'New announcement';
+    const body = html`
+      ${pageHeader({
+        crumbs: [{ href: toolHref(ctx, 'announcements') ?? undefined, label: 'Announcements' }, { label: post ? (posted ? 'Posted' : 'Draft') : 'New' }],
+        title,
+        after: [post ? (posted ? pill('Posted', 'ok') : pill('Draft', 'neutral')) : '', edit ? '' : viewOnlyTag(viewOnlyText('announcements'))],
+        description: posted && post!.posted_at
+          ? `${post!.posted_by_name ? `Posted by ${post!.posted_by_name}` : 'Posted'} ${timeAgo(post!.posted_at)} in ${plural(post!.targets.length, 'channel')}.`
+          : post ? `Draft${post.created_by_name ? ` by ${post.created_by_name}` : ''} · changed ${timeAgo(post.updated_at)}.` : 'Write it, pick the channels, and post it. Save it as a draft to finish later.',
+      })}
+      ${roleNamesJson(roleNames)}
+      <div class="panel-grid">
+        <form method="post" action="${post ? `${b}/${post.id}` : `${b}/new`}" class="card" data-composer ${edit ? raw('data-dirty') : ''}>
+          ${csrfField(ctx.csrf)}
+          ${edit ? form : html`<fieldset class="plain view-only" disabled>${form}</fieldset>`}
+          <div class="card-f">${footer}</div>
+        </form>
+        ${preview}
+      </div>
+      ${edit && post && !posted ? html`<form method="post" action="${b}/${post.id}" id="pc-delete" hidden data-confirm-title="Delete this draft?" data-confirm-body="It was never posted, so nothing changes in Discord." data-confirm-label="Delete draft" data-confirm-danger>${csrfField(ctx.csrf)}<input type="hidden" name="intent" value="delete"></form>` : ''}
+      ${edit && posted ? html`<form method="post" action="${b}/${post!.id}" id="pc-unpost" hidden data-confirm-title="Delete it from Discord?" data-confirm-body="${`The bot deletes its message in ${plural(post!.targets.length, 'channel')}. It stays here as a draft, so you can post it again.`}" data-confirm-label="Delete from Discord" data-confirm-danger>${csrfField(ctx.csrf)}<input type="hidden" name="intent" value="unpost"></form>` : ''}`;
+    return web.render(reply, ctx, `${title} · Announcements`, 'announcements', body, { width: 'full' });
+  }
 
   app.get('/w/:wid/announcements/new', async (req, reply) => {
     const ctx = await web.requireWorkspace(req, reply, { permission: 'announcements.edit' });
     if (!ctx) return reply;
-    const wid = ctx.workspace.id;
-    const b = base(ctx);
-    const apps = (await listApps(deps.db, wid)).sort((x, y) => x.position - y.position);
-    const appId = (req.query as { app?: string }).app ?? apps[0]?.id;
-    const chosen = apps.find((a) => a.id === appId);
-    const gh = await getGitHubConnection(deps.db, wid);
-    let releases: GitHubRelease[] = [];
-    let problem: string | null = null;
-    if (!gh || gh.status !== 'active' || !deps.github) problem = 'Connect GitHub first.';
-    else if (chosen) {
-      try {
-        releases = (await readReleases(deps.github, gh.installation_id, chosen.repo_owner, chosen.repo_name, 10)).filter((r) => !r.draft);
-      } catch {
-        problem = `Couldn’t read ${chosen.repo_owner}/${chosen.repo_name}’s releases from GitHub. Try again in a moment.`;
-      }
-    }
-    const known = new Map((await listAnnouncements(deps.db, wid, 500)).filter((r) => chosen && r.repo_id === chosen.repo_id).map((r) => [r.tag, r]));
-    const body = html`
-      ${pageHeader({
-        crumbs: [{ href: toolHref(ctx, 'announcements') ?? undefined, label: 'Announcements' }, { label: 'Announce a release' }],
-        title: 'Announce a release',
-        description: 'Pick one of an app’s latest releases. Its notes are written as usual, then it waits under Posts for you to check and post it.',
-      })}
-      <div class="card">
-        <form method="get" action="${b}/new" class="card-h"><div class="row"><label class="small muted" for="ann-app">App</label>
-          ${selectWrap(html`<select id="ann-app" name="app" data-autosubmit>${apps.map((a) => html`<option value="${a.id}" ${a.id === chosen?.id ? raw('selected') : ''}>${a.name} · ${a.repo_owner}/${a.repo_name}</option>`)}</select>`, { sm: true })}
-          <noscript><button class="btn sm" type="submit">Show releases</button></noscript></div></form>
-        ${!apps.length
-          ? html`<div class="card-b"><p class="small muted">Add an app first on ${pageLink(ctx, 'apps', 'Apps & repositories')}.</p></div>`
-          : problem
-            ? html`<div class="card-b"><p class="small muted">${problem}</p></div>`
-            : releases.length
-              ? html`<form method="post" action="${b}/new">${csrfField(ctx.csrf)}<input type="hidden" name="app" value="${chosen!.id}">
-                  <div class="card-b"><div class="choices" role="radiogroup" aria-label="Release">${releases.map((r, i) => {
-                    const had = known.get(r.tag);
-                    return html`<label class="choice"><input type="radio" name="tag" value="${r.tag}" ${i === 0 ? raw('checked') : ''}><span><span class="t"><span class="mono">${r.tag}</span>${r.name && r.name !== r.tag ? ` · ${r.name}` : ''}${r.prerelease ? html` ${tag('Pre-release')}` : ''}</span>
-                      <span class="d">${r.publishedAt ? `Published ${timeAgo(r.publishedAt)}` : 'Not published'}${had ? ` · ${STATUS[had.status].label.toLowerCase()} already` : ''}</span></span></label>`;
-                  })}</div></div>
-                  <div class="card-f"><span></span><div class="end">${linkBtn(b, 'Cancel')}${submitBtn('Add release', { variant: 'primary', loading: 'Adding…' })}</div></div></form>`
-              : html`<div class="card-b"><p class="small muted">${chosen ? `${chosen.repo_owner}/${chosen.repo_name} has no published releases.` : ''}</p></div>`}
-      </div>`;
-    return web.render(reply, ctx, 'Announce a release', 'announcements', body);
+    return editor(reply, ctx, null);
   });
-
-  app.post('/w/:wid/announcements/new', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply, { permission: 'announcements.edit' });
-    if (!ctx) return reply;
-    const wid = ctx.workspace.id;
-    const body = req.body as { app?: string; tag?: string };
-    try {
-      const chosen = (await listApps(deps.db, wid)).find((a) => a.id === body.app);
-      const gh = await getGitHubConnection(deps.db, wid);
-      if (!chosen) throw new UserFacingError('Choose one of your apps.');
-      if (!gh || gh.status !== 'active') throw new UserFacingError('Connect GitHub first.');
-      if (!body.tag) throw new UserFacingError('Choose a release.');
-      const id = await announceManually(deps, wid, gh.installation_id, chosen, body.tag);
-      const row = await getAnnouncement(deps.db, wid, id);
-      setFlash(reply, 'success', row?.status === 'writing' ? 'Release added. Its notes are being written; this page updates when they’re ready.' : 'This release was already here.');
-      return reply.redirect(`${base(ctx)}/${id}`);
-    } catch (err) {
-      if (!(err instanceof UserFacingError)) throw err;
-      setFlash(reply, 'error', err.message);
-      return reply.redirect(`${base(ctx)}/new${body.app ? `?app=${encodeURIComponent(body.app)}` : ''}`);
-    }
-  });
-
-  // ---- One announcement ---------------------------------------------------------------------------
 
   app.get('/w/:wid/announcements/:id', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply, { permission: 'announcements.view' });
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'view' });
     if (!ctx) return reply;
-    const wid = ctx.workspace.id;
-    const b = base(ctx);
-    const row = await getAnnouncement(deps.db, wid, (req.params as { id: string }).id);
-    if (!row) return reply.callNotFound();
-    const busy = row.status === 'writing' || row.status === 'posting';
-    if ((req.query as { partial?: string }).partial === '1') {
-      return reply.header('x-live-partial', '1').header('Cache-Control', 'no-store').type('text/html').send((busy ? html`${statusLine(row)}` : html`${statusLine(row)}<span data-live-reload hidden></span>`).toString());
-    }
-    const edit = can(ctx.membership, 'announcements.edit');
-    const [s, appSettings, conn, bot] = await Promise.all([getAnnouncementSettings(deps.db, wid), appAnnounceSettings(deps.db, wid), getDiscordConnection(deps.db, wid), botIdentity(deps)]);
-    const target = targetFor(s, row.app_id ? appSettings.get(row.app_id) : undefined);
-    const posted = row.status === 'posted';
-    const channelName = posted ? (row.channel_id === target.channelId ? target.channelName : null) : target.channelName;
-    const link = posted && conn && row.channel_id && row.message_id ? `https://discord.com/channels/${conn.guild_id}/${row.channel_id}/${row.message_id}` : null;
-    const view = viewOf(row);
-    const buttons = resolveButtons(s.buttons, view);
-    const buttonLabels = announcementPayload(view, s, null).components.flatMap((r) => r.components.map((b) => b.label));
-    const roleNames = new Map(target.roleId ? [[target.roleId, target.roleName ?? 'role']] : []);
-    const notesValue = row.notes ?? '';
-    const canEditNotes = edit && !busy;
-
-    const notesField = html`<div class="field"><div class="field-head"><label for="notes">Release notes</label><span class="counter" data-counter-for="notes">${String(notesValue.length)} / ${String(NOTES_MAX)}</span></div>
-      <textarea id="notes" name="notes" rows="10" maxlength="${String(NOTES_MAX)}" data-tpl-var="notes" placeholder="${row.status === 'writing' ? 'Claude is writing the notes…' : EMPTY_NOTES}" ${canEditNotes ? '' : raw('readonly')}>${notesValue}</textarea>
-      <div class="hint">Shown where the message has {notes}. Discord formatting works: **bold**, - list, ## heading.${row.notes_by ? ` Written by ${row.notes_by === 'claude' ? 'Claude' : row.notes_by === 'github' ? 'GitHub (as written)' : 'hand'}.` : ''}</div></div>`;
-    const actions = (() => {
-      if (!edit) return html`${viewOnlyFooter('announcements')}`;
-      const left = html`<div class="row">${row.status !== 'posted' && !busy ? html`
-          <button type="submit" class="btn ghost" name="intent" value="rewrite" data-loading-text="Asking Claude…"><span class="lead">${icon('sparkles')}</span><span class="lbl">Rewrite with Claude</span></button>
-          <button type="submit" class="btn ghost" name="intent" value="github"><span class="lead">${icon('github')}</span><span class="lbl">Use GitHub’s notes</span></button>` : ''}</div>`;
-      const right = row.status === 'waiting' || row.status === 'failed'
-        ? html`<button type="submit" class="btn ghost" name="intent" value="skip">Skip</button>
-            <button type="submit" class="btn ghost" name="intent" value="save" data-dirty-enable>Save notes</button>
-            ${submitBtn(row.status === 'failed' ? 'Try again' : 'Post now', { variant: 'primary', icon: 'send', loading: 'Posting…', name: 'intent', value: 'post', disabled: !target.channelId, title: target.channelId ? undefined : 'Choose a channel in Settings first' })}`
-        : posted
-          ? html`<button type="submit" class="btn ghost danger" form="ann-delete"><span class="lead">${icon('trash-2')}</span><span class="lbl">Delete from Discord</span></button>
-              ${submitBtn('Update in Discord', { variant: 'primary', icon: 'refresh-cw', loading: 'Updating…', name: 'intent', value: 'update' })}`
-          : row.status === 'skipped'
-            ? html`<button type="submit" class="btn ghost" name="intent" value="save" data-dirty-enable>Save notes</button>${submitBtn('Move back to waiting', { variant: 'primary', name: 'intent', value: 'unskip' })}`
-            : html`<span class="small muted">${row.status === 'writing' ? 'Waiting for the notes…' : 'Posting…'}</span>`;
-      return html`${left}<div class="end">${right}</div>`;
-    })();
-
-    const facts = html`<dl class="props">
-      <dt>Release</dt><dd><a href="${row.release_url}" target="_blank" rel="noopener noreferrer" class="mono">${row.repo_owner}/${row.repo_name}@${row.tag}</a>${row.prerelease ? tag('Pre-release') : ''}</dd>
-      <dt>Published</dt><dd>${row.published_at ? when(row.published_at) : html`<span class="em">—</span>`}</dd>
-      <dt>Channel</dt><dd>${channelName ? `#${channelName}` : html`<span class="em">None chosen</span>`}</dd>
-      <dt>Ping</dt><dd>${target.roleId ? tag(`@${target.roleName ?? 'role'}`, { cls: 'role' }) : html`<span class="em">${s.pingEnabled ? 'No ping for this app' : 'Off'}</span>`}</dd>
-      <dt>Buttons</dt><dd>${buttonLabels.length ? buttonLabels.map((l) => tag(l)) : html`<span class="em">None</span>`}${buttons.left.length ? html`<span class="small muted">Left out: ${buttons.left.map((l) => `${l.label} (${l.why})`).join(', ')}</span>` : ''}</dd>
-    </dl>`;
-
-    const body = html`
-      ${pageHeader({
-        crumbs: [{ href: toolHref(ctx, 'announcements') ?? undefined, label: 'Announcements' }, { label: `${row.app_name} ${row.tag}` }],
-        title: html`${row.app_name} <span class="mono">${row.tag}</span>`,
-        after: [pill(STATUS[row.status].label, STATUS[row.status].tone), edit ? '' : viewOnlyTag(viewOnlyText('announcements'))],
-        description: row.release_name && row.release_name !== row.tag ? row.release_name : undefined,
-      })}
-      ${roleNamesJson(roleNames)}
-      <div class="panel-grid">
-        <div class="stack gap-16">
-          <form method="post" action="${b}/${row.id}" class="card" ${canEditNotes ? raw('data-dirty') : ''}>
-            ${csrfField(ctx.csrf)}
-            <div class="card-h strip" ${busy ? html`data-live="3000" data-live-src="${`${b}/${row.id}?partial=1`}"` : ''}>${statusLine(row)}</div>
-            ${row.notes_error ? html`<div class="card-b tight">${html`<div class="notice warn" role="status">${icon('triangle-alert')}<div><div class="n-text">${row.notes_error}</div></div><span></span></div>`}</div>` : ''}
-            <div class="card-b"><div class="fields">${notesField}</div></div>
-            <details class="card-b tight ann-gh" id="ann-gh"><summary class="small">Release notes as written on GitHub</summary><pre class="ann-gh-notes">${row.github_notes || '(empty)'}</pre></details>
-            <div class="card-f">${actions}</div>
-          </form>
-          <div class="card">${facts}</div>
-        </div>
-        <div class="panel-preview">
-          ${previewCaption(channelName, link)}
-          ${announcementPreview(bot, view, s, target.roleId, roleNames)}
-          <p class="dp-note">${target.roleId ? `Pings @${target.roleName ?? 'role'} only. ` : 'No one is pinged. '}Message, title and buttons follow ${pageLink(ctx, 'announcement-settings', 'Settings')}.</p>
-        </div>
-      </div>
-      ${edit && posted ? html`<form method="post" action="${b}/${row.id}" id="ann-delete" hidden data-confirm-title="Delete this post from Discord?" data-confirm-body="The announcement goes back to waiting, so you can post it again." data-confirm-label="Delete post" data-confirm-danger>${csrfField(ctx.csrf)}<input type="hidden" name="intent" value="delete"></form>` : ''}`;
-    return web.render(reply, ctx, `${row.app_name} ${row.tag} · Announcements`, 'announcements', body);
+    const id = (req.params as { id: string }).id;
+    const post = await getPost(deps.db, ctx.workspace.id, id);
+    // A release's post from before GitHub releases moved to Bot features.
+    if (!post && (await getAnnouncement(deps.db, ctx.workspace.id, id))) return reply.redirect(`${ctx.base}/bot/releases/${encodeURIComponent(id)}`, 301);
+    const allowed = await web.requireWorkspace(req, reply, { permission: 'announcements.view' });
+    if (!allowed) return reply;
+    if (!post) return reply.callNotFound();
+    return editor(reply, allowed, post);
   });
 
-  function statusLine(row: AnnouncementRow): SafeHtml {
-    const st = STATUS[row.status];
-    const text = row.status === 'writing' ? (row.attempts ? 'Claude was busy; trying again shortly…' : 'Claude is writing friendlier notes from GitHub’s…')
-      : row.status === 'waiting' ? 'Check the notes, then post it.'
-        : row.status === 'posting' ? 'Posting in Discord…'
-          : row.status === 'posted' && row.posted_at ? `${row.posted_by_name ? `Posted by ${row.posted_by_name}` : 'Posted automatically'} ${timeAgo(row.posted_at)}.`
-            : row.status === 'failed' ? row.error ?? 'Discord didn’t take the post.'
-              : 'Skipped: it won’t be posted.';
-    return html`<div class="row">${row.status === 'writing' || row.status === 'posting' ? icon('loader-circle', 16, 'muted ann-spin') : ''}${pill(st.label, st.tone)}<span class="small muted">${text}</span></div>`;
+  /** What the editor sent, checked: channels and the role must belong to the connected server. */
+  async function inputFrom(ctx: WorkspaceRequestContext, body: Record<string, unknown>, current: PostRow | null): Promise<PostInput> {
+    const list = (v: unknown) => (v === undefined ? [] : Array.isArray(v) ? v.map(String) : [String(v)]);
+    const text = (k: string, max: number) => (typeof body[k] === 'string' ? (body[k] as string).replace(/\r\n/g, '\n').trim().slice(0, max) : '');
+    const conn = await getDiscordConnection(deps.db, ctx.workspace.id);
+    const discord = () => {
+      if (!conn || !deps.discord) throw new UserFacingError('Connect a Discord server first.');
+      return { discord: deps.discord, guildId: conn.guild_id };
+    };
+    // Channels (not once it's posted: it stays where it is).
+    let channels = current?.targets.map((t) => ({ id: t.channelId, name: t.channelName })) ?? [];
+    const ids = [...new Set(list(body.channel_ids))];
+    if (current?.status !== 'posted' && (ids.length || channels.length)) {
+      if (ids.length > POST_CHANNELS_MAX) throw new UserFacingError(`Up to ${POST_CHANNELS_MAX} channels.`);
+      const known = new Map(channels.map((c) => [c.id, c.name]));
+      const guild = ids.some((id) => !known.has(id)) ? await inspectGuild(discord().discord, discord().guildId) : null;
+      if (guild && !guild.ok) throw new UserFacingError('Couldn’t read the server from Discord. Try again in a moment.');
+      channels = ids.map((id) => {
+        const c = guild?.ok ? guild.channels.find((x) => x.id === id) : null;
+        if (c?.missing.length) throw new UserFacingError(`The bot is missing permissions in #${c.name}: ${c.missing.join(', ')}.`);
+        const name = c?.name ?? known.get(id);
+        if (!name) throw new UserFacingError('Choose one of the listed channels.');
+        return { id, name };
+      });
+    }
+    // The role.
+    let role = current?.role_id ? { id: current.role_id, name: current.role_name ?? 'role' } : null;
+    const roleId = typeof body.role_id === 'string' ? body.role_id : undefined;
+    if (roleId !== undefined && roleId !== (role?.id ?? '')) {
+      if (!roleId) role = null;
+      else {
+        const roles = await inspectRoles(discord().discord, discord().guildId);
+        const r = roles.ok ? roles.roles.find((x) => x.id === roleId && !x.reason?.startsWith('Managed')) : undefined;
+        if (!r) throw new UserFacingError('Choose one of the listed roles.');
+        role = { id: r.id, name: r.name };
+      }
+    }
+    // Buttons: rows left empty are dropped.
+    let buttons = current?.buttons ?? [];
+    if (body.buttons === '1') {
+      const urls = list(body.btn_url);
+      buttons = list(body.btn_label).map((label, i) => ({ label: label.trim().slice(0, POST_LIMITS.buttonLabel), url: (urls[i] ?? '').trim().slice(0, POST_LIMITS.buttonUrl) })).filter((x) => x.label || x.url);
+      for (const x of buttons) {
+        if (!x.label) throw new UserFacingError('Give every button a label.');
+        if (!/^https?:\/\/\S+$/i.test(x.url)) throw new UserFacingError(`The “${x.label}” button needs a link starting with https://.`);
+      }
+      if (buttons.length > POST_BUTTONS_MAX) throw new UserFacingError(`Up to ${POST_BUTTONS_MAX} buttons.`);
+    }
+    const color = CARD_COLOR_IDS.find((c) => c === body.card_color) ?? current?.card_color ?? 'blurple';
+    return { content: text('content', POST_LIMITS.content), cardTitle: text('card_title', POST_LIMITS.title) || null, cardText: text('card_text', POST_LIMITS.text) || null, cardColor: color, role, buttons, channels };
   }
 
-  app.post('/w/:wid/announcements/:id', async (req, reply) => {
+  async function save(req: FastifyRequest, reply: FastifyReply, id: string | null) {
     const ctx = await web.requireWorkspace(req, reply, { permission: 'announcements.edit' });
     if (!ctx) return reply;
     const wid = ctx.workspace.id;
-    const id = (req.params as { id: string }).id;
-    const body = (req.body ?? {}) as { intent?: string; notes?: string };
-    const back = `${base(ctx)}/${id}`;
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const intent = typeof body.intent === 'string' ? body.intent : 'save';
+    const current = id ? await getPost(deps.db, wid, id) : null;
+    if (id && !current) return reply.callNotFound();
+    let at = id ? `${base(ctx)}/${id}` : `${base(ctx)}/new`;
     try {
-      let row = await getAnnouncement(deps.db, wid, id);
-      if (!row) return reply.callNotFound();
-      const intent = body.intent ?? 'save';
-      // Edited notes are kept first, whatever comes next.
-      if (body.notes !== undefined && ['save', 'post', 'update', 'unskip'].includes(intent) && row.status !== 'writing' && row.status !== 'posting') {
-        const notes = body.notes.replace(/\r\n/g, '\n').trim().slice(0, NOTES_MAX);
-        if (notes !== (row.notes ?? '')) {
-          await deps.db.query(`UPDATE announcements SET notes = $2, notes_by = 'edited', updated_at = now_ms() WHERE id = $1`, [id, notes || null]);
-          row = (await getAnnouncement(deps.db, wid, id))!;
-        }
+      if (intent === 'delete') {
+        await deleteDraft(deps.db, wid, id!);
+        setFlash(reply, 'success', 'Draft deleted');
+        return reply.redirect(base(ctx));
       }
+      if (intent === 'unpost') {
+        await unpublishPost(deps, current!);
+        setFlash(reply, 'success', 'Deleted from Discord. It’s a draft again, so you can post it later.');
+        return reply.redirect(at);
+      }
+      if (current?.status === 'posting') throw new UserFacingError('It’s being posted right now. Reload in a moment.');
+      const input = await inputFrom(ctx, body, current);
+      const saved = await savePost(deps.db, wid, ctx.user.id, id, input);
+      at = `${base(ctx)}/${saved}`;
       if (intent === 'post') {
-        await postNow(deps, wid, id, ctx.user.id);
-        setFlash(reply, 'success', 'Posted in Discord');
-      } else if (intent === 'update') {
-        await updatePost(deps, row);
-        setFlash(reply, 'success', 'Post updated in Discord. No one was pinged again.');
-      } else if (intent === 'delete') {
-        await deletePost(deps, row);
-        setFlash(reply, 'success', 'Post deleted from Discord. It’s waiting to be posted again.');
-      } else if (intent === 'skip') {
-        await deps.db.query(`UPDATE announcements SET status = 'skipped', updated_at = now_ms() WHERE id = $1 AND status IN ('waiting', 'failed')`, [id]);
-        setFlash(reply, 'success', 'Skipped. It won’t be posted.');
-      } else if (intent === 'unskip') {
-        await deps.db.query(`UPDATE announcements SET status = 'waiting', updated_at = now_ms() WHERE id = $1 AND status = 'skipped'`, [id]);
-        setFlash(reply, 'success', 'Moved back to waiting');
-      } else if (intent === 'rewrite') {
-        await rewriteNotes(deps.db, wid, id);
-        setFlash(reply, 'success', 'Claude is writing the notes again. This page updates when they’re ready.');
-      } else if (intent === 'github') {
-        if (row.status === 'writing' || row.status === 'posting' || row.status === 'posted') throw new UserFacingError('The notes can’t be changed right now.');
-        await deps.db.query(`UPDATE announcements SET notes = $2, notes_by = 'github', notes_error = NULL, updated_at = now_ms() WHERE id = $1`, [id, githubNotes(row.github_notes) || EMPTY_NOTES]);
-        setFlash(reply, 'success', 'Using GitHub’s notes, trimmed to fit Discord');
-      } else {
-        setFlash(reply, 'success', 'Notes saved');
-      }
+        const r = await publishPost(deps, wid, saved, ctx.user.id);
+        setFlash(reply, r.failed.length ? 'error' : 'success', r.failed.length
+          ? `Posted in ${r.posted.map((c) => `#${c}`).join(', ')}, but not in ${r.failed.join(', ')}.`
+          : `Posted in ${r.posted.map((c) => `#${c}`).join(', ')}`);
+      } else if (intent === 'update' && current?.status === 'posted') {
+        const r = await updatePosted(deps, (await getPost(deps.db, wid, saved))!);
+        setFlash(reply, 'success', r.missing.length ? `Updated. Deleted in Discord, so dropped: ${r.missing.map((c) => `#${c}`).join(', ')}.` : 'Updated in Discord. No one was pinged again.');
+      } else setFlash(reply, 'success', 'Draft saved');
     } catch (err) {
       if (!(err instanceof UserFacingError)) throw err;
       setFlash(reply, 'error', err.message);
-    }
-    return reply.redirect(back);
-  });
-
-  // ---- Settings ---------------------------------------------------------------------------------------
-
-  async function healthChecks(ctx: WorkspaceRequestContext, s: AnnouncementSettings, guild: GuildAccess | null, roles: RoleInspection | null, apps: AppRow[], appSettings: Map<string, AppAnnounceSettings>): Promise<Check[]> {
-    const wid = ctx.workspace.id;
-    const m = ctx.membership;
-    const checks: Check[] = [];
-    const [conn, gh, key] = await Promise.all([getDiscordConnection(deps.db, wid), getGitHubConnection(deps.db, wid), resolveClaudeKey(deps, wid)]);
-    if (!conn) checks.push({ status: 'error', title: 'Connect a Discord server first', fix: can(m, 'manage') ? { label: 'Connect Discord', href: `${ctx.base}/setup/discord` } : undefined });
-    else if (guild && !guild.ok) checks.push({ status: 'error', title: guild.message });
-    if (!gh || gh.status !== 'active') checks.push({ status: 'error', title: 'Connect GitHub first', fix: can(m, 'manage') ? { label: 'Connect GitHub', href: `${ctx.base}/setup/github` } : undefined });
-    const announced = announcedRepos(apps, appSettings);
-    checks.push(announced.length ? { status: 'ok', title: `${plural(announced.length, 'app')} announced` } : { status: 'error', title: 'No apps are announced', detail: apps.length ? 'Turn on at least one app under Apps.' : 'Add an app first.' });
-    if (guild?.ok) {
-      const channelIds = new Set([s.channelId, ...announced.map((a) => appSettings.get(a.id)?.channelId)].filter((c): c is string => Boolean(c)));
-      if (!s.channelId) checks.push({ status: 'error', title: 'No channel chosen' });
-      for (const id of channelIds) {
-        const c = guild.channels.find((x) => x.id === id);
-        if (!c) checks.push({ status: 'error', title: 'A chosen channel no longer exists or is hidden from the bot', detail: 'Choose another one.' });
-        else if (c.missing.length) checks.push({ status: 'error', title: `The bot is missing permissions in #${c.name}`, detail: `Missing: ${c.missing.join(', ')}` });
-        else checks.push({ status: 'ok', title: `The bot can post in #${c.name}` });
+      // A new one that couldn't be saved as it is: its text is kept as a draft, so nothing typed is lost.
+      if (!id && at.endsWith('/new')) {
+        const text = (k: string, max: number) => (typeof body[k] === 'string' ? (body[k] as string).replace(/\r\n/g, '\n').trim().slice(0, max) : '');
+        const draft = { content: text('content', POST_LIMITS.content), cardTitle: text('card_title', POST_LIMITS.title) || null, cardText: text('card_text', POST_LIMITS.text) || null, cardColor: 'blurple' as CardColor, role: null, buttons: [], channels: [] };
+        if (hasBody({ content: draft.content, card_title: draft.cardTitle, card_text: draft.cardText })) at = `${base(ctx)}/${await savePost(deps.db, wid, ctx.user.id, null, draft)}`;
       }
     }
-    if (s.pingEnabled && roles?.ok) {
-      const used = new Map<string, string>();
-      if (s.roleId) used.set(s.roleId, s.roleName ?? 'role');
-      for (const a of announced) {
-        const t = targetFor(s, appSettings.get(a.id));
-        if (t.roleId) used.set(t.roleId, t.roleName ?? 'role');
-      }
-      if (!s.roleId && ![...announced].some((a) => appSettings.get(a.id)?.roleMode === 'role')) checks.push({ status: 'warning', title: 'Pings are on, but no role is chosen', detail: 'Choose the role to ping.' });
-      for (const [id, name] of used) {
-        const role = roles.roles.find((r) => r.id === id);
-        if (!role) checks.push({ status: 'error', title: `@${name} no longer exists`, detail: 'Choose another role.' });
-        else if (!role.mentionable && !roles.canMentionAll) checks.push({ status: 'warning', title: `@${role.name} won’t be pinged`, detail: 'In Discord: Server Settings › Roles › the role › turn on “Allow anyone to @mention this role”, or give the bot “Mention @everyone, @here and All Roles”.' });
-        else checks.push({ status: 'ok', title: `@${role.name} can be pinged` });
-      }
-    }
-    if (s.notesSource === 'claude') {
-      checks.push(key
-        ? { status: 'ok', title: 'Claude writes the notes', detail: key.source === 'server' ? 'with the server’s API key' : undefined }
-        : { status: 'warning', title: 'No Claude API key', detail: 'GitHub’s notes are posted as written until a key is added.', fix: can(m, 'manage') ? { label: 'Add key', href: `${ctx.base}/settings/claude` } : undefined });
-    }
-    if (!s.enabled) checks.push({ status: 'warning', title: 'Announcements are off', detail: 'Turn them on at the top to check for new releases.' });
-    return checks;
+    return reply.redirect(at);
   }
 
-  app.get('/w/:wid/announcements/settings', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply, { permission: 'announcement-settings.view' });
-    if (!ctx) return reply;
-    const wid = ctx.workspace.id;
-    const b = base(ctx);
-    const edit = can(ctx.membership, 'announcement-settings.edit');
-    const [s, apps, appSettings, conn, rows, bot] = await Promise.all([
-      getAnnouncementSettings(deps.db, wid), listApps(deps.db, wid), appAnnounceSettings(deps.db, wid), getDiscordConnection(deps.db, wid), listAnnouncements(deps.db, wid, 20), botIdentity(deps),
-    ]);
-    const sorted = [...apps].sort((x, y) => x.position - y.position);
-    const [guild, roles] = conn && deps.discord ? await Promise.all([inspectGuild(deps.discord, conn.guild_id), inspectRoles(deps.discord, conn.guild_id)]) : [null, null];
-    const checks = await healthChecks(ctx, s, guild, roles, apps, appSettings);
-    const sample = await sampleRelease(wid, rows, sorted, appSettings);
-    const appName = new Map(sorted.map((a) => [a.id, a.name]));
-    // What a button's link finds in the preview's release, under its row (app.js keeps it current).
-    const btnStatus = (b: AnnounceButton): string => {
-      if (!b.label.trim() && !b.url.trim()) return '';
-      if (b.appId && sample.appId && b.appId !== sample.appId) return `Only for ${appName.get(b.appId) ?? 'another app'}`;
-      const link = resolveLink(b.url, sample);
-      if (link.missing !== null) return sample.real ? `Left out for ${sample.tag}: no file matches ${link.missing || 'the pattern'}` : 'Shown when a release has a matching file';
-      if (!link.url) return 'Not a web address yet: left out';
-      return link.file ? `${sample.tag}: ${link.file}` : link.url;
-    };
-    const btnRow = (b: AnnounceButton) => html`<div class="ann-btn" data-btn-row>
-      <input type="text" name="btn_label" value="${b.label}" maxlength="${String(BUTTON_LIMITS.label)}" placeholder="Label" aria-label="Button label">
-      <input type="text" name="btn_url" value="${b.url}" maxlength="${String(BUTTON_LIMITS.url)}" placeholder="https://… or {file:*-windows-x64.msi}" aria-label="Button link" class="mono" spellcheck="false" autocomplete="off">
-      ${selectWrap(html`<select name="btn_app" aria-label="Which apps"><option value="" ${b.appId ? '' : raw('selected')}>All apps</option>${sorted.map((a) => html`<option value="${a.id}" ${a.id === b.appId ? raw('selected') : ''}>${a.name}</option>`)}</select>`, { sm: true })}
-      ${edit ? html`<button type="button" class="icon-btn sm" data-btn-remove aria-label="Remove button" title="Remove button">${icon('x', 16)}</button>` : html`<span></span>`}
-      <div class="ann-btn-st small muted" data-btn-status>${btnStatus(b)}</div>
-    </div>`;
-    // Ready-made buttons for the preview release's files (each one's label and link can be changed).
-    const suggestions = sample.real
-      ? [...new Map(sample.files.filter((f) => classifyAsset(f.name).kind !== 'meta').map((f) => [f.name, { file: f.name, ...suggestButton(f.name, sample.tag) }])).values()].slice(0, 40)
-      : [];
-    const sampleTarget = targetFor(s, sample.appId ? appSettings.get(sample.appId) : undefined);
-    const previewRole = sampleTarget.roleId;
-    // The ping and role fields redraw the preview only when the sample uses the workspace's role.
-    const followsRole = (sample.appId ? appSettings.get(sample.appId)?.roleMode ?? 'default' : 'default') === 'default';
-    const roleList = roles?.ok ? roles.roles.filter((r) => !r.reason?.startsWith('Managed')) : [];
-    const roleNames = new Map<string, string>(roleList.map((r) => [r.id, r.name]));
-    if (s.roleId && !roleNames.has(s.roleId)) roleNames.set(s.roleId, s.roleName ?? 'role');
-
-    const channels = guild?.ok ? guild.channels : [];
-    const channelOptions = (selected: string | null, o: { def?: string } = {}) => html`
-      ${o.def !== undefined ? html`<option value="" ${selected ? '' : raw('selected')}>${o.def}</option>` : selected ? '' : html`<option value="" selected disabled>Choose a channel…</option>`}
-      ${channels.map((c) => html`<option value="${c.id}" ${c.id === selected ? raw('selected') : ''} ${c.missing.length ? raw('disabled') : ''}>#${c.name}${c.missing.length ? ` (bot missing: ${c.missing.join(', ')})` : c.category ? ` · ${c.category}` : ''}</option>`)}
-      ${selected && !channels.some((c) => c.id === selected) ? html`<option value="${selected}" selected>#${o.def !== undefined ? (selected === s.channelId ? s.channelName : '') ?? 'unknown' : s.channelName ?? 'unknown'}</option>` : ''}`;
-    const roleOptions = (selected: string | null, first: SafeHtml) => html`${first}
-      ${roleList.map((r) => html`<option value="${r.id}" ${r.id === selected ? raw('selected') : ''} ${r.elevated.length && r.id !== selected ? raw('disabled') : ''}>@${r.name}${r.elevated.length ? ' (has moderator permissions)' : !r.mentionable && !(roles?.ok && roles.canMentionAll) ? ' (can’t be pinged yet)' : ''}</option>`)}
-      ${selected && !roleList.some((r) => r.id === selected) ? html`<option value="${selected}" selected>@${roleNames.get(selected) ?? 'unknown role'}</option>` : ''}`;
-    const discordUnavailable = html`<span class="small muted">${conn ? 'Discord can’t be reached right now.' : 'Connect Discord first.'}</span>`;
-
-    const channelControl = guild?.ok ? selectWrap(html`<select id="ann-channel" name="channel_id" aria-label="Announcements channel">${channelOptions(s.channelId)}</select>`) : discordUnavailable;
-    const roleControl = roles?.ok
-      ? selectWrap(html`<select id="ann-role" name="role_id" aria-label="Role to ping" ${followsRole ? raw('data-tpl-role') : ''}>${roleOptions(s.roleId, html`<option value="" ${s.roleId ? '' : raw('selected')}>Choose a role…</option>`)}</select>`)
-      : discordUnavailable;
-    const t = { message: s.messageText ?? TEMPLATE_DEFAULTS.message, title: s.titleText ?? TEMPLATE_DEFAULTS.title, body: s.bodyText ?? TEMPLATE_DEFAULTS.body };
-    const placeholders = html`Fill-ins: ${PLACEHOLDERS.map((p, i) => html`${i ? ', ' : ''}<code>{${p}}</code>`)}. {role} is the ping (nothing when there’s none).`;
-    const defaultRoleName = s.roleId ? `@${s.roleName ?? 'role'}` : 'no role yet';
-
-    const appRows = sorted.map((a) => {
-      const x = appSettings.get(a.id) ?? APP_DEFAULTS;
-      const roleValue = x.roleMode === 'role' ? x.roleId : x.roleMode === 'none' ? 'none' : '';
-      return html`<tr>
-        <td><span class="cell-title">${a.name}</span><div class="sub mono truncate">${a.repo_owner}/${a.repo_name}</div></td>
-        <td>${switchInput({ name: `app_${a.id}_on`, checked: x.enabled, label: `Announce ${a.name}` })}</td>
-        <td>${guild?.ok ? selectWrap(html`<select name="app_${a.id}_channel" aria-label="${`Channel for ${a.name}`}">${channelOptions(x.channelId, { def: 'Default' })}</select>`, { sm: true }) : html`<span class="small muted">${x.channelName ? `#${x.channelName}` : 'Default'}</span>`}</td>
-        <td>${roles?.ok ? selectWrap(html`<select name="app_${a.id}_role" aria-label="${`Ping for ${a.name}`}">${roleOptions(roleValue === 'none' ? null : roleValue, html`<option value="" ${roleValue === '' ? raw('selected') : ''}>Default</option><option value="none" ${roleValue === 'none' ? raw('selected') : ''}>No ping</option>`)}</select>`, { sm: true }) : html`<span class="small muted">${x.roleMode === 'role' ? `@${x.roleName ?? 'role'}` : x.roleMode === 'none' ? 'No ping' : 'Default'}</span>`}</td>
-      </tr>`;
-    });
-
-    const fields = html`
-      <div class="card-h strip"><div class="row">${s.enabled ? pill(s.mode === 'auto' ? 'Automatic' : 'Review first', 'ok') : pill('Off', 'neutral')}<span class="small muted">${s.enabled
-        ? `New releases are checked every ${CHECK_MS / 60_000} minutes${s.enabledAt ? `, since ${timeAgo(s.enabledAt)}` : ''}.`
-        : 'Nothing is checked or posted. Releases published before you turn it on aren’t announced.'}</span></div></div>
-      <fieldset class="plain${edit ? '' : ' view-only'}" ${edit ? '' : raw('disabled')}>
-      <div class="section">
-        ${setting('Announcements', 'Check every app’s GitHub releases and announce the new ones.', switchInput({ name: 'enabled', checked: s.enabled, label: 'Announcements turned on', id: 'ann-enabled' }), { flat: true, switchRow: true })}
-        ${setting('Posting', null, choices('mode', [
-          { value: 'review', title: 'Review first', desc: 'New releases wait under Posts until someone checks the notes and posts them.' },
-          { value: 'auto', title: 'Automatic', desc: 'Posted as soon as the notes are written. You can still edit or delete a post afterwards.' },
-        ], s.mode), { flat: true, stacked: true })}
-        ${setting('Channel', 'Where releases are posted. Apps can have their own below. In an announcement channel, posts are also published to servers that follow it.', channelControl, { for: guild?.ok ? 'ann-channel' : undefined, flat: true })}
-        ${setting('Pre-releases', 'Also announce releases marked as pre-release on GitHub.', switchInput({ name: 'include_prereleases', checked: s.includePrereleases, label: 'Announce pre-releases', id: 'ann-pre' }), { flat: true, switchRow: true })}
-      </div>
-      <div class="section">
-        <div class="section-h"><div><h3>Release notes</h3><div class="desc">What goes in {notes}. You can always edit them before posting.</div></div></div>
-        ${choices('notes_source', [
-          { value: 'claude', title: 'Friendlier, written by Claude', desc: 'From GitHub’s notes: what changed for people using the app, without build and code details. Uses your Claude API key.' },
-          { value: 'github', title: 'As written on GitHub', desc: 'The release notes as they are, trimmed to fit Discord.' },
-        ], s.notesSource)}
-        <div class="fields mt-16">
-          ${textField({ id: 'notes_instructions', label: 'Instructions for Claude (optional)', value: s.notesInstructions ?? '', max: INSTRUCTIONS_MAX, rows: 3, placeholder: 'For example: keep it to 5 bullets, start each with a fitting emoji, and mention when something needs a restart.', hint: 'Added to what Claude is asked, for tone, length or emoji.' })}
-        </div>
-      </div>
-      <div class="section">
-        <div class="section-h"><div><h3>Message</h3><div class="desc">${placeholders}</div></div>
-          ${edit ? html`<button type="button" class="btn ghost sm" data-reset-fields="message_text title_text body_text"><span class="lead">${icon('undo-2', 14)}</span><span class="lbl">Reset to default</span></button>` : ''}</div>
-        <div class="fields">
-          ${textField({ id: 'message_text', label: 'Message', value: t.message, max: TEMPLATE_LIMITS.message, rows: 2, placeholder: TEMPLATE_DEFAULTS.message, defaultValue: TEMPLATE_DEFAULTS.message, preview: 'pv-message', hint: 'Above the post. Put {role} here for the ping to notify people.' })}
-          ${textField({ id: 'title_text', label: 'Title', value: t.title, max: TEMPLATE_LIMITS.title, placeholder: TEMPLATE_DEFAULTS.title, defaultValue: TEMPLATE_DEFAULTS.title, preview: 'pv-title', hint: 'Links to the release on GitHub.' })}
-          ${textField({ id: 'body_text', label: 'Text', value: t.body, max: TEMPLATE_LIMITS.body, rows: 3, placeholder: TEMPLATE_DEFAULTS.body, defaultValue: TEMPLATE_DEFAULTS.body, preview: 'pv-body' })}
-        </div>
-      </div>
-      <div class="section">
-        <div class="section-h"><div><h3>Buttons</h3><div class="desc">Under the post, in this order. A link is a web address, <code>{link}</code> (the release on GitHub) or <code>{file:pattern}</code>: one of the release’s files, with * for anything, so <code>{file:*-windows-x64.msi}</code> finds it in every release. A release without that file just doesn’t get the button. Labels and links can use <code>{app}</code>, <code>{version}</code> and <code>{number}</code> (the version without its v).</div></div></div>
-        <div class="ann-btns" data-btn-editor data-btn-max="${String(BUTTONS_MAX)}">
-          <input type="hidden" name="buttons" value="1">
-          ${s.buttons.length || edit ? html`<div class="ann-btn-head" aria-hidden="true"><span>Label</span><span>Link</span><span>For</span></div>` : ''}
-          <div data-btn-rows>${s.buttons.map(btnRow)}</div>
-          ${edit ? html`<noscript>${btnRow({ label: '', url: '', appId: null })}</noscript>
-            <div class="row ann-btn-add">
-              <button type="button" class="btn sm" data-btn-add ${s.buttons.length >= BUTTONS_MAX ? raw('disabled') : ''}><span class="lead">${icon('plus', 14)}</span><span class="lbl">Add button</span></button>
-              ${suggestions.length ? selectWrap(html`<select data-btn-suggest aria-label="${`Add a button for one of ${sample.appName} ${sample.tag}’s files`}"><option value="">Add one for a file in ${sample.appName} ${sample.tag}…</option>${suggestions.map((x) => html`<option value="${x.url}" data-label="${x.label}">${x.file}</option>`)}</select>`, { sm: true }) : ''}
-            </div>
-            <template id="ann-btn-row">${btnRow({ label: '', url: '', appId: null })}</template>`
-          : s.buttons.length ? '' : html`<p class="small muted">No buttons of your own.</p>`}
-        </div>
-        ${setting('Release notes button', 'A button to the release on GitHub, after your own.', switchInput({ name: 'notes_button', checked: s.notesButton, label: 'Release notes button', id: 'ann-notes-btn' }), { flat: true, switchRow: true })}
-        <div class="fields ann-notes-label">${textField({ id: 'notes_button_label', label: 'Its label', value: s.notesButtonLabel ?? NOTES_BUTTON_DEFAULT, max: BUTTON_LIMITS.label, placeholder: NOTES_BUTTON_DEFAULT, defaultValue: NOTES_BUTTON_DEFAULT })}</div>
-      </div>
-      <div class="section">
-        <div class="section-h"><div><h3>Pings</h3><div class="desc">Off until you have a role for it. Members can give themselves the role from the ${pageLink(ctx, 'announcement-pings', 'Pings panel')}.</div></div></div>
-        ${setting('Ping a role', 'Each post pings the role below (or an app’s own). Only that role is pinged, never @everyone.', switchInput({ name: 'ping_enabled', checked: s.pingEnabled, label: 'Ping a role', id: 'ann-ping', attrs: followsRole ? html`data-tpl-role-on` : undefined }), { flat: true, switchRow: true })}
-        ${setting('Role', 'For every app, unless an app has its own below.', roleControl, { for: roles?.ok ? 'ann-role' : undefined, flat: true })}
-      </div>
-      <div class="section">
-        <div class="section-h"><div><h3>Apps</h3><div class="desc">Which apps are announced, and where. Two apps on one repository are announced once, as the first.</div></div></div>
-        ${sorted.length
-          ? html`<input type="hidden" name="apps" value="1"><div class="table-wrap"><table class="ann-apps"><thead><tr><th class="col-main">App</th><th>Announce</th><th>Channel<div class="sub">Default: ${s.channelName ? `#${s.channelName}` : 'none yet'}</div></th><th>Ping<div class="sub">${s.pingEnabled ? `Default: ${defaultRoleName}` : 'When pings are on'}</div></th></tr></thead><tbody>${appRows}</tbody></table></div>`
-          : html`<p class="small muted">Add apps first on ${pageLink(ctx, 'apps', 'Apps & repositories')}.</p>`}
-      </div>
-      <div class="section">
-        <div class="section-h"><div><h3>Health</h3><div class="desc">Checked live against Discord, GitHub and Claude when this page loads.</div></div>${linkBtn(`${b}/settings`, 'Check again', { variant: 'ghost', size: 'sm', icon: 'refresh-cw' })}</div>
-        ${checklist(checks)}
-      </div>
-      </fieldset>`;
-
-    const body = html`
-      ${await toolHeader(web, ctx, 'announcements', 'announcement-settings')}
-      ${roleNamesJson(roleNames)}
-      <div class="panel-grid">
-        ${edit
-          ? html`<form method="post" action="${b}/settings" class="card" data-dirty>
-              ${csrfField(ctx.csrf)}
-              ${fields}
-              <div class="card-f">
-                <button type="submit" class="btn ghost" form="ann-test" ${s.channelId ? '' : raw('disabled title="Choose a channel and save first"')}><span class="lead">${icon('send')}</span><span class="lbl">Send a test post</span></button>
-                <div class="end">
-                  <span class="row small muted" data-dirty-show hidden><span class="dot c4" aria-hidden="true"></span>Unsaved changes</span>
-                  <button type="button" class="btn ghost" data-discard data-dirty-show hidden>Discard</button>
-                  ${submitBtn('Save changes', { variant: 'primary', loading: 'Saving…', attrs: raw('data-dirty-enable') })}
-                </div>
-              </div>
-            </form>`
-          : html`<div class="card">${fields}<div class="card-f">${viewOnlyFooter('announcements')}</div></div>`}
-        <div class="panel-preview">
-          ${previewCaption(s.channelName, null)}
-          ${announcementPreview(bot, sample, s, previewRole, roleNames)}
-          <p class="dp-note">${rows.some((r) => r.status !== 'writing') ? `Shown with ${sample.appName} ${sample.tag}.` : 'Shown with a sample release.'} ${previewRole ? 'Only the chosen role is pinged.' : 'No one is pinged.'}</p>
-        </div>
-      </div>
-      ${edit ? html`<form method="post" action="${b}/test" id="ann-test" hidden data-confirm-title="Send a test post to #${s.channelName ?? ''}?" data-confirm-body="It uses ${sample.appName} ${sample.tag}, marked as a test, and pings no one. You can delete it in Discord afterwards." data-confirm-label="Send test">${csrfField(ctx.csrf)}</form>` : ''}`;
-    return web.render(reply, ctx, 'Settings · Announcements', 'announcements', body);
-  });
-
-  app.post('/w/:wid/announcements/settings', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply, { permission: 'announcement-settings.edit' });
-    if (!ctx) return reply;
-    const wid = ctx.workspace.id;
-    const back = `${base(ctx)}/settings`;
-    const body = (req.body ?? {}) as Record<string, string | undefined>;
-    try {
-      const [current, apps, appSettings, conn] = await Promise.all([getAnnouncementSettings(deps.db, wid), listApps(deps.db, wid), appAnnounceSettings(deps.db, wid), getDiscordConnection(deps.db, wid)]);
-      let guild: GuildAccess | null = null;
-      let roles: RoleInspection | null = null;
-      const discordNeeded = () => {
-        if (!conn || !deps.discord) throw new UserFacingError('Connect a Discord server first.');
-        return { discord: deps.discord, guildId: conn.guild_id };
-      };
-      // Server-side allowlists: channels and roles must belong to the connected server.
-      const channelOf = async (id: string | undefined, keep: { id: string | null; name: string | null }): Promise<{ id: string | null; name: string | null }> => {
-        if (!id) return { id: null, name: null };
-        if (id === keep.id) return keep;
-        const d = discordNeeded();
-        guild ??= await inspectGuild(d.discord, d.guildId);
-        if (!guild.ok) throw new UserFacingError('Couldn’t read the server from Discord. Try again in a moment.');
-        const c = guild.channels.find((x) => x.id === id);
-        if (!c) throw new UserFacingError('Choose one of the listed channels.');
-        if (c.missing.length) throw new UserFacingError(`The bot is missing permissions in #${c.name}: ${c.missing.join(', ')}.`);
-        return { id: c.id, name: c.name };
-      };
-      const roleOf = async (id: string | undefined, keep: { id: string | null; name: string | null }): Promise<{ id: string | null; name: string | null }> => {
-        if (!id) return { id: null, name: null };
-        if (id === keep.id) return keep;
-        const d = discordNeeded();
-        roles ??= await inspectRoles(d.discord, d.guildId);
-        const r = roles.ok ? roles.roles.find((x) => x.id === id && !x.reason?.startsWith('Managed')) : undefined;
-        if (!r) throw new UserFacingError('Choose one of the listed roles.');
-        // Members can give themselves a ping role from the Pings panel: never one with moderator powers.
-        if (r.elevated.length) throw new UserFacingError(`@${r.name} can ${r.elevated.slice(0, 3).join(', ')}, so it can’t be a ping role members give themselves. Use a role made just for pings.`);
-        return { id: r.id, name: r.name };
-      };
-      const text = (k: string, max: number, def: string | null) => {
-        const v = (body[k] ?? '').replace(/\r\n/g, '\n').trim().slice(0, max);
-        return v && v !== def ? v : null;
-      };
-      const channel = body.channel_id !== undefined ? await channelOf(body.channel_id, { id: current.channelId, name: current.channelName }) : { id: current.channelId, name: current.channelName };
-      const role = body.role_id !== undefined ? await roleOf(body.role_id, { id: current.roleId, name: current.roleName }) : { id: current.roleId, name: current.roleName };
-      const next: AnnouncementSettings = {
-        ...current,
-        enabled: body.enabled !== undefined,
-        mode: body.mode === 'auto' ? 'auto' : 'review',
-        channelId: channel.id,
-        channelName: channel.name,
-        includePrereleases: body.include_prereleases !== undefined,
-        notesSource: body.notes_source === 'github' ? 'github' : 'claude',
-        notesInstructions: text('notes_instructions', INSTRUCTIONS_MAX, null),
-        messageText: body.message_text !== undefined ? text('message_text', TEMPLATE_LIMITS.message, TEMPLATE_DEFAULTS.message) : current.messageText,
-        titleText: body.title_text !== undefined ? text('title_text', TEMPLATE_LIMITS.title, TEMPLATE_DEFAULTS.title) : current.titleText,
-        bodyText: body.body_text !== undefined ? text('body_text', TEMPLATE_LIMITS.body, TEMPLATE_DEFAULTS.body) : current.bodyText,
-        buttons: body.buttons === '1' ? buttonsFrom(req.body as Record<string, unknown>, apps) : current.buttons,
-        notesButton: body.notes_button !== undefined,
-        notesButtonLabel: body.notes_button_label !== undefined ? text('notes_button_label', BUTTON_LIMITS.label, NOTES_BUTTON_DEFAULT) : current.notesButtonLabel,
-        pingEnabled: body.ping_enabled !== undefined,
-        roleId: role.id,
-        roleName: role.name,
-      };
-      if (next.enabled && !next.channelId) throw new UserFacingError('Choose the channel to post in, then turn announcements on.');
-      // The apps table was on the form (its switches are only sent when on).
-      for (const a of body.apps === '1' ? apps : []) {
-        const x = appSettings.get(a.id) ?? APP_DEFAULTS;
-        const ch = body[`app_${a.id}_channel`] !== undefined ? await channelOf(body[`app_${a.id}_channel`], { id: x.channelId, name: x.channelName }) : { id: x.channelId, name: x.channelName };
-        const rv = body[`app_${a.id}_role`];
-        let roleMode: RoleMode = x.roleMode;
-        let appRole = { id: x.roleId, name: x.roleName };
-        if (rv !== undefined) {
-          roleMode = rv === '' ? 'default' : rv === 'none' ? 'none' : 'role';
-          appRole = roleMode === 'role' ? await roleOf(rv, { id: x.roleId, name: x.roleName }) : { id: null, name: null };
-        }
-        await saveAppAnnounceSettings(deps.db, wid, a.id, { enabled: body[`app_${a.id}_on`] !== undefined, channelId: ch.id, channelName: ch.name, roleMode, roleId: appRole.id, roleName: appRole.name });
-      }
-      await saveAnnouncementSettings(deps.db, wid, next);
-      setFlash(reply, 'success', next.enabled && !current.enabled
-        ? `Announcements are on. New releases are checked every ${CHECK_MS / 60_000} minutes${next.mode === 'review' ? ' and wait under Posts' : ''}.`
-        : 'Settings saved');
-    } catch (err) {
-      if (!(err instanceof UserFacingError)) throw err;
-      setFlash(reply, 'error', err.message);
-    }
-    return reply.redirect(back);
-  });
-
-  app.post('/w/:wid/announcements/test', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply, { permission: 'announcement-settings.edit' });
-    if (!ctx) return reply;
-    const wid = ctx.workspace.id;
-    try {
-      const s = await getAnnouncementSettings(deps.db, wid);
-      if (!deps.discord) throw new UserFacingError('Discord is not configured on this deployment.');
-      if (!s.channelId) throw new UserFacingError('Choose a channel and save first.');
-      const sample = await sampleRelease(wid, await listAnnouncements(deps.db, wid, 20), await listApps(deps.db, wid), await appAnnounceSettings(deps.db, wid));
-      const payload = announcementPayload(sample, s, null);
-      await deps.discord.createMessage(s.channelId, { ...payload, content: `*Test post: no one was pinged.*${payload.content ? `\n${payload.content}` : ''}` });
-      setFlash(reply, 'success', `Test post sent to #${s.channelName ?? ''}`);
-    } catch (err) {
-      if (err instanceof UserFacingError) setFlash(reply, 'error', err.message);
-      else {
-        deps.log.warn({ err: (err as Error).message }, 'announcement test post failed');
-        setFlash(reply, 'error', 'Discord didn’t take the test post. Check the health list for missing permissions.');
-      }
-    }
-    return reply.redirect(`${base(ctx)}/settings`);
-  });
-
-  // ---- Pings panel ------------------------------------------------------------------------------------
-
-  function pingPreview(bot: BotIdentity, s: AnnouncementSettings, roles: PingRole[]): SafeHtml {
-    const names = new Map(roles.map((r) => [r.id, r.name]));
-    const list = roles.map((r) => `- <@&${r.id}>: ${r.apps.join(', ')}`).join('\n');
-    return botMessage(bot, html`<div class="dp-embed"><h4 id="pv-ptitle">${s.panelTitle ?? PANEL_DEFAULTS.title}</h4>
-      <p><span id="pv-pintro">${discordMd(s.panelIntro ?? PANEL_DEFAULTS.intro)}</span>${roles.length ? html`<br><br>${discordMd(list, names)}` : ''}</p></div>
-      <div class="dp-buttons">${roles.length ? roles.map((r) => html`<span class="dp-button grey">${r.name}</span>`) : html`<span class="dp-button grey">No roles yet</span>`}</div>`, 'Preview of the pings message in Discord');
-  }
-
-  app.get('/w/:wid/announcements/pings', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply, { permission: 'announcement-pings.view' });
-    if (!ctx) return reply;
-    const wid = ctx.workspace.id;
-    const b = base(ctx);
-    const m = ctx.membership;
-    const edit = can(m, 'announcement-pings.edit');
-    const [s, conn, bot] = await Promise.all([getAnnouncementSettings(deps.db, wid), getDiscordConnection(deps.db, wid), botIdentity(deps)]);
-    const roles = await workspacePingRoles(deps.db, wid, s);
-    const inspection = conn && deps.discord ? await inspectRoles(deps.discord, conn.guild_id) : null;
-    const panel = await checkPingPanel(deps, wid, conn);
-    const settingsHref = canOpen(m, 'announcement-settings') ? areaHref(ctx, 'announcement-settings') : null;
-    const checks: Check[] = [];
-    if (!conn) checks.push({ status: 'error', title: 'Connect a Discord server first' });
-    if (!s.enabled) checks.push({ status: 'warning', title: 'Announcements are off', detail: 'Buttons answer “not available” until they’re on.', fix: settingsHref ? { label: 'Settings', href: settingsHref } : undefined });
-    if (!s.channelId) checks.push({ status: 'error', title: 'No announcements channel chosen', fix: settingsHref ? { label: 'Settings', href: settingsHref } : undefined });
-    if (!s.pingEnabled) checks.push({ status: 'error', title: 'Pings are off', detail: 'Turn on “Ping a role” and choose the role in Settings.', fix: settingsHref ? { label: 'Settings', href: settingsHref } : undefined });
-    else if (!roles.length) checks.push({ status: 'error', title: 'No role chosen to ping', fix: settingsHref ? { label: 'Settings', href: settingsHref } : undefined });
-    if (inspection?.ok) {
-      checks.push(inspection.canManageRoles
-        ? { status: 'ok', title: 'The bot has the Manage Roles permission' }
-        : { status: 'error', title: 'The bot is missing the Manage Roles permission', detail: 'In Discord: Server Settings › Roles › the bot’s role › turn on Manage Roles.' });
-      for (const r of roles) {
-        const role = inspection.roles.find((x) => x.id === r.id);
-        if (!role) checks.push({ status: 'error', title: `@${r.name} no longer exists` });
-        else if (role.elevated.length) checks.push({ status: 'error', title: `@${role.name} has moderator permissions`, detail: `${role.elevated.join(', ')}. Members can’t give themselves a role like that: use one made just for pings.` });
-        else if (!role.assignable) checks.push({ status: 'error', title: `The bot can’t give @${role.name}`, detail: `${role.reason}. In Server Settings › Roles, drag the bot’s role above @${role.name}.` });
-        else checks.push({ status: 'ok', title: `Members can get @${role.name}`, detail: r.apps.join(', ') });
-      }
-    } else if (inspection && !inspection.ok) checks.push({ status: 'error', title: inspection.message });
-    const blocking = checks.some((c) => c.status === 'error');
-    const strip = panel.state === 'published'
-      ? panel.channelChanged ? html`${pill('Channel changed', 'warn')}<span class="small muted">Update it to move it to #${s.channelName ?? ''}.</span>`
-        : panel.outdated ? html`${pill('Out of date', 'warn')}<span class="small muted">Roles or text changed since it was posted.</span>`
-          : html`${pill('Published', 'ok')}<span class="small muted">in #${s.channelName ?? ''}</span>`
-      : panel.state === 'missing' ? html`${pill('Deleted in Discord', 'warn')}<span class="small muted">Someone deleted the message.${edit ? ' Publish it again.' : ''}</span>`
-        : html`${pill('Not published', 'neutral')}<span class="small muted">${blocking ? 'Fix the checks below to publish.' : 'Ready to post.'}</span>`;
-    const publishLabel = panel.state === 'published' ? (panel.channelChanged ? 'Move message' : 'Update message') : panel.state === 'missing' ? 'Publish again' : 'Publish message';
-    const fields = html`
-      <div class="card-h strip"><div class="row">${strip}</div></div>
-      <fieldset class="plain${edit ? '' : ' view-only'}" ${edit ? '' : raw('disabled')}>
-      <div class="section">
-        <div class="section-h"><div><h3>Text</h3><div class="desc">Posted in the announcements channel. A button per role; members click it to get the role, and again to drop it.</div></div></div>
-        <div class="fields">
-          ${textField({ id: 'panel_title', label: 'Title', value: s.panelTitle ?? PANEL_DEFAULTS.title, max: PANEL_LIMITS.title, placeholder: PANEL_DEFAULTS.title, preview: 'pv-ptitle', defaultValue: PANEL_DEFAULTS.title })}
-          ${textField({ id: 'panel_intro', label: 'Introduction', value: s.panelIntro ?? PANEL_DEFAULTS.intro, max: PANEL_LIMITS.intro, rows: 3, placeholder: PANEL_DEFAULTS.intro, preview: 'pv-pintro', md: true, defaultValue: PANEL_DEFAULTS.intro })}
-        </div>
-      </div>
-      <div class="section">
-        <div class="section-h"><div><h3>Roles</h3><div class="desc">From ${pageLink(ctx, 'announcement-settings', 'Settings')}: the role to ping, and any app’s own.</div></div></div>
-        ${roles.length ? html`<div class="stack gap-8">${roles.map((r) => html`<div class="row">${tag(`@${r.name}`, { cls: 'role' })}<span class="small muted">${r.apps.join(', ')}</span></div>`)}</div>` : html`<p class="small muted">No roles yet.</p>`}
-      </div>
-      <div class="section">
-        <div class="section-h"><div><h3>Health</h3><div class="desc">Checked live against Discord when this page loads.</div></div>${linkBtn(`${b}/pings`, 'Check again', { variant: 'ghost', size: 'sm', icon: 'refresh-cw' })}</div>
-        ${checklist(checks)}
-      </div>
-      </fieldset>`;
-    const body = html`
-      ${await toolHeader(web, ctx, 'announcements', 'announcement-pings')}
-      <div class="panel-grid">
-        ${edit
-          ? html`<form method="post" action="${b}/pings" class="card" data-dirty>
-              ${csrfField(ctx.csrf)}
-              ${fields}
-              <div class="card-f">
-                ${panel.state !== 'not_published' ? html`<button type="submit" class="btn ghost danger" form="ann-remove"><span class="lead">${icon('trash-2')}</span><span class="lbl">Remove message</span></button>` : html`<span></span>`}
-                <div class="end">
-                  <span class="row small muted" data-dirty-show hidden><span class="dot c4" aria-hidden="true"></span>Unsaved changes</span>
-                  <button type="button" class="btn ghost" data-discard data-dirty-show hidden>Discard</button>
-                  ${blocking
-                    ? submitBtn('Save changes', { variant: 'primary', loading: 'Saving…', name: 'intent', value: 'save', attrs: raw('data-dirty-enable') })
-                    : submitBtn(publishLabel, { variant: 'primary', icon: 'send', loading: 'Publishing…', name: 'intent', value: 'publish' })}
-                </div>
-              </div>
-            </form>`
-          : html`<div class="card">${fields}<div class="card-f">${viewOnlyFooter('the pings message')}</div></div>`}
-        <div class="panel-preview">
-          ${previewCaption(s.channelName, panel.state === 'published' ? panel.link : null)}
-          ${pingPreview(bot, s, roles)}
-          <p class="dp-note">Members click a button to get the role, and again to drop it. Only they see the answer.</p>
-        </div>
-      </div>
-      ${edit && panel.state !== 'not_published' ? html`<form method="post" action="${b}/pings/remove" id="ann-remove" hidden data-confirm-title="Remove the pings message from Discord?" data-confirm-body="Members keep the roles they have. You can post it again later." data-confirm-label="Remove message" data-confirm-danger>${csrfField(ctx.csrf)}</form>` : ''}`;
-    return web.render(reply, ctx, 'Pings panel · Announcements', 'announcements', body);
-  });
-
-  app.post('/w/:wid/announcements/pings', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply, { permission: 'announcement-pings.edit' });
-    if (!ctx) return reply;
-    const wid = ctx.workspace.id;
-    const body = (req.body ?? {}) as Record<string, string | undefined>;
-    try {
-      const s = await getAnnouncementSettings(deps.db, wid);
-      const text = (k: 'panel_title' | 'panel_intro', def: string) => {
-        if (body[k] === undefined) return k === 'panel_title' ? s.panelTitle : s.panelIntro;
-        const v = (body[k] ?? '').replace(/\r\n/g, '\n').trim().slice(0, PANEL_LIMITS[k === 'panel_title' ? 'title' : 'intro']);
-        return v && v !== def ? v : null;
-      };
-      await saveAnnouncementSettings(deps.db, wid, { ...s, panelTitle: text('panel_title', PANEL_DEFAULTS.title), panelIntro: text('panel_intro', PANEL_DEFAULTS.intro) });
-      if (body.intent === 'publish') {
-        const result = await publishPingPanel(deps, wid, ctx.user.id);
-        setFlash(reply, 'success', { created: 'Pings message posted', updated: 'Pings message updated', moved: 'Pings message moved' }[result]);
-      } else setFlash(reply, 'success', 'Changes saved. Publish the message to show them in Discord.');
-    } catch (err) {
-      if (!(err instanceof UserFacingError)) throw err;
-      setFlash(reply, 'error', err.message);
-    }
-    return reply.redirect(`${base(ctx)}/pings`);
-  });
-
-  app.post('/w/:wid/announcements/pings/remove', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply, { permission: 'announcement-pings.edit' });
-    if (!ctx) return reply;
-    await unpublishPingPanel(deps, ctx.workspace.id);
-    setFlash(reply, 'success', 'Pings message removed from Discord. Members keep their roles.');
-    return reply.redirect(`${base(ctx)}/pings`);
-  });
+  app.post('/w/:wid/announcements/new', (req, reply) => save(req, reply, null));
+  app.post('/w/:wid/announcements/:id', (req, reply) => save(req, reply, (req.params as { id: string }).id));
 }

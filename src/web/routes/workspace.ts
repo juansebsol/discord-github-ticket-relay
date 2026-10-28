@@ -13,8 +13,9 @@ import type { LogDetail, TriageAction } from '../../triage/engine.js';
 import { getTriageSettings, monthlyUsage } from '../../triage/settings.js';
 import { getStatusSettings, statusRepos, statusRows } from '../../repo-status/tracker.js';
 import { analyticsRepos, getAnalyticsSettings } from '../../analytics/recorder.js';
-import { announcedRepos, announcementCounts, appAnnounceSettings, getAnnouncementSettings } from '../../announcements/settings.js';
-import { checkBoard, getBoardRow, getKnownIssuesSettings, issueOverrides } from '../../bot-features/known-issues.js';
+import { postCounts } from '../../announcements/posts.js';
+import { announcementCounts, getAnnouncementSettings } from '../../announcements/settings.js';
+import { checkBoard, getBoardRow, getKnownIssuesSettings } from '../../bot-features/known-issues.js';
 import type { StepState } from '../layout.js';
 import { setFlash } from '../session.js';
 import type { Web, WorkspaceRequestContext } from '../server.js';
@@ -306,23 +307,19 @@ async function analyticsCard({ web, ctx }: Shared): Promise<ToolCard> {
 }
 
 async function announcementsCard({ web, ctx }: Shared): Promise<ToolCard> {
-  const { db } = web.deps;
   const b = ctx.base;
-  const [s, counts, apps, appSettings] = await Promise.all([getAnnouncementSettings(db, ctx.workspace.id), announcementCounts(db, ctx.workspace.id), listApps(db, ctx.workspace.id), appAnnounceSettings(db, ctx.workspace.id)]);
-  const announced = announcedRepos(apps, appSettings).length;
+  const counts = await postCounts(web.deps.db, ctx.workspace.id);
   return {
     tool: 'announcements',
-    meta: s.enabled ? [s.channelName ? `#${s.channelName}` : 'No channel yet', plural(announced, 'app'), s.pingEnabled && s.roleName ? `pings @${s.roleName}` : 'no ping'].join(' · ') : 'Off',
-    status: !s.enabled ? pill('Off', 'neutral') : s.mode === 'auto' ? pill('Automatic', 'ok') : pill('Review first', 'ok'),
+    meta: counts.posted ? `${plural(counts.posted, 'announcement')} posted by the bot` : 'Write a message and the bot posts it in your channels',
+    status: html``,
     stats: [
-      { label: 'Waiting to post', value: counts.waiting, area: 'announcements', href: `${b}/announcements?show=waiting`, tone: counts.waiting ? 'accent' : undefined, title: 'New releases waiting for someone to post them' },
       { label: 'Posted, 30 days', value: counts.posted30, area: 'announcements', href: `${b}/announcements?show=posted` },
-      { label: 'Failed', value: counts.failed, area: 'announcements', href: `${b}/announcements?show=waiting`, tone: counts.failed ? 'warn' : undefined, title: 'Posts Discord didn’t take' },
+      { label: 'Drafts', value: counts.drafts, area: 'announcements', href: `${b}/announcements?show=draft`, tone: counts.drafts ? 'accent' : undefined, title: 'Written, not posted yet' },
     ],
     go: [
-      ...(!s.enabled && can(ctx.membership, 'announcement-settings.edit') ? [{ area: 'announcement-settings' as const, label: 'Set up Announcements', primary: true }] : []),
-      { area: 'announcements', label: 'Posts' },
-      { area: 'announcement-settings', label: 'Settings' },
+      ...(can(ctx.membership, 'announcements.edit') ? [{ area: 'announcements' as const, label: 'New announcement', href: `${b}/announcements/new`, primary: true }] : []),
+      { area: 'announcements', label: 'Announcements' },
     ],
   };
 }
@@ -330,22 +327,23 @@ async function announcementsCard({ web, ctx }: Shared): Promise<ToolCard> {
 async function botCard({ web, ctx, dc }: Shared): Promise<ToolCard> {
   const { db } = web.deps;
   const b = ctx.base;
-  const [s, row, overrides] = await Promise.all([getKnownIssuesSettings(db, ctx.workspace.id), getBoardRow(db, ctx.workspace.id), issueOverrides(db, ctx.workspace.id)]);
-  const board = await checkBoard(web.deps, ctx.workspace.id, dc, { live: false });
-  const kept = [...overrides.values()];
+  const wid = ctx.workspace.id;
+  const [ki, row, rel, counts] = await Promise.all([getKnownIssuesSettings(db, wid), getBoardRow(db, wid), getAnnouncementSettings(db, wid), announcementCounts(db, wid)]);
+  const board = await checkBoard(web.deps, wid, dc, { live: false });
+  const on = [ki.enabled, rel.enabled].filter(Boolean).length;
+  const kiState = !ki.enabled ? 'off' : board.state === 'published' ? 'live' : board.state === 'missing' ? 'deleted in Discord' : 'not published';
+  // Where Bot features opens (checked against a page this person can open).
+  const area = canOpen(ctx.membership, 'known-issues') ? 'known-issues' : 'releases';
   return {
     tool: 'bot',
-    meta: s.enabled ? `Known issues${s.channelName ? ` in #${s.channelName}` : ''}${board.state === 'published' ? ` · changed ${timeAgo(board.changedAt)}` : ''}` : 'Known issues board: off',
-    status: !s.enabled ? pill('Off', 'neutral') : board.state === 'published' ? pill('Live', 'ok') : board.state === 'missing' ? pill('Board deleted', 'warn') : pill('Not published', 'neutral'),
+    meta: `Known-issues board: ${kiState} · GitHub releases: ${!rel.enabled ? 'off' : rel.mode === 'auto' ? 'automatic' : 'review first'}`,
+    status: on ? pill(`${on} of 2 on`, 'ok') : pill('Off', 'neutral'),
     stats: [
-      { label: 'On the board', value: board.state === 'published' ? row?.issue_count ?? 0 : 0, area: 'known-issues', href: `${b}/bot/known-issues` },
-      { label: 'Pinned', value: kept.filter((o) => o.pinned).length, area: 'known-issues', href: `${b}/bot/known-issues` },
-      { label: 'Hidden', value: kept.filter((o) => o.hidden).length, area: 'known-issues', href: `${b}/bot/known-issues#hidden` },
+      { label: 'On the known-issues board', value: board.state === 'published' ? row?.issue_count ?? 0 : 0, area: 'known-issues', href: `${b}/bot/known-issues` },
+      { label: 'Releases waiting to post', value: counts.waiting, area: 'releases', href: `${b}/bot/releases?show=waiting`, tone: counts.waiting ? 'accent' : undefined, title: 'New releases waiting for someone to post them' },
+      { label: 'Releases posted, 30 days', value: counts.posted30, area: 'releases', href: `${b}/bot/releases?show=posted` },
     ],
-    go: [
-      ...(!s.enabled && can(ctx.membership, 'known-issues.edit') ? [{ area: 'known-issues' as const, label: 'Set up the board', href: `${b}/bot/known-issues`, primary: true }] : []),
-      { area: 'known-issues', label: 'Known issues' },
-    ],
+    go: [{ area, label: on ? 'Open Bot features' : 'Set up Bot features', href: `${b}/bot`, primary: !on && can(ctx.membership, area === 'known-issues' ? 'known-issues.edit' : 'release-settings.edit') }],
   };
 }
 

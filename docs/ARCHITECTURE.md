@@ -144,9 +144,16 @@ Discord endpoint, OAuth), one or more queue workers, and an optional triage work
   viewer's time zone (a `tr_tz` cookie app.js sets): ranges from today to 12 months, steps from 30
   minutes to a day (a step that would make over 400 buckets, or finer than a day beyond the 30-minute
   detail, isn't offered). Charts are drawn by app.js from the numbers on the page.
-- **Announcements** (`src/announcements/`, off by default per workspace in `announcement_settings`):
+- **Announcements** (`src/announcements/posts.ts`, table `posts`): messages the team writes and the
+  bot posts in the channels they pick, with an optional card (embed), link buttons and one role
+  ping (`allowed_mentions` names only that role). A draft until it's posted; posting claims the
+  row (`posting`) so one press posts it once, keeps each channel's message id in `targets`, and
+  crossposts in announcement channels. Updating edits those messages in place (a message deleted
+  in Discord is dropped); deleting them makes it a draft again with the same channels.
+- **Bot features › GitHub releases** (`src/announcements/` announcer, message, pings, settings;
+  off by default per workspace in `announcement_settings`, pages under `/bot/releases`):
   the worker's index loop checks each announced repository's latest releases every 5 minutes
-  (GraphQL, strict) and adds the ones published after Announcements was turned on to
+  (GraphQL, strict) and adds the ones published after GitHub releases was turned on to
   `announcements`, once per workspace, repository and tag (pre-releases only when included). Each
   new one gets its notes first (`writing`): Claude, with the workspace's key and triage model,
   rewrites GitHub's notes for users (the notes are data, never instructions; extra instructions
@@ -161,6 +168,10 @@ Discord endpoint, OAuth), one or more queue workers, and an optional triage work
   The "Get update pings" message (`announcement_panels`) has a button per ping role
   (`an:role:<id>`); the interaction is deferred, then the role is added or removed and the reply
   filled in. Only roles announcements ping can be given this way.
+- **Bot features** (`/bot`, `src/web/routes/bot.ts`) lists the features in `FEATURES`, each with
+  its switch (a form with `section=power`, which only turns it on or off and goes back to the page
+  it was on) and a gear that opens it; a feature's pages share `featureHeader` (the way back, its
+  switch, its tabs).
 - **Bot features › Known issues** (`src/bot-features/known-issues.ts`, off by default per
   workspace in `known_issues_settings`): the board is computed from the database alone: issues
   ranked by Discord tickets as Repo status › Most reported counts them, each one's status from the
@@ -198,10 +209,12 @@ Discord endpoint, OAuth), one or more queue workers, and an optional triage work
   `triage.prompt.view`. Non-members receive 404 on workspace routes.
 - The console's tools (Analytics `/analytics`, Repo status `/repos`, Discord tickets `/tickets`,
   GitHub issues `/issues`, AI triage `/triage`, Contributor roles `/contributors`, Announcements
-  `/announcements`, Bot features `/bot`) each have with one tab per page in `AREAS` order and a
-  shared header (`src/web/routes/tool.ts`). A tool opens on the first page the person can see;
-  pages they can't open show locked. Addresses from before (`/tickets/triage…`,
-  `/tickets/issues…`) redirect: 301 for GET, 307 for forms.
+  `/announcements`) each have with one tab per page in `AREAS` order and a shared header
+  (`src/web/routes/tool.ts`); Bot features `/bot` lists its features instead, each with its own
+  tabs. A tool opens on the first page the person can see; pages they can't open show locked.
+  Addresses from before (`/tickets/triage…`, `/tickets/issues…`, and `/announcements/settings`,
+  `/announcements/pings` and a release's `/announcements/:id` from when GitHub releases were
+  Announcements) redirect: 301 for GET, 307 for forms.
 - Workspace creation is limited to `PLATFORM_ADMIN_DISCORD_IDS`. If that list is empty, only the
   first user of a fresh deployment can create one. `OPEN_WORKSPACE_CREATION=true` lifts the limit.
 
@@ -277,7 +290,8 @@ stable user ID are recorded in the body.
 | `submissions` | Tickets, routing snapshot, queue state, lease, reconcile counters, encrypted payload |
 | `submission_events` | Append-only timeline for investigation |
 | `contributor_settings`, `contributor_panels`, `contributor_tiers` | On/off, panel channel, published panel, and role tiers (role + minimum contributions) per workspace |
-| `announcement_settings`, `announcement_apps`, `announcements`, `announcement_checks`, `announcement_panels` | Announcements: on/off, mode, channel, notes, templates and ping role; each app's on/off, channel and role; each release with its notes, status and post; when each repository was last checked; the "Get update pings" message |
+| `posts` | Announcements: each message, its card, buttons and ping, and the channels it's posted in (with their message ids) |
+| `announcement_settings`, `announcement_apps`, `announcements`, `announcement_checks`, `announcement_panels` | Bot features › GitHub releases: on/off, mode, channel, notes, templates and ping role; each app's on/off, channel and role; each release with its notes, status and post; when each repository was last checked; the "Get update pings" message |
 | `known_issues_settings`, `known_issue_overrides`, `known_issue_boards` | Bot features › Known issues: on/off, channel, what goes on the board and its texts; pins, hides, titles and notes per issue; the posted board and when it last changed |
 | `analytics_settings`, `download_assets`, `download_counts`, `download_days`, `download_sync`, `repo_star_changes` | Analytics: on/off; each release file and its total; downloads per 30 minutes (then per day); per repository, when recording began, the last slot read, the star count and any error; the change in the star count per 30 minutes |
 | `pull_index` | Pull requests of the indexed repositories (open, and closed for 90 days), with the issues each is for |

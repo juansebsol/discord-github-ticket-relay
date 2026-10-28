@@ -1,6 +1,6 @@
 /**
- * Bot features: extra things the bot does in Discord, one tab each. Known issues is the first: a
- * card with what the board is and whether it's live, then the issues on it, just below it and
+ * Bot features › Known-issues board: under a header with its switch and publishing, a
+ * card with where the board is and what needs a look, then the issues on it, just below it and
  * hidden, and its settings, each a closed row that opens to change it, beside a preview of the
  * message.
  */
@@ -42,7 +42,7 @@ import { setFlash } from '../session.js';
 import type { Web, WorkspaceRequestContext } from '../server.js';
 import { csrfField, icon, linkBtn, menu, pageHeader, pill, plural, postBtn, selectWrap, setting, submitBtn, switchInput, tag, timeAgo, type IconName, type Tone } from '../ui.js';
 import { checklist, textField } from './panel.js';
-import { areaHref, toolHeader, toolHref } from './tool.js';
+import { backTo, featureHeader } from './bot.js';
 import { viewOnlyFooter } from './triage.js';
 
 type Check = { key?: 'channel' | 'button' | 'private'; status: 'ok' | 'warning' | 'error'; title: string; detail?: string; fix?: { label: string; href: string } };
@@ -82,19 +82,6 @@ export function registerBotFeatureRoutes(app: FastifyInstance, web: Web): void {
   const { deps } = web;
   const base = (ctx: WorkspaceRequestContext) => `${ctx.base}/bot/known-issues`;
 
-  app.get('/w/:wid/bot', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply, { permission: 'known-issues.view' });
-    if (!ctx) return reply;
-    return reply.redirect(areaHref(ctx, 'known-issues'));
-  });
-
-  function boardPill(s: KnownIssuesSettings, state: BoardState): SafeHtml {
-    if (!s.enabled) return pill('Off', 'neutral');
-    if (state.state === 'published') return state.channelChanged ? pill('Channel changed', 'warn') : pill('Live', 'ok');
-    if (state.state === 'missing') return pill('Deleted in Discord', 'warn');
-    return pill('Not published', 'neutral');
-  }
-
   /** Where the board is now, in a line. */
   function stateLine(s: KnownIssuesSettings, state: BoardState, edit: boolean): SafeHtml {
     const channel = `#${s.channelName ?? ''}`;
@@ -110,37 +97,33 @@ export function registerBotFeatureRoutes(app: FastifyInstance, web: Web): void {
     return html`On. Publish it to post it in ${channel}.`;
   }
 
-  /** The feature's card: what it is, whether it's live, turning it on and off, and what needs a look. */
-  function hero(ctx: WorkspaceRequestContext, s: KnownIssuesSettings, state: BoardState, board: Board, checks: Check[], edit: boolean): SafeHtml {
+  /** The header's controls (after its switch): publishing, and the board's menu. */
+  function boardActions(ctx: WorkspaceRequestContext, s: KnownIssuesSettings, state: BoardState): SafeHtml[] {
     const b = base(ctx);
     const published = state.state === 'published';
     const publishLabel = published ? (state.channelChanged ? 'Move board' : 'Update now') : state.state === 'missing' ? 'Publish again' : 'Publish board';
+    return [
+      s.enabled ? html`<form method="post" action="${b}/publish" class="inline-form">${csrfField(ctx.csrf)}${submitBtn(publishLabel, { variant: published && !state.channelChanged ? undefined : 'primary', icon: published ? 'refresh-cw' : 'send', loading: 'Posting…' })}</form>` : html``,
+      menu([
+        published && state.link ? { href: state.link, label: 'View in Discord', icon: 'arrow-up-right' as const, external: true } : null,
+        state.state !== 'not_published' ? { post: `${b}/remove`, label: 'Remove from Discord', icon: 'trash-2' as const, danger: true, confirm: { title: 'Remove the board from Discord?', body: 'The message is deleted. Your settings, pins and notes are kept, so you can post it again.', label: 'Remove board', danger: true } } : null,
+      ], { csrf: ctx.csrf, label: 'More for the board' }),
+    ];
+  }
+
+  /** Where the board is, how many issues it has, and what needs a look. */
+  function statusCard(s: KnownIssuesSettings, state: BoardState, board: Board, checks: Check[], edit: boolean): SafeHtml {
     const problems = checks.filter((c) => c.status !== 'ok');
-    const live = s.enabled && published;
+    const live = s.enabled && state.state === 'published';
     const stat = (n: number, label: string, href: string) => html`<a class="chip-stat" href="${href}"><b>${String(n)}</b> ${label}</a>`;
-    return html`<section class="card ki-hero" aria-labelledby="ki-name">
-      <div class="ki-hero-top">
-        <span class="ki-icon" aria-hidden="true">${icon('clipboard-list', 20)}</span>
-        <div class="ki-hero-text">
-          <div class="ki-hero-title"><h2 id="ki-name">Known-issues board</h2>${boardPill(s, state)}</div>
-          <p class="muted">A message in Discord with the problems members report most and where each fix is, so they check it before opening a ticket. The bot looks every 10 minutes and edits it when something changes.</p>
-          <div class="ki-state">${stateLine(s, state, edit)}</div>
+    return html`<section class="card ki-hero" aria-label="The board now">
+      <div class="ki-now">
+        <div class="ki-state">${stateLine(s, state, edit)}</div>
+        <div class="ki-stats">
+          ${stat(board.shown.length, live ? 'on the board' : 'would be on it', '#on')}
+          ${board.below.length ? stat(board.below.length, 'also reported', '#below') : ''}
+          ${board.hidden.length ? stat(board.hidden.length, 'hidden', '#hidden') : ''}
         </div>
-        ${edit ? html`<div class="ki-actions">
-          <form method="post" action="${b}/settings" class="ki-power">${csrfField(ctx.csrf)}<input type="hidden" name="section" value="power">
-            <label class="row small" ${s.channelId || s.enabled ? '' : raw('title="Choose a channel first"')}>${switchInput({ name: 'enabled', checked: s.enabled, label: 'Board turned on', id: 'ki-enabled', disabled: !s.channelId && !s.enabled, attrs: raw('data-autosubmit') })}<span>${s.enabled ? 'On' : 'Off'}</span></label>
-          </form>
-          ${s.enabled ? html`<form method="post" action="${b}/publish" class="inline-form">${csrfField(ctx.csrf)}${submitBtn(publishLabel, { variant: published && !state.channelChanged ? undefined : 'primary', size: 'sm', icon: published ? 'refresh-cw' : 'send', loading: 'Posting…' })}</form>` : ''}
-          ${menu([
-            published && state.link ? { href: state.link, label: 'View in Discord', icon: 'arrow-up-right' as const, external: true } : null,
-            state.state !== 'not_published' ? { post: `${b}/remove`, label: 'Remove from Discord', icon: 'trash-2' as const, danger: true, confirm: { title: 'Remove the board from Discord?', body: 'The message is deleted. Your settings, pins and notes are kept, so you can post it again.', label: 'Remove board', danger: true } } : null,
-          ], { csrf: ctx.csrf, label: 'More for the board' })}
-        </div>` : ''}
-      </div>
-      <div class="ki-stats">
-        ${stat(board.shown.length, live ? 'on the board' : 'would be on it', '#on')}
-        ${board.below.length ? stat(board.below.length, 'also reported', '#below') : ''}
-        ${board.hidden.length ? stat(board.hidden.length, 'hidden', '#hidden') : ''}
       </div>
       ${problems.length ? checklist(problems) : ''}
     </section>`;
@@ -289,10 +272,10 @@ export function registerBotFeatureRoutes(app: FastifyInstance, web: Web): void {
     ];
 
     const body = html`
-      ${await toolHeader(web, ctx, 'bot', 'known-issues')}
+      ${await featureHeader(web, ctx, 'known-issues', 'known-issues', { actions: edit ? boardActions(ctx, s, state) : [], description: 'One message in Discord with the problems members report most and where each fix is, so they check it before opening a ticket. The bot looks every 10 minutes and edits it when something changes.' })}
       <div class="panel-grid">
         <div class="ki-page">
-          ${hero(ctx, s, state, board, checks, edit)}
+          ${statusCard(s, state, board, checks, edit)}
           ${head('on', s.enabled && state.state === 'published' ? 'On the board' : 'Would be on the board', board.shown.length, `Ranked by Discord reports ${over}: ${s.minReports}+ reports, up to ${s.maxIssues}. Pinned ones always go on, at the top. Open one to change how it’s shown.`)}
           <div class="ki-list">
             ${board.shown.length ? list(board.shown, 'shown') : html`<p class="ki-empty">Nothing qualifies right now. Members see: “${s.emptyText?.trim() || TEXT_DEFAULTS.empty}”</p>`}
@@ -309,7 +292,7 @@ export function registerBotFeatureRoutes(app: FastifyInstance, web: Web): void {
         </div>
         ${preview}
       </div>`;
-    return web.render(reply, ctx, 'Known issues · Bot features', 'bot', body, { width: 'full' });
+    return web.render(reply, ctx, 'Known-issues board · Bot features', 'bot', body, { width: 'full' });
   });
 
   app.post('/w/:wid/bot/known-issues/settings', async (req, reply) => {
@@ -384,8 +367,8 @@ export function registerBotFeatureRoutes(app: FastifyInstance, web: Web): void {
       if (!(err instanceof UserFacingError)) throw err;
       setFlash(reply, 'error', err.message);
     }
-    // Back to the row that was saved, open.
-    return reply.redirect(section && section !== 'power' ? `${base(ctx)}#s-${section}` : base(ctx));
+    // Back to the row that was saved, open (the switch on Bot features: back there).
+    return reply.redirect(backTo(ctx, body, section && section !== 'power' ? `${base(ctx)}#s-${section}` : base(ctx)));
   });
 
   app.post('/w/:wid/bot/known-issues/publish', async (req, reply) => {
@@ -473,7 +456,7 @@ export function registerBotFeatureRoutes(app: FastifyInstance, web: Web): void {
       </div></div>`;
     const body = html`
       ${pageHeader({
-        crumbs: [{ href: toolHref(ctx, 'bot') ?? undefined, label: 'Bot features' }, { href: b, label: 'Known issues' }, { label: `#${p.number}` }],
+        crumbs: [{ href: `${ctx.base}/bot`, label: 'Bot features' }, { href: b, label: 'Known-issues board' }, { label: `#${p.number}` }],
         title: issue?.githubTitle ?? `Issue #${p.number}`,
         description: html`${repo.name} · <a href="${issue?.githubUrl ?? `https://github.com/${repo.repo_owner}/${repo.repo_name}/issues/${p.number}`}" target="_blank" rel="noopener noreferrer" class="mono">${repo.repo_owner}/${repo.repo_name}#${p.number}</a>${issue ? html` · ${plural(issue.reports, 'report')} · ${statusLine(s, issue)}` : ''}`,
       })}
@@ -481,7 +464,7 @@ export function registerBotFeatureRoutes(app: FastifyInstance, web: Web): void {
         ? html`<form method="post" action="${b}/issue/${repo.repo_id}/${p.number}" class="card">${csrfField(ctx.csrf)}${fields}
             <div class="card-f"><span></span><div class="end">${linkBtn(b, 'Cancel')}${submitBtn('Save', { variant: 'primary', loading: 'Saving…' })}</div></div></form>`
         : html`<div class="card"><fieldset class="plain view-only" disabled>${fields}</fieldset><div class="card-f">${viewOnlyFooter('the board')}</div></div>`}`;
-    return web.render(reply, ctx, `#${p.number} · Known issues`, 'bot', body);
+    return web.render(reply, ctx, `#${p.number} · Known-issues board`, 'bot', body);
   });
 
   app.post('/w/:wid/bot/known-issues/issue/:repo/:number', async (req, reply) => {

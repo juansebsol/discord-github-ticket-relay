@@ -229,7 +229,11 @@ describe('Known issues: pages and access', () => {
     expect(board1.body).toContain('<details class="ki-row ki-set" id="s-content" data-flash>');
     expect(board1.body).not.toMatch(/<details class="ki-row[^"]*"[^>]*\bopen\b/);
     expect((await page('/bot/known-issues?view=settings')).body).toContain('id="s-channel"');
-    expect((await page('/bot')).headers.location).toBe(`${w()}/bot/known-issues`);
+    // Bot features lists the features, each with its switch and a gear that opens it.
+    const features = (await page('/bot')).body;
+    expect(features).toContain('<article class="bf-row" id="f-known-issues"');
+    expect(features).toContain('<article class="bf-row" id="f-releases"');
+    expect(features).toContain(`href="${w()}/bot/known-issues" aria-label="Open Known-issues board`);
     expect((await page('')).body).toContain('Bot features');
 
     const mod = await makeAdmin(env, 'ki-mod');

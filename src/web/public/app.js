@@ -684,6 +684,46 @@
     update();
   });
 
+  // Announcements: the preview follows the editor (the ping and message, the card, the buttons).
+  (function () {
+    var form = document.querySelector('form[data-composer]');
+    var pv = document.querySelector('[data-pc-preview]');
+    if (!form || !pv) return;
+    function el(id) { return document.getElementById(id); }
+    function val(name) { var f = form.elements[name]; return f && typeof f.value === 'string' ? f.value : ''; }
+    var content = el('pc-pv-content'), card = el('pc-pv-card'), title = el('pc-pv-title'), text = el('pc-pv-text'), buttons = el('pc-pv-buttons'), none = el('pc-pv-empty');
+    function render() {
+      var rolesEl = el('role-names');
+      var roles = rolesEl ? JSON.parse(rolesEl.textContent || '{}') : {};
+      var role = val('role_id');
+      var msg = val('content').trim();
+      var full = role ? '<@&' + role + '>' + (msg ? '\n' + msg : '') : msg;
+      content.hidden = !full;
+      content.innerHTML = discordHtml(full, roles);
+      var t = val('card_title').trim();
+      var x = val('card_text').trim();
+      var color = form.querySelector('input[name="card_color"]:checked');
+      card.className = 'dp-embed pc-' + (color ? color.value : 'blurple');
+      card.hidden = !(t || x);
+      title.hidden = !t;
+      title.textContent = t;
+      text.innerHTML = discordHtml(x, roles);
+      var labels = $$('[data-row] [name="btn_label"]', form).map(function (i) { return i.value.trim(); }).filter(Boolean);
+      buttons.innerHTML = '';
+      labels.forEach(function (l) {
+        var b = document.createElement('span');
+        b.className = 'dp-button grey';
+        b.textContent = l;
+        b.insertAdjacentHTML('beforeend', buttons.getAttribute('data-arrow') || '');
+        buttons.appendChild(b);
+      });
+      buttons.hidden = !labels.length;
+      none.hidden = Boolean(full || t || x || labels.length);
+    }
+    form.addEventListener('input', render);
+    form.addEventListener('change', render);
+  })();
+
   // AI triage › Knowledge: the team's notes on an app.
   (function () {
     var editor = document.querySelector('form[data-kn-editor]');
