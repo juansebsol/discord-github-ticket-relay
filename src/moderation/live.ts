@@ -95,7 +95,8 @@ async function readLive(deps: Deps, installationId: number, app: Pick<AppRow, 'r
   return live;
 }
 
-function lowOnRequests(deps: Deps, installationId: number): boolean {
+/** The workspace is low on GitHub requests: background reads stop, and agents get the copies kept here. */
+export function lowOnRequests(deps: Deps, installationId: number): boolean {
   const rl = deps.github?.rateLimitFor(installationId);
   return Boolean(rl && rl.remaining < Math.max(GITHUB_RESERVE.min, Math.round(rl.limit * GITHUB_RESERVE.share)));
 }

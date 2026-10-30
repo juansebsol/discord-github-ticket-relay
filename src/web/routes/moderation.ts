@@ -18,8 +18,8 @@ import {
 import { detailSig, loadDetail, type Detail, type HistoryItem } from '../../moderation/detail.js';
 import { forgetLive, warmLive } from '../../moderation/live.js';
 import {
-  closedRows, duplicateGroups, isQueue, keyOf, parseKey, parseSearch, QUEUES, queueCounts, queueRows, QUIET_DAYS,
-  type ClosedRow, type DuplicateGroup, type IssueKey, type QueueKey, type QueueLabels, type QueueRow, type QueueScope, type Source,
+  closedRows, duplicateGroups, isQueue, keyOf, parseKey, parseSearch, QUEUES, queueCounts, queueLabels, queueRows, QUIET_DAYS,
+  type ClosedRow, type DuplicateGroup, type IssueKey, type QueueKey, type QueueRow, type QueueScope, type Source,
 } from '../../moderation/queue.js';
 import {
   fillTemplate, getModerationSettings, GITHUB_CLOSE_NAMES, isReason, LIMITS, newReplyId, REASON_DEFAULTS, reasonsOn, saveReason, saveReplies, setModerationEnabled,
@@ -41,12 +41,6 @@ const PAGE = 50;
 const GROUPS = 15;
 const GROUP_ROWS = 5;
 const n = (x: number) => x.toLocaleString('en-US');
-
-/** Label names (lower case) the Spam and "Needs info, quiet" lists look for. */
-function queueLabels(s: ModerationSettings, c: TriageConfig): QueueLabels {
-  const lower = (xs: (string | undefined)[]) => [...new Set(xs.filter((x): x is string => Boolean(x?.trim())).map((x) => x.trim().toLowerCase()))];
-  return { spam: lower([s.reasons.find((r) => r.key === 'spam')?.label, c.spam.label]), needsInfo: lower([c.needsInfo.label]) };
-}
 
 interface ListState {
   queue: QueueKey;
@@ -237,8 +231,13 @@ function githubLine(e: TimelineEvent, labels: { added: string[]; removed: string
   }
 }
 
+/** Done by someone's coding agent (MCP) rather than in the console. */
+function viaTag(a: Pick<ModActionRow, 'via'>): SafeHtml | '' {
+  return a.via === 'mcp' ? tag('via MCP', { cls: 'subtle', title: 'Done by their coding agent through MCP' }) : '';
+}
+
 function modLine(a: ModActionRow, names: Map<string, string>): SafeHtml {
-  const who = html`<span class="actor">${a.user_id ? names.get(a.user_id) ?? 'Someone' : 'Someone'}</span>`;
+  const who = html`<span class="actor">${a.user_id ? names.get(a.user_id) ?? 'Someone' : 'Someone'}</span>${a.via === 'mcp' ? ' (through MCP)' : ''}`;
   const undone = a.undone_at ? html` <span class="muted">· undone${a.undone_by ? ` by ${names.get(a.undone_by) ?? 'someone'}` : ''}</span>` : '';
   const note = a.note ? html`<div class="extra">Note for the team: ${a.note}</div>` : '';
   switch (a.kind) {
@@ -372,8 +371,13 @@ function facts(ctx: WorkspaceRequestContext, d: Detail, o: { act: boolean; listO
     ? html`<div class="mod-f"><span class="mod-f-k">Reporter</span><span class="mod-f-v">${avatar(t.reporter_display_name, 20)}<strong>${t.reporter_display_name}</strong>${t.reporter_username ? html`<span class="muted">@${t.reporter_username}</span>` : ''}</span>
       ${canOpen(ctx.membership, 'inbox') && t.reporter_username ? html`<a class="small" href="${areaHref(ctx, 'inbox')}?status=all&amp;q=${encodeURIComponent(t.reporter_username)}">${plural(d.reporterTickets, 'ticket')} in the last 30 days</a>` : html`<span class="small muted">${plural(d.reporterTickets, 'ticket')} in the last 30 days</span>`}</div>`
     : html`<div class="mod-f"><span class="mod-f-k">Opened by</span><span class="mod-f-v">${avatar(d.indexed?.author ?? d.live?.author ?? '?', 20)}<strong>${d.indexed?.author ?? d.live?.author ?? 'Someone'}</strong><span class="muted">on GitHub</span></span></div>`;
+  const c = d.claim;
+  const claim = c
+    ? html`<div class="mod-f"><span class="mod-f-k">Claimed</span><span class="mod-f-v">${avatar(c.user_name ?? '?', 20)}<strong>${c.user_name ?? 'Someone'}</strong><span class="muted">${ago(c.claimed_at)}${c.pr ? ` · PR #${c.pr} open` : ''}</span></span>${c.note ? html`<span class="small muted">${c.note}</span>` : ''}</div>`
+    : '';
   return html`<aside class="mod-facts" aria-label="Details">
     ${reporter}
+    ${claim}
     <div class="mod-f"><span class="mod-f-k">App</span><span class="mod-f-v">${d.app.name}${t?.ticket_type_name ? html` · ${t.ticket_type_name}` : ''}</span></div>
     <div class="mod-f"><span class="mod-f-k">Labels</span><span class="mod-f-v wrap">${d.labels.length ? d.labels.map((l) => labelTag(l)) : html`<span class="muted small">None</span>`}
       ${o.act && d.state === 'open' ? html`<button type="button" class="mod-add" data-dialog="mod-labels">${icon('plus', 12)}Label</button>` : ''}</span></div>
@@ -892,7 +896,7 @@ export function registerModerationRoutes(app: FastifyInstance, web: Web): void {
             const key = keyOf({ repoId: a.repo_id, number: a.number });
             return html`<tr class="${a.undone_at ? 'off' : ''}">
               <td class="nowrap small">${ago(a.at)}</td>
-              <td>${a.user_id ? html`<span class="inline gap-6">${avatar(names.get(a.user_id) ?? '?', 20)}${names.get(a.user_id) ?? 'Someone'}</span>` : html`<span class="muted">Someone</span>`}</td>
+              <td>${a.user_id ? html`<span class="inline gap-6">${avatar(names.get(a.user_id) ?? '?', 20)}${names.get(a.user_id) ?? 'Someone'}${viaTag(a)}</span>` : html`<span class="muted">Someone</span>`}</td>
               <td>${modWhat(a, names)}</td>
               <td><div>${manage ? html`<a class="cell-title" href="${areaHref(ctx, 'moderation')}?open=${key}">${a.title || `#${a.number}`}</a>` : html`<span class="cell-title">${a.title || `#${a.number}`}</span>`}</div>
                 <div class="sub"><span class="mono">${repoName(apps, a.repo_id)}#${String(a.number)}</span>${a.sub_ref ? html` · <span class="mono">${a.sub_ref}</span>` : ''}${a.html_url ? html` · <a href="${a.html_url}" target="_blank" rel="noopener noreferrer">GitHub</a>` : ''}</div></td>

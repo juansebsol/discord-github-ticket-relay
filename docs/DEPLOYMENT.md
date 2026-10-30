@@ -51,6 +51,7 @@ Set `HOST=127.0.0.1` and `TRUST_PROXY=true` in `.env`. Verify with `curl https:/
 | `GET /oauth/discord/callback` | Browser, after Discord OAuth |
 | `GET /oauth/github/callback` | Browser, after GitHub App install/authorize |
 | `POST /github/webhook` | GitHub (HMAC-signed, optional) |
+| `POST /mcp` | Coding agents (personal bearer token; only while MCP is on in the workspace) |
 | `GET /healthz` | Monitoring |
 | `/*` | Admin console |
 
@@ -120,6 +121,27 @@ Housekeeping runs in every worker every 10 minutes:
 - Expired sessions, OAuth states and Discord interaction tokens are deleted.
 - Moderation › Ticket management keeps an encrypted copy of each GitHub issue a moderator opens
   (its text and comments), so it shows at once. A copy is deleted 30 days after it was last read.
+
+## MCP
+
+`POST /mcp` lets the team's coding agents (Claude Code, Cursor, VS Code, Codex) work with tickets. It
+runs in `ticket-relay-web`; nothing else to deploy, and the proxy needs no change.
+
+- **Off by default.** An admin turns it on under MCP in the console; turning it off cuts every agent
+  off on its next call.
+- **Tokens.** Each person makes their own (one per device) on the MCP page. A token is shown once and
+  only its SHA-256 hash is stored. Tokens expire (30, 90 or 365 days; admins can make one that
+  doesn't), can be read-only, and are revoked by their owner or an admin, or when the person is
+  removed from the workspace.
+- **Access.** Every call checks the token, that MCP is on and the person's current access: each tool
+  is a switch per moderator in Members & permissions (owners and admins have all of them). Actions on
+  GitHub use the app's existing permissions, the admins' close reasons and saved replies, and are
+  logged in the Mod log as done by that person through MCP.
+- **Limits.** Per token: 240 requests, 120 tool calls and 20 changes a minute. Requests from a web
+  page on another origin are refused. Tool calls are logged with the tool, person and time, never
+  their arguments.
+- **Claims** ("I'm on it") are kept in Ticket Relay only, and end when released, when the ticket
+  closes, or after 3 days unread without an open pull request.
 
 ## Logging
 

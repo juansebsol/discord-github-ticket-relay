@@ -37,6 +37,8 @@ const NAMES = [
   'megaphone', 'bell-off',
   // Moderation
   'shield', 'reply', 'keyboard', 'pin',
+  // MCP
+  'plug', 'square-terminal',
 ];
 
 const require = createRequire(import.meta.url);

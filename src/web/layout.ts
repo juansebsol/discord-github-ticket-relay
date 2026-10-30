@@ -4,7 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { html, raw, type SafeHtml } from '../lib/html.js';
 import type { Membership } from '../domain/workspaces.js';
-import { AREA_KEYS, can, ROLE_LABELS, TOOL_NAMES, type MemberAccess } from '../domain/permissions.js';
+import { AREA_KEYS, can, canUseMcp, ROLE_LABELS, TOOL_NAMES, type MemberAccess } from '../domain/permissions.js';
 import { areaHref, firstPage, TOOL_ICONS, type ToolName } from './routes/tool.js';
 import type { Role, UserRow, WorkspaceRow } from '../domain/types.js';
 import { avatar, csrfField, discordAvatar, icon, iconBtn, initials, menu, notice, type IconName } from './ui.js';
@@ -139,6 +139,7 @@ export function layout(ctx: PageContext, opts: { title: string; active: string; 
         ${tool(access, 'contributors')}
         ${tool(access, 'announcements')}
         ${tool(access, 'bot')}
+        ${canUseMcp(access) ? navItem(`${base}/mcp`, 'MCP', 'plug', a === 'mcp') : lockedNavItem('MCP', 'plug', { grantable: true })}
         <div class="nav-label">Workspace</div>
         ${manage ? navItem(`${base}/members`, 'Members & permissions', 'users', a === 'members') : lockedNavItem('Members & permissions', 'users')}
         ${manage ? navItem(`${base}/settings`, 'Settings', 'settings', a === 'settings') : lockedNavItem('Settings', 'settings')}

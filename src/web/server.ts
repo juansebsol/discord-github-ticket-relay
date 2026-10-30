@@ -51,6 +51,8 @@ import { registerTriageOverviewRoutes } from './routes/triage-overview.js';
 import { registerReleaseRoutes } from './routes/releases.js';
 import { registerModerationRoutes } from './routes/moderation.js';
 import { registerMovedRoutes } from './routes/tool.js';
+import { registerMcpRoutes } from './routes/mcp.js';
+import { registerMcpEndpoint } from '../mcp/server.js';
 import { MAX_FILE_BYTES } from '../domain/files.js';
 
 declare module 'fastify' {
@@ -166,6 +168,8 @@ export async function buildServer(deps: Deps, processor: Processor, opts: { logg
     if (req.method !== 'POST') return;
     const url = req.url.split('?')[0]!;
     if (url === '/discord/interactions' || url === '/github/webhook') return;
+    // Coding agents authenticate with a bearer token (mcp/server.ts), never a cookie.
+    if (url === '/mcp') return;
     // Local-only development sign-in has no session yet (never registered in production).
     if (url === '/dev-login' && deps.config.devLogin) return;
     // The upload form's token is the first form field; that route checks it before reading any file.
@@ -177,6 +181,13 @@ export async function buildServer(deps: Deps, processor: Processor, opts: { logg
   });
 
   app.setErrorHandler((err, req, reply) => {
+    // Coding agents get JSON-RPC, not a page (a body that isn't JSON, say).
+    if (req.url.split('?')[0] === '/mcp') {
+      const status = (err as { statusCode?: number }).statusCode ?? 500;
+      if (status >= 500) req.log.error({ err: (err as Error).message, stack: (err as Error).stack }, 'mcp request failed');
+      reply.code(status).send({ jsonrpc: '2.0', id: null, error: { code: status === 400 ? -32700 : -32603, message: status === 400 ? 'Parse error' : 'Internal error' } });
+      return;
+    }
     if (err instanceof UserFacingError) {
       reply.code(err.status).type('text/html').send(simplePage('Something went wrong', html`<h1>Something went wrong</h1><p class="muted">${err.message}</p>${linkBtn('/', 'Back to the app', { block: true })}`));
       return;
@@ -299,6 +310,8 @@ export async function buildServer(deps: Deps, processor: Processor, opts: { logg
   registerClaudeRoutes(app, web);
   registerHealthRoutes(app, web);
   registerAlertRoutes(app, web);
+  registerMcpRoutes(app, web);
+  registerMcpEndpoint(app, deps, opts.triage);
 
   return app;
 }

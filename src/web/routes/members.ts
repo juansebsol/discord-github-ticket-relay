@@ -6,6 +6,10 @@ import {
   areasOf,
   can,
   levelOf,
+  MCP_GROUPS,
+  MCP_SWITCH_KEYS,
+  MCP_SWITCHES,
+  mcpSwitches,
   ROLE_LABELS,
   TOOL_NAMES,
   TOOLS,
@@ -18,7 +22,7 @@ import {
   type Tool,
 } from '../../domain/permissions.js';
 import { UserFacingError, type Role } from '../../domain/types.js';
-import { createInvite, listInvites, listMembers, removeMember, revokeInvite, setMemberRole, setModeratorAccess } from '../../domain/workspaces.js';
+import { createInvite, listInvites, listMembers, removeMember, revokeInvite, setMcpAccess, setMemberRole, setModeratorAccess } from '../../domain/workspaces.js';
 import { html, raw, type SafeHtml } from '../../lib/html.js';
 import { setFlash } from '../session.js';
 import type { Web, WorkspaceRequestContext } from '../server.js';
@@ -88,6 +92,7 @@ function toolDetail(m: MemberAccess, tool: Tool): string {
 function accessTags(m: MemberAccess): SafeHtml {
   if (m.role === 'owner') return html`${tag('Full access')}${tag('Invites & roles')}`;
   if (m.role === 'admin') return tag('Full access');
+  const mcp = mcpSwitches(m);
   return html`${TOOLS.map((tool) => {
     const t = toolAccess(m, tool);
     if (!t.open) return '';
@@ -98,7 +103,15 @@ function accessTags(m: MemberAccess): SafeHtml {
       ? `${onlyName}: ${levelOf(m.access, only)}`
       : t.level === 'edit' || t.level === 'view' ? `${TOOL_TAGS[tool]}: ${t.level}` : `${TOOL_TAGS[tool]} · ${t.open} of ${t.pages}`;
     return tag(text, { title: `${TOOL_NAMES[tool]}: ${toolDetail(m, tool)}` });
-  })}`;
+  })}${mcp.length ? tag(`MCP · ${mcp.length}`, { title: `MCP tools: ${mcp.map((k) => MCP_SWITCHES[k].name).join(', ')}` }) : ''}`;
+}
+
+/** "No tools", "4 of 17 tools · read only", "9 of 17 tools · 3 actions" (app.js writes the same after a change). */
+function mcpSummary(m: MemberAccess): string {
+  const on = mcpSwitches(m);
+  if (!on.length) return 'No tools';
+  const acts = on.filter((k) => MCP_SWITCHES[k].group === 'act').length;
+  return `${on.length} of ${MCP_SWITCH_KEYS.length} tools · ${acts ? `${acts} ${acts === 1 ? 'action' : 'actions'}` : 'read only'}`;
 }
 
 /** Pages a moderator can open (the Inbox included). */
@@ -230,6 +243,29 @@ export function registerMemberRoutes(app: FastifyInstance, web: Web): void {
           ${levelSeg(m, a)}</div>`)}</div>
       </section>`;
     };
+    // MCP: what this moderator's coding agents can do, a switch per tool (apart from the pages).
+    const mcpSection = (m: Member) => {
+      const on = mcpSwitches(m);
+      const id = `acc-${m.id}-mcp`;
+      return html`<section class="acc-tool acc-mcp${on.length ? ' on' : ''}" data-mcp-section>
+        <div class="acc-tool-h">
+          <button type="button" class="acc-expand" aria-expanded="false" aria-controls="${id}" data-acc-expand>
+            <span class="acc-tile">${icon('plug', 16)}</span>
+            <span class="acc-tool-t"><span class="n">MCP · coding agents</span><span class="s" data-mcp-summary>${mcpSummary(m)}</span></span>
+            ${icon('chevron-down', 16, 'chev')}
+          </button>
+          <span class="js-only">${switchInput({ name: '', checked: on.length > 0, label: `${nameOf(m)}: MCP tools that only read`, attrs: html`data-mcp-switch` })}</span>
+        </div>
+        <div class="acc-pages" id="${id}">
+          <input type="hidden" name="mcp_sent" value="1" form="${formId(m)}">
+          <p class="acc-mcp-note">Separate from the pages above: seeing Ticket management doesn’t let their agent find tickets. Their agent acts as them, and what it changes is in the Mod log.</p>
+          ${MCP_GROUPS.map((g) => html`<div class="acc-mcp-g"><span class="n">${g.name}</span><span class="d">${g.desc}</span></div>
+            ${MCP_SWITCH_KEYS.filter((k) => MCP_SWITCHES[k].group === g.key).map((k) => html`<div class="acc-page">
+              <div class="acc-page-t"><div class="l">${MCP_SWITCHES[k].name}</div><div class="d">${MCP_SWITCHES[k].desc}</div></div>
+              ${switchInput({ name: 'mcp', value: k, checked: on.includes(k), label: `${nameOf(m)}: ${MCP_SWITCHES[k].name}`, attrs: html`form="${formId(m)}" data-mcp="${k}" data-mcp-group="${g.key}"` })}</div>`)}`)}
+        </div>
+      </section>`;
+    };
     // Moderators in order, for "‹ 7 of 50 ›".
     const position = (m: Member) => mods.findIndex((x) => x.id === m.id);
     const pickHref = (m: Member) => `${b}/members?mod=${m.id}#moderator-access`;
@@ -258,6 +294,7 @@ export function registerMemberRoutes(app: FastifyInstance, web: Web): void {
         </div>
       </div>
       ${TOOLS.map((tool) => toolSection(m, tool))}
+      ${mcpSection(m)}
       <div class="nojs acc-save"><button type="submit" class="btn sm" form="${formId(m)}">Save ${nameOf(m)}’s access</button></div>
     </section>`;
     // Choosing a moderator: opened from the name (or ⌘K). Search, filter, keyboard; one list for everyone.
@@ -370,7 +407,15 @@ export function registerMemberRoutes(app: FastifyInstance, web: Web): void {
     const userId = (req.params as { userId: string }).userId;
     try {
       const before = (await listMembers(deps.db, ctx.workspace.id)).find((m) => m.id === userId);
-      const next = await setModeratorAccess(deps.db, ctx.workspace.id, userId, (req.body ?? {}) as Record<string, unknown>);
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const next = await setModeratorAccess(deps.db, ctx.workspace.id, userId, body);
+      // MCP tools: the form sends the switches that are on (mcp_sent tells "all off" from "not sent").
+      const mcpBefore = before ? mcpSwitches(before) : [];
+      const mcpAfter = body.mcp_sent === '1' ? await setMcpAccess(deps.db, ctx.workspace.id, userId, [body.mcp ?? []].flat()) : mcpBefore;
+      const mcpChanged = MCP_SWITCH_KEYS.filter((k) => mcpBefore.includes(k) !== mcpAfter.includes(k));
+      const mcpWhat = !mcpChanged.length ? '' : mcpChanged.length <= 3
+        ? mcpChanged.map((k) => `MCP ${MCP_SWITCHES[k].name} → ${mcpAfter.includes(k) ? 'On' : 'Off'}`).join(', ')
+        : `MCP → ${mcpAfter.length} of ${MCP_SWITCH_KEYS.length} tools`;
       const changed = AREA_KEYS.filter((a) => levelOf(before?.access, a) !== levelOf(next, a));
       // A few changes are listed. More come from a tool's select or All pages: "AI triage → Edit all".
       const after: MemberAccess = { role: 'moderator', access: next };
@@ -378,7 +423,8 @@ export function registerMemberRoutes(app: FastifyInstance, web: Web): void {
       const all = uniformLevel(after, AREA_KEYS);
       const tool = tools.length === 1 ? uniformLevel(after, areasOf(tools[0]!)) : null;
       const what = !changed.length
-        ? 'access saved'
+        ? mcpWhat || 'access saved'
+        : mcpWhat ? `${changed.length} ${changed.length === 1 ? 'page' : 'pages'} and ${mcpWhat}`
         : changed.length <= 4
           ? changed.map((a) => `${changeName(a)} → ${LEVEL_NAMES[levelOf(next, a)]}`).join(', ')
           : tools.length > 1 && all ? `All pages → ${SET_NAMES[all]}`

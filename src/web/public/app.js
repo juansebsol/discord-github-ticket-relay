@@ -1221,7 +1221,7 @@
     function plural(n, word) { return n + ' ' + word + (n === 1 ? '' : 's'); }
     /** Rewrites the tool lines, switches, header line and the moderator's chip from the radios. */
     function summarize(ed) {
-      $$('.acc-tool', ed).forEach(function (sec) {
+      $$('.acc-tool[data-tool]', ed).forEach(function (sec) {
         var ps = pages(sec);
         var on = ps.some(function (p) { return p.value !== p.levels[0]; });
         var open = ps.filter(function (p) { return p.value !== 'none'; }).length;
@@ -1423,10 +1423,38 @@
       }
     });
 
+    // MCP: a switch per tool, apart from the pages (quick sets leave them alone).
+    function mcpInputs(scope) { return $$('input[data-mcp]', scope); }
+    var MCP_TOTAL = null;
+    function summarizeMcp(ed) {
+      var sec = $('[data-mcp-section]', ed);
+      if (!sec) return;
+      var all = mcpInputs(sec);
+      MCP_TOTAL = all.length;
+      var on = all.filter(function (i) { return i.checked; });
+      var acts = on.filter(function (i) { return i.getAttribute('data-mcp-group') === 'act'; }).length;
+      sec.classList.toggle('on', on.length > 0);
+      var sw = $('[data-mcp-switch]', sec);
+      if (sw) sw.checked = on.length > 0;
+      var line = $('[data-mcp-summary]', sec);
+      if (line) line.textContent = !on.length ? 'No tools' : on.length + ' of ' + MCP_TOTAL + ' tools · ' + (acts ? acts + (acts === 1 ? ' action' : ' actions') : 'read only');
+    }
+
     accCard.addEventListener('change', function (e) {
       var t = e.target;
       var ed = t.closest('.acc-editor');
       if (!ed) return;
+      if (t.hasAttribute('data-mcp-switch')) {
+        // On: the tools that only read (actions stay as they are). Off: every tool.
+        var mcpSec = t.closest('[data-mcp-section]');
+        var turnOn = t.checked;
+        mcpInputs(mcpSec).forEach(function (i) { i.checked = turnOn ? (i.checked || i.getAttribute('data-mcp-group') === 'read') : false; });
+        summarizeMcp(ed);
+        expand(mcpSec, turnOn);
+        save(ed);
+        return;
+      }
+      if (t.hasAttribute('data-mcp')) { summarizeMcp(ed); return; }
       if (t.hasAttribute('data-tool-switch')) {
         // On: closed pages open as View (the rest keep their level). Off: back to the minimum.
         var sec = t.closest('.acc-tool');
@@ -1438,6 +1466,12 @@
         var src = accCard.querySelector('.acc-editor[data-mod="' + t.value + '"]');
         var from = {};
         if (src) pages(src).forEach(function (p) { from[p.name] = p.value; });
+        if (src) {
+          var tools = {};
+          mcpInputs(src).forEach(function (i) { tools[i.value] = i.checked; });
+          mcpInputs(ed).forEach(function (i) { i.checked = Boolean(tools[i.value]); });
+          summarizeMcp(ed);
+        }
         if (src) apply(ed, ed, function (p) { return from[p.name] || 'none'; });
         t.value = '';
         return;
@@ -1445,6 +1479,28 @@
       if (t.type === 'radio' && t.hasAttribute('data-tool')) summarize(ed);
     });
   })();
+
+  // ---- MCP: how to add it to each coding agent, one at a time --------------------------------------
+
+  $$('[data-mcp-tabs]').forEach(function (box) {
+    var tabs = $$('[data-mcp-tab]', box);
+    function show(id) {
+      tabs.forEach(function (b) { b.setAttribute('aria-selected', b.getAttribute('data-mcp-tab') === id ? 'true' : 'false'); });
+      $$('[data-mcp-pane]', box).forEach(function (p) { p.hidden = p.getAttribute('data-mcp-pane') !== id; });
+    }
+    if (tabs.length) show(tabs[0].getAttribute('data-mcp-tab'));
+    box.addEventListener('click', function (e) {
+      var b = e.target.closest('[data-mcp-tab]');
+      if (b) show(b.getAttribute('data-mcp-tab'));
+    });
+    box.addEventListener('keydown', function (e) {
+      var b = e.target.closest('[data-mcp-tab]');
+      if (!b || (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft')) return;
+      var i = (tabs.indexOf(b) + (e.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+      show(tabs[i].getAttribute('data-mcp-tab'));
+      tabs[i].focus();
+    });
+  });
 
   // ---- Triage › Actions: modes per source ------------------------------------------------------
 

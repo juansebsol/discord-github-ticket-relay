@@ -2,7 +2,7 @@ import { withTransaction, type Db, type Queryable } from '../db/database.js';
 import { randomUUID } from 'node:crypto';
 import { randomToken, sha256 } from '../lib/crypto.js';
 import type { Config } from '../config.js';
-import { AREA_KEYS, hasEdit, type MemberAccess } from './permissions.js';
+import { AREA_KEYS, hasEdit, MCP_SWITCH_KEYS, type McpSwitch, type MemberAccess } from './permissions.js';
 import { UserFacingError, type Role, type UserRow, type WorkspaceRow } from './types.js';
 
 export async function upsertUser(
@@ -143,6 +143,9 @@ export async function removeMember(db: Db, workspaceId: string, userId: string):
       throw new UserFacingError('A workspace must keep at least one owner.');
     }
     await c.query('DELETE FROM workspace_members WHERE workspace_id = $1 AND user_id = $2', [workspaceId, userId]);
+    // Their coding agents lose access, and the tickets they claimed are free again.
+    await c.query('UPDATE mcp_tokens SET revoked_at = now_ms() WHERE workspace_id = $1 AND user_id = $2 AND revoked_at IS NULL', [workspaceId, userId]);
+    await c.query(`UPDATE ticket_claims SET ended_at = now_ms(), end_reason = 'left' WHERE workspace_id = $1 AND user_id = $2 AND ended_at IS NULL`, [workspaceId, userId]);
   });
 }
 
@@ -227,4 +230,16 @@ export async function setModeratorAccess(q: Queryable, workspaceId: string, user
   }
   await q.query(`UPDATE workspace_members SET access = $3 WHERE workspace_id = $1 AND user_id = $2 AND role = 'moderator'`, [workspaceId, userId, next]);
   return next;
+}
+
+/** Owners and admins: the MCP tools a moderator's agents can use (exactly these; unknown ones are ignored). */
+export async function setMcpAccess(q: Queryable, workspaceId: string, userId: string, switches: unknown[]): Promise<McpSwitch[]> {
+  const { rows } = await q.query<{ access: unknown }>(`SELECT access FROM workspace_members WHERE workspace_id = $1 AND user_id = $2 AND role = 'moderator'`, [workspaceId, userId]);
+  if (!rows[0]) throw new UserFacingError('Only moderators have adjustable permissions.', 404);
+  const on = MCP_SWITCH_KEYS.filter((s) => switches.includes(s));
+  const next = { ...accessMap(rows[0].access) };
+  if (on.length) next.mcp = on;
+  else delete next.mcp;
+  await q.query(`UPDATE workspace_members SET access = $3 WHERE workspace_id = $1 AND user_id = $2 AND role = 'moderator'`, [workspaceId, userId, next]);
+  return on;
 }

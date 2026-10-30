@@ -14,6 +14,7 @@ import type { AppRow, Deps, SubmissionRow } from '../domain/types.js';
 import type { IssueDetail, TimelineEvent } from '../github/client.js';
 import { parseIssueBody } from '../github/issue-content.js';
 import type { IssueTriageRow, TriageAction, TriageResultRow } from '../triage/engine.js';
+import { claimOf, type Claim } from '../mcp/claims.js';
 import { ticketFor, type ModActionRow } from './actions.js';
 import { isFresh, refreshLive, storedLive, type Live } from './live.js';
 import type { IssueKey } from './queue.js';
@@ -64,6 +65,8 @@ export interface Detail {
   historyMore: boolean;
   /** The latest close here, while it can be undone or reopened. */
   lastClose: ModActionRow | null;
+  /** Someone's coding agent claimed it ("I'm on it", MCP). */
+  claim: Claim | null;
   userIds: string[];
 }
 
@@ -205,6 +208,7 @@ export async function loadDetail(
   history.sort((a, b) => a.at.getTime() - b.at.getTime());
 
   const lastClose = actions.find((a) => a.kind === 'close' && !a.undone_at) ?? null;
+  const claim = await claimOf(db, workspaceId, key);
   const state = issue?.state ?? indexed?.state ?? 'open';
   return {
     key, app, repoUrl: `https://github.com/${app.repo_owner}/${app.repo_name}`, indexed, live: issue, liveAt, loading, liveError, ticket, text, title,
@@ -214,6 +218,7 @@ export async function loadDetail(
     discord: ticket ? { profile: `https://discord.com/users/${ticket.reporter_discord_id}`, channel: ticket.discord_guild_id && ticket.discord_channel_id ? `https://discord.com/channels/${ticket.discord_guild_id}/${ticket.discord_channel_id}` : null } : null,
     history, historyMore: events?.more ?? false,
     lastClose: state === 'closed' ? lastClose : null,
+    claim,
     userIds: actions.flatMap((a) => [a.user_id, a.undone_by]).concat(history.flatMap((h) => (h.kind === 'event' && typeof h.event.detail.by === 'string' ? [h.event.detail.by] : []))).filter((x): x is string => Boolean(x)),
   };
 }

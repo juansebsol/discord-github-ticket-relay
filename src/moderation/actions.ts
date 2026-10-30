@@ -4,6 +4,7 @@
  * reply and change labels. Each is checked live on GitHub first and logged in mod_actions.
  * Closing several at once is a job the worker runs one issue at a time.
  */
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import type { Db, Queryable } from '../db/database.js';
 import { cleanUpSpam } from '../domain/files.js';
@@ -22,6 +23,8 @@ import type { IssueKey } from './queue.js';
 export const UNDO_MS = 15 * 60_000;
 /** Most issues one bulk close takes. */
 export const MAX_JOB = 500;
+/** Where the actions run inside it come from ('mcp': a coding agent); the console leaves it unset. */
+export const actionVia = new AsyncLocalStorage<'mcp'>();
 const LEASE_SECONDS = 120;
 
 export interface ModTarget {
@@ -53,6 +56,8 @@ export interface ModActionRow {
   at: Date;
   undone_at: Date | null;
   undone_by: string | null;
+  /** 'mcp': done by a coding agent for user_id. */
+  via: string | null;
 }
 
 /** The first filed ticket for an issue, if it came from Discord. */
@@ -105,12 +110,12 @@ async function saveState(db: Queryable, t: ModTarget, o: { state: 'open' | 'clos
   }
 }
 
-async function record(db: Queryable, t: ModTarget, a: Partial<Omit<ModActionRow, 'id' | 'workspace_id' | 'repo_id' | 'number' | 'submission_id' | 'at'>> & { kind: ModActionRow['kind']; title: string }): Promise<string> {
+async function record(db: Queryable, t: ModTarget, a: Partial<Omit<ModActionRow, 'id' | 'workspace_id' | 'repo_id' | 'number' | 'submission_id' | 'at' | 'via'>> & { kind: ModActionRow['kind']; title: string }): Promise<string> {
   const id = randomUUID();
   await db.query(
-    `INSERT INTO mod_actions (id, workspace_id, kind, repo_id, number, submission_id, title, reason, duplicate_of, note, comment_id, detail, job_id, user_id)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
-    [id, t.workspaceId, a.kind, t.repoId, t.number, t.ticket?.id ?? null, a.title.slice(0, 300), a.reason ?? null, a.duplicate_of ?? null, a.note ?? null, a.comment_id ?? null, a.detail ?? {}, a.job_id ?? null, a.user_id ?? null],
+    `INSERT INTO mod_actions (id, workspace_id, kind, repo_id, number, submission_id, title, reason, duplicate_of, note, comment_id, detail, job_id, user_id, via)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
+    [id, t.workspaceId, a.kind, t.repoId, t.number, t.ticket?.id ?? null, a.title.slice(0, 300), a.reason ?? null, a.duplicate_of ?? null, a.note ?? null, a.comment_id ?? null, a.detail ?? {}, a.job_id ?? null, a.user_id ?? null, actionVia.getStore() ?? null],
   );
   return id;
 }

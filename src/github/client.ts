@@ -489,6 +489,12 @@ export class GitHubClient {
     return { pulls: items.map(toPullDetail), more: items.length >= perPage };
   }
 
+  /** The files a pull request changes (the first 100), with how many lines each added and removed. */
+  async listPullFiles(installationId: number, owner: string, repo: string, number: number): Promise<{ path: string; status: string; additions: number; deletions: number }[]> {
+    const { data } = await this.request('GET', `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${number}/files?per_page=100`, await this.asInstallation(installationId));
+    return (Array.isArray(data) ? (data as any[]) : []).map((f) => ({ path: String(f.filename ?? ''), status: String(f.status ?? ''), additions: Number(f.additions) || 0, deletions: Number(f.deletions) || 0 }));
+  }
+
   /** The latest published releases, newest first (drafts left out). */
   async listReleases(installationId: number, owner: string, repo: string, limit = 10): Promise<{ tag: string; name: string | null; publishedAt: Date | null; prerelease: boolean; body: string }[]> {
     const { data } = await this.request('GET', `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/releases?per_page=${Math.min(limit, 100)}`, await this.asInstallation(installationId));

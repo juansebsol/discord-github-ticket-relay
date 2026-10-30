@@ -5,6 +5,8 @@
  */
 import type { Queryable } from '../db/database.js';
 import type { AppRow } from '../domain/types.js';
+import type { TriageConfig } from '../triage/settings.js';
+import type { ModerationSettings } from './settings.js';
 import { consoleQuery, getIndexed, type IndexedIssue } from '../domain/issue-index.js';
 import { pullsForIssues, releaseOf, repoReleases, type IndexedPull, type Release } from '../domain/pull-index.js';
 
@@ -62,8 +64,22 @@ export interface QueueLabels {
   needsInfo: string[];
 }
 
+/** Label names (lower case) the Spam and "Needs info, quiet" lists look for. */
+export function queueLabels(s: ModerationSettings, c: TriageConfig): QueueLabels {
+  const lower = (xs: (string | undefined)[]) => [...new Set(xs.filter((x): x is string => Boolean(x?.trim())).map((x) => x.trim().toLowerCase()))];
+  return { spam: lower([s.reasons.find((r) => r.key === 'spam')?.label, c.spam.label]), needsInfo: lower([c.needsInfo.label]) };
+}
+
 export interface QueueRow {
   repo_id: number;
+  state: 'open' | 'closed';
+  state_reason: string | null;
+  closed_at: Date | null;
+  /** The app's name from the ticket or the issue's [App] prefix (null: an issue opened on GitHub without one). */
+  app: string | null;
+  /** Triage's priority and one-line summary. */
+  priority: string | null;
+  summary: string | null;
   number: number;
   title: string;
   labels: string[];
@@ -114,7 +130,7 @@ const hasKind = (col: string, kind: string) => `EXISTS (SELECT 1 FROM json_each(
 const confOf = (col: string, kind: string) => `(SELECT json_extract(a.value, '$.confidence') FROM json_each(COALESCE(${col}, '[]')) a WHERE json_extract(a.value, '$.kind') = '${kind}' LIMIT 1)`;
 
 /** Each list as a condition on q (the open issues with what's known about them). */
-function queueWhere(key: Exclude<QueueKey, 'closed'>, now: number): string {
+export function queueWhere(key: Exclude<QueueKey, 'closed'>, now: number): string {
   switch (key) {
     case 'open': return '1';
     case 'repeat': return 'q.dup_of IS NOT NULL';
@@ -130,15 +146,19 @@ function repoIds(scope: QueueScope): number[] {
   return [...new Set(ids)];
 }
 
-/** The open issues with what's known about them, as a CTE named q. `params` gets the values. */
-function openIssues(scope: QueueScope, labels: QueueLabels, params: unknown[]): string {
+/**
+ * The open issues (or closed, or all: the MCP's searches) with what's known about them, as a CTE
+ * named q. `params` gets the values.
+ */
+export function issuesCte(scope: QueueScope, labels: QueueLabels, params: unknown[], state: 'open' | 'closed' | 'all' = 'open'): string {
   const bind = (v: unknown) => {
     params.push(v);
     return `$${params.length}`;
   };
   const ws = bind(scope.workspaceId);
   const repos = bind(json(repoIds(scope)));
-  const where = [`i.repo_id IN (SELECT value FROM json_each(${repos}))`, 'i.gone = 0', `i.state = 'open'`];
+  const where = [`i.repo_id IN (SELECT value FROM json_each(${repos}))`, 'i.gone = 0'];
+  if (state !== 'all') where.push(`i.state = '${state === 'closed' ? 'closed' : 'open'}'`);
   if (scope.source === 'discord') where.push('s.id IS NOT NULL');
   if (scope.source === 'github') where.push('s.id IS NULL');
   // Apps sharing a repository: their tickets and issues carry the app's name.
@@ -154,6 +174,8 @@ function openIssues(scope: QueueScope, labels: QueueLabels, params: unknown[]): 
   const needsInfo = bind(json(labels.needsInfo));
   return `base AS (
       SELECT i.repo_id, i.number, i.title, i.labels, i.html_url, i.created_at, i.updated_at, i.app_name, i.author, i.duplicate_of,
+        i.state, i.state_reason, i.closed_at, COALESCE(s.app_name, i.app_name) AS app,
+        COALESCE(tr.priority, it.priority) AS priority, json_extract(COALESCE(tr.verdict, it.verdict), '$.summary') AS summary,
         s.id AS sub_id, s.ref AS sub_ref, s.reporter_display_name AS reporter,
         COALESCE(tr.suggestions, it.suggestions) AS sugg, COALESCE(tr.applied_actions, it.applied_actions) AS applied
       FROM issue_index i
@@ -168,6 +190,7 @@ function openIssues(scope: QueueScope, labels: QueueLabels, params: unknown[]): 
     ),
     q AS (
       SELECT b.repo_id, b.number, b.title, b.labels, b.html_url, b.created_at, b.updated_at, b.app_name, b.author, b.sub_id, b.sub_ref, b.reporter,
+        b.state, b.state_reason, b.closed_at, b.app, b.priority, b.summary,
         CASE WHEN EXISTS (SELECT 1 FROM mod_actions m WHERE m.workspace_id = ${ws} AND m.repo_id = b.repo_id AND m.number = b.number AND m.kind = 'not_duplicate' AND m.undone_at IS NULL) THEN NULL
           ELSE NULLIF(COALESCE(b.duplicate_of, (SELECT CAST(json_extract(a.value, '$.duplicateOf') AS INTEGER) FROM json_each(COALESCE(b.sugg, '[]')) a WHERE json_extract(a.value, '$.kind') = 'duplicate' LIMIT 1)), b.number) END AS dup_of,
         CASE WHEN b.duplicate_of IS NULL THEN ${confOf('b.sugg', 'duplicate')} END AS dup_conf,
@@ -186,7 +209,7 @@ export type QueueCounts = Record<QueueKey, number>;
 export async function queueCounts(db: Queryable, scope: QueueScope, labels: QueueLabels, now = Date.now()): Promise<QueueCounts> {
   if (!scope.apps.length) return { open: 0, repeat: 0, fixed: 0, quiet: 0, spam: 0, old: 0, closed: 0 };
   const params: unknown[] = [];
-  const cte = openIssues(scope, labels, params);
+  const cte = issuesCte(scope, labels, params);
   const sums = (['repeat', 'fixed', 'quiet', 'spam', 'old'] as const).map((k) => `COALESCE(sum(${queueWhere(k, now)}), 0) AS "${k}"`).join(', ');
   const [{ rows }, closed] = await Promise.all([
     db.query<Record<string, number>>(`WITH ${cte} SELECT count(*) AS "open", ${sums} FROM q`, params),
@@ -200,7 +223,7 @@ export async function queueCounts(db: Queryable, scope: QueueScope, labels: Queu
 export async function queueRows(db: Queryable, scope: QueueScope, labels: QueueLabels, key: Exclude<QueueKey, 'closed'>, o: { limit: number; offset?: number }, now = Date.now()): Promise<QueueRow[]> {
   if (!scope.apps.length) return [];
   const params: unknown[] = [];
-  const cte = openIssues(scope, labels, params);
+  const cte = issuesCte(scope, labels, params);
   const where = [queueWhere(key, now)];
   if (scope.orig) {
     params.push(scope.orig.repoId, scope.orig.number);

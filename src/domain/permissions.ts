@@ -101,8 +101,62 @@ export type Permission =
 
 export interface MemberAccess {
   role: Role;
-  /** Moderators: per page, view or edit (pages left out: no access). */
-  access: Partial<Record<Area, 'view' | 'edit'>>;
+  /** Moderators: per page, view or edit (pages left out: no access); and the MCP tools switched on. */
+  access: Partial<Record<Area, 'view' | 'edit'>> & { mcp?: string[] };
+}
+
+/**
+ * The MCP's tools (what a coding agent can do), each a switch of its own per moderator, apart
+ * from the pages: seeing Ticket management doesn't let an agent find tickets. Some switches cover
+ * two tools that are halves of one thing (claim and release). Owners and admins have them all.
+ */
+export const MCP_GROUPS = [
+  { key: 'read', name: 'Find and read', desc: 'Nothing changes: the agent only reads.' },
+  { key: 'claims', name: 'Claims', desc: '“I’m on it”, kept in Ticket Relay. Nothing is written to GitHub.' },
+  { key: 'act', name: 'Actions on GitHub', desc: 'Done as this person, with your close reasons and saved replies, and listed in the Mod log as through MCP. Needs Moderation on.' },
+] as const;
+export type McpGroup = (typeof MCP_GROUPS)[number]['key'];
+
+export const MCP_SWITCHES = {
+  find_tickets: { group: 'read', name: 'Find tickets', desc: 'Lists tickets and issues with filters (app, priority, labels, lists like Repeat bugs, claimed, has a pull request) and sorting.' },
+  count_tickets: { group: 'read', name: 'Count tickets', desc: 'How many tickets per app, priority, label, list or week, largest first.' },
+  get_ticket: { group: 'read', name: 'Read a ticket', desc: 'One ticket with its text, comments, history, triage’s verdict, duplicates and pull requests.' },
+  get_ticket_files: { group: 'read', name: 'See screenshots', desc: 'A ticket’s screenshots, as images the agent can look at.' },
+  find_related: { group: 'read', name: 'Find related', desc: 'Pull requests for a bug, tickets for a change or an error message, and similar issues.' },
+  find_prs: { group: 'read', name: 'Find pull requests', desc: 'Open, merged or closed pull requests with the tickets they fix or mention.' },
+  get_pr: { group: 'read', name: 'Read a pull request', desc: 'One pull request: its files, its release, and the tickets it fixes or probably fixes.' },
+  get_release: { group: 'read', name: 'Releases', desc: 'What a release fixed, what’s fixed but not released, and tickets opened since.' },
+  get_knowledge: { group: 'read', name: 'Knowledge', desc: 'An app’s TRIAGE.md: known issues, what works as intended, names members use.' },
+  mod_log: { group: 'read', name: 'Mod log', desc: 'What moderators closed, reopened, marked and replied.' },
+  my_work: { group: 'read', name: 'My work', desc: 'Their claims and what they did lately.' },
+  claim: { group: 'claims', name: 'Claim and release', desc: 'Claims a ticket so nobody else takes it, and lets it go.' },
+  close_ticket: { group: 'act', name: 'Close', desc: 'Closes for one of your close reasons, with its comment. Can be undone for 15 minutes.' },
+  reopen_ticket: { group: 'act', name: 'Reopen', desc: 'Reopens a closed ticket.' },
+  duplicates: { group: 'act', name: 'Mark duplicates', desc: 'Marks a ticket as a repeat of another, or not a duplicate.' },
+  set_labels: { group: 'act', name: 'Labels', desc: 'Adds and takes off labels the repository has.' },
+  post_reply: { group: 'act', name: 'Saved replies', desc: 'Posts one of your saved replies. Never text of its own.' },
+} as const satisfies Record<string, { group: McpGroup; name: string; desc: string }>;
+export type McpSwitch = keyof typeof MCP_SWITCHES;
+export const MCP_SWITCH_KEYS = Object.keys(MCP_SWITCHES) as McpSwitch[];
+
+export function isMcpSwitch(s: unknown): s is McpSwitch {
+  return typeof s === 'string' && Object.hasOwn(MCP_SWITCHES, s);
+}
+
+/** Whether this person's agents may use an MCP switch (owners and admins: all of them). */
+export function canMcp(m: MemberAccess, s: McpSwitch): boolean {
+  if (m.role !== 'moderator') return true;
+  return Array.isArray(m.access.mcp) && m.access.mcp.includes(s);
+}
+
+/** The switches a moderator has on, in order. */
+export function mcpSwitches(m: MemberAccess): McpSwitch[] {
+  return MCP_SWITCH_KEYS.filter((s) => canMcp(m, s));
+}
+
+/** Who sees the MCP page and can make tokens: owners, admins, and moderators with at least one tool. */
+export function canUseMcp(m: MemberAccess): boolean {
+  return m.role !== 'moderator' || mcpSwitches(m).length > 0;
 }
 
 export function can(m: MemberAccess, p: Permission): boolean {
