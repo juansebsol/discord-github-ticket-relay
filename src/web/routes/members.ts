@@ -8,6 +8,7 @@ import {
   levelOf,
   MCP_GROUPS,
   MCP_SWITCH_KEYS,
+  type McpGroup,
   MCP_SWITCHES,
   mcpSwitches,
   ROLE_LABELS,
@@ -106,13 +107,20 @@ function accessTags(m: MemberAccess): SafeHtml {
   })}${mcp.length ? tag(`MCP · ${mcp.length}`, { title: `MCP tools: ${mcp.map((k) => MCP_SWITCHES[k].name).join(', ')}` }) : ''}`;
 }
 
-/** "No tools", "4 of 17 tools · read only", "9 of 17 tools · 3 actions" (app.js writes the same after a change). */
+/** "No tools", "6 read tools", "6 read · 2 write tools" (app.js writes the same after a change). */
 function mcpSummary(m: MemberAccess): string {
   const on = mcpSwitches(m);
+  const write = on.filter((k) => MCP_SWITCHES[k].group === 'write').length;
+  const read = on.length - write;
   if (!on.length) return 'No tools';
-  const acts = on.filter((k) => MCP_SWITCHES[k].group === 'act').length;
-  return `${on.length} of ${MCP_SWITCH_KEYS.length} tools · ${acts ? `${acts} ${acts === 1 ? 'action' : 'actions'}` : 'read only'}`;
+  return read && write ? `${read} read · ${write} write tools` : `${read || write} ${read ? 'read' : 'write'} ${read + write === 1 ? 'tool' : 'tools'}`;
 }
+
+/** A group's line in the MCP section: "4 of 11 on". */
+const groupCount = (m: MemberAccess, g: McpGroup) => {
+  const keys = MCP_SWITCH_KEYS.filter((k) => MCP_SWITCHES[k].group === g);
+  return `${keys.filter((k) => mcpSwitches(m).includes(k)).length} of ${keys.length} on`;
+};
 
 /** Pages a moderator can open (the Inbox included). */
 const openCount = (m: MemberAccess) => AREA_KEYS.filter((a) => levelOf(m.access, a) !== 'none').length;
@@ -258,11 +266,20 @@ export function registerMemberRoutes(app: FastifyInstance, web: Web): void {
         </div>
         <div class="acc-pages" id="${id}">
           <input type="hidden" name="mcp_sent" value="1" form="${formId(m)}">
-          <p class="acc-mcp-note">Separate from the pages above: seeing Ticket management doesn’t let their agent find tickets. Their agent acts as them, and what it changes is in the Mod log.</p>
-          ${MCP_GROUPS.map((g) => html`<div class="acc-mcp-g"><span class="n">${g.name}</span><span class="d">${g.desc}</span></div>
-            ${MCP_SWITCH_KEYS.filter((k) => MCP_SWITCHES[k].group === g.key).map((k) => html`<div class="acc-page">
-              <div class="acc-page-t"><div class="l">${MCP_SWITCHES[k].name}</div><div class="d">${MCP_SWITCHES[k].desc}</div></div>
-              ${switchInput({ name: 'mcp', value: k, checked: on.includes(k), label: `${nameOf(m)}: ${MCP_SWITCHES[k].name}`, attrs: html`form="${formId(m)}" data-mcp="${k}" data-mcp-group="${g.key}"` })}</div>`)}`)}
+          <p class="acc-mcp-note">Separate from the pages above: seeing Ticket management doesn’t let their agent find tickets. With a write tool on, they choose for each token whether it can write.</p>
+          ${MCP_GROUPS.map((g) => {
+            const keys = MCP_SWITCH_KEYS.filter((k) => MCP_SWITCHES[k].group === g.key);
+            return html`<div class="acc-mcp-g" data-mcp-block="${g.key}">
+              <div class="acc-mcp-gh">
+                <div class="t"><span class="n">${icon(g.key === 'read' ? 'eye' : 'pencil', 14)}${g.name}</span><span class="c" data-mcp-count="${g.key}">${groupCount(m, g.key)}</span></div>
+                <span class="js-only">${switchInput({ name: '', checked: keys.some((k) => on.includes(k)), label: `${nameOf(m)}: every ${g.name.toLowerCase()} tool`, attrs: html`data-mcp-group-switch="${g.key}"` })}</span>
+              </div>
+              <p class="d">${g.desc}</p>
+              ${keys.map((k) => html`<div class="acc-page">
+                <div class="acc-page-t"><div class="l">${MCP_SWITCHES[k].name}${'github' in MCP_SWITCHES[k] ? tag('GitHub', { cls: 'subtle', title: 'Changes the issue on GitHub' }) : ''}</div><div class="d">${MCP_SWITCHES[k].desc}</div></div>
+                ${switchInput({ name: 'mcp', value: k, checked: on.includes(k), label: `${nameOf(m)}: ${MCP_SWITCHES[k].name}`, attrs: html`form="${formId(m)}" data-mcp="${k}" data-mcp-group="${g.key}"` })}</div>`)}
+            </div>`;
+          })}
         </div>
       </section>`;
     };

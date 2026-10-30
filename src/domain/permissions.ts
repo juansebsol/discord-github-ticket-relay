@@ -111,12 +111,12 @@ export interface MemberAccess {
  * two tools that are halves of one thing (claim and release). Owners and admins have them all.
  */
 export const MCP_GROUPS = [
-  { key: 'read', name: 'Find and read', desc: 'Nothing changes: the agent only reads.' },
-  { key: 'claims', name: 'Claims', desc: '“I’m on it”, kept in Ticket Relay. Nothing is written to GitHub.' },
-  { key: 'act', name: 'Actions on GitHub', desc: 'Done as this person, with your close reasons and saved replies, and listed in the Mod log as through MCP. Needs Moderation on.' },
+  { key: 'read', name: 'Read', desc: 'Find and read tickets, pull requests and releases. Nothing changes.' },
+  { key: 'write', name: 'Write', desc: 'Claims stay in Ticket Relay. The rest change the issue on GitHub as this person, with your close reasons and saved replies, and are listed in the Mod log. GitHub changes need Moderation on.' },
 ] as const;
 export type McpGroup = (typeof MCP_GROUPS)[number]['key'];
 
+/** `github`: changes the issue on GitHub (the other writes stay in Ticket Relay). */
 export const MCP_SWITCHES = {
   find_tickets: { group: 'read', name: 'Find tickets', desc: 'Lists tickets and issues with filters (app, priority, labels, lists like Repeat bugs, claimed, has a pull request) and sorting.' },
   count_tickets: { group: 'read', name: 'Count tickets', desc: 'How many tickets per app, priority, label, list or week, largest first.' },
@@ -129,13 +129,13 @@ export const MCP_SWITCHES = {
   get_knowledge: { group: 'read', name: 'Knowledge', desc: 'An app’s TRIAGE.md: known issues, what works as intended, names members use.' },
   mod_log: { group: 'read', name: 'Mod log', desc: 'What moderators closed, reopened, marked and replied.' },
   my_work: { group: 'read', name: 'My work', desc: 'Their claims and what they did lately.' },
-  claim: { group: 'claims', name: 'Claim and release', desc: 'Claims a ticket so nobody else takes it, and lets it go.' },
-  close_ticket: { group: 'act', name: 'Close', desc: 'Closes for one of your close reasons, with its comment. Can be undone for 15 minutes.' },
-  reopen_ticket: { group: 'act', name: 'Reopen', desc: 'Reopens a closed ticket.' },
-  duplicates: { group: 'act', name: 'Mark duplicates', desc: 'Marks a ticket as a repeat of another, or not a duplicate.' },
-  set_labels: { group: 'act', name: 'Labels', desc: 'Adds and takes off labels the repository has.' },
-  post_reply: { group: 'act', name: 'Saved replies', desc: 'Posts one of your saved replies. Never text of its own.' },
-} as const satisfies Record<string, { group: McpGroup; name: string; desc: string }>;
+  claim: { group: 'write', name: 'Claim and release', desc: '“I’m on it”, so nobody else takes the ticket. Kept in Ticket Relay; nothing is written to GitHub.' },
+  close_ticket: { group: 'write', github: true, name: 'Close', desc: 'Closes for one of your close reasons, with its comment. Can be undone for 15 minutes.' },
+  reopen_ticket: { group: 'write', github: true, name: 'Reopen', desc: 'Reopens a closed ticket.' },
+  duplicates: { group: 'write', github: true, name: 'Mark duplicates', desc: 'Marks a ticket as a repeat of another, or not a duplicate.' },
+  set_labels: { group: 'write', github: true, name: 'Labels', desc: 'Adds and takes off labels the repository has.' },
+  post_reply: { group: 'write', github: true, name: 'Saved replies', desc: 'Posts one of your saved replies. Never text of its own.' },
+} as const satisfies Record<string, { group: McpGroup; github?: true; name: string; desc: string }>;
 export type McpSwitch = keyof typeof MCP_SWITCHES;
 export const MCP_SWITCH_KEYS = Object.keys(MCP_SWITCHES) as McpSwitch[];
 
@@ -152,6 +152,11 @@ export function canMcp(m: MemberAccess, s: McpSwitch): boolean {
 /** The switches a moderator has on, in order. */
 export function mcpSwitches(m: MemberAccess): McpSwitch[] {
   return MCP_SWITCH_KEYS.filter((s) => canMcp(m, s));
+}
+
+/** The person's agent can change something (claims or GitHub): they choose, per token, read only or read and write. */
+export function canWriteMcp(m: MemberAccess): boolean {
+  return MCP_SWITCH_KEYS.some((s) => MCP_SWITCHES[s].group === 'write' && canMcp(m, s));
 }
 
 /** Who sees the MCP page and can make tokens: owners, admins, and moderators with at least one tool. */

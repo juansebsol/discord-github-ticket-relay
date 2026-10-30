@@ -131,10 +131,13 @@ runs in `ticket-relay-web`; nothing else to deploy, and the proxy needs no chang
   off on its next call.
 - **Tokens.** Each person makes their own (one per device) on the MCP page. A token is shown once and
   only its SHA-256 hash is stored. Tokens expire (30, 90 or 365 days; admins can make one that
-  doesn't), can be read-only, and are revoked by their owner or an admin, or when the person is
-  removed from the workspace.
+  doesn't), are Read & write or Read only (people with only read tools always get Read only), and
+  are revoked by their owner or an admin, or when the person is removed from the workspace.
+- **Docs.** The MCP page's Docs tab explains setup, every tool, claims and what to do when
+  something's wrong.
 - **Access.** Every call checks the token, that MCP is on and the person's current access: each tool
-  is a switch per moderator in Members & permissions (owners and admins have all of them). Actions on
+  is a switch per moderator in Members & permissions, in Read and Write groups (owners and admins
+  have all of them). Actions on
   GitHub use the app's existing permissions, the admins' close reasons and saved replies, and are
   logged in the Mod log as done by that person through MCP.
 - **Limits.** Per token: 240 requests, 120 tool calls and 20 changes a minute. Requests from a web

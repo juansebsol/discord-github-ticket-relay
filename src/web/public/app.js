@@ -1425,19 +1425,27 @@
 
     // MCP: a switch per tool, apart from the pages (quick sets leave them alone).
     function mcpInputs(scope) { return $$('input[data-mcp]', scope); }
-    var MCP_TOTAL = null;
     function summarizeMcp(ed) {
       var sec = $('[data-mcp-section]', ed);
       if (!sec) return;
       var all = mcpInputs(sec);
-      MCP_TOTAL = all.length;
       var on = all.filter(function (i) { return i.checked; });
-      var acts = on.filter(function (i) { return i.getAttribute('data-mcp-group') === 'act'; }).length;
+      var write = on.filter(function (i) { return i.getAttribute('data-mcp-group') === 'write'; }).length;
+      var read = on.length - write;
       sec.classList.toggle('on', on.length > 0);
       var sw = $('[data-mcp-switch]', sec);
       if (sw) sw.checked = on.length > 0;
       var line = $('[data-mcp-summary]', sec);
-      if (line) line.textContent = !on.length ? 'No tools' : on.length + ' of ' + MCP_TOTAL + ' tools · ' + (acts ? acts + (acts === 1 ? ' action' : ' actions') : 'read only');
+      if (line) line.textContent = !on.length ? 'No tools' : read && write ? read + ' read · ' + write + ' write tools' : (read || write) + (read ? ' read' : ' write') + (on.length === 1 ? ' tool' : ' tools');
+      // Each group: its count, and its switch on while any of its tools is.
+      ['read', 'write'].forEach(function (g) {
+        var mine = all.filter(function (i) { return i.getAttribute('data-mcp-group') === g; });
+        var n = mine.filter(function (i) { return i.checked; }).length;
+        var c = $('[data-mcp-count="' + g + '"]', sec);
+        if (c) c.textContent = n + ' of ' + mine.length + ' on';
+        var gs = $('[data-mcp-group-switch="' + g + '"]', sec);
+        if (gs) gs.checked = n > 0;
+      });
     }
 
     accCard.addEventListener('change', function (e) {
@@ -1451,6 +1459,14 @@
         mcpInputs(mcpSec).forEach(function (i) { i.checked = turnOn ? (i.checked || i.getAttribute('data-mcp-group') === 'read') : false; });
         summarizeMcp(ed);
         expand(mcpSec, turnOn);
+        save(ed);
+        return;
+      }
+      if (t.hasAttribute('data-mcp-group-switch')) {
+        // Every tool of the group on or off; the other group keeps its own.
+        var g = t.getAttribute('data-mcp-group-switch');
+        mcpInputs(t.closest('[data-mcp-section]')).forEach(function (i) { if (i.getAttribute('data-mcp-group') === g) i.checked = t.checked; });
+        summarizeMcp(ed);
         save(ed);
         return;
       }

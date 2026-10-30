@@ -109,16 +109,32 @@ describe('MCP › access', () => {
     const members = await env.server.inject({ method: 'GET', url: `${w()}/members?mod=${mod.user.id}`, ...get(ws.owner) });
     expect(members.body).toContain('MCP · 2');
     expect(members.body).toContain('data-mcp="close_ticket"');
-    expect(members.body).toContain('2 of 17 tools · read only');
+    expect(members.body).toContain('2 read tools');
+    expect(members.body).toContain('data-mcp-group-switch="write"');
+    expect(members.body).toContain('2 of 11 on');
 
     const view = await page(mod);
     expect(view.statusCode).toBe(200);
     expect(view.body).toContain('Connect your agent');
-    expect(view.body).toContain('2 tools of 17 switched on for you');
     expect(view.body).not.toContain('Everyone’s tokens');
+    // With only read tools there's nothing to choose: their tokens are read only.
+    expect(view.body).toContain('Your tokens are read only');
+    expect(view.body).not.toContain('name="access"');
+    await makeToken(mod);
+    expect((await env.db.query('SELECT read_only FROM mcp_tokens WHERE user_id = $1', [mod.user.id])).rows[0]!.read_only).toBe(1);
+    // The docs: everyone with MCP reads them; the admins' part is for admins.
+    const docs = await env.server.inject({ method: 'GET', url: `${w()}/mcp/docs`, ...get(mod) });
+    expect(docs.statusCode).toBe(200);
+    expect(docs.body).toContain('Using Ticket Relay from your coding agent');
+    expect(docs.body).toContain('/mcp__ticket-relay__pick_up');
+    expect(docs.body).not.toContain('For admins');
+    expect((await env.server.inject({ method: 'GET', url: `${w()}/mcp/docs`, ...get(ws.owner) })).body).toContain('For admins');
+    await giveTools(mod, ['find_tickets', 'claim']);
+    expect((await page(mod)).body).toContain('name="access"');
     // Switching every tool off.
     await giveTools(mod, []);
     expect((await env.db.query('SELECT access FROM workspace_members WHERE user_id = $1', [mod.user.id])).rows[0]!.access).toEqual({ moderation: 'edit', inbox: 'edit' });
+    expect((await env.server.inject({ method: 'GET', url: `${w()}/mcp/docs`, ...get(mod) })).statusCode).toBe(403);
     expect((await page(mod)).statusCode).toBe(403);
   });
 
@@ -183,7 +199,7 @@ describe('MCP › access', () => {
     const all = await toolNames(await makeToken());
     expect(all).toContain('post_reply');
     expect(all).toContain('get_pr');
-    const ro = await toolNames(await makeToken(ws.owner, { read_only: '1', name: 'CI' }));
+    const ro = await toolNames(await makeToken(ws.owner, { access: 'read', name: 'CI' }));
     expect(ro).toContain('find_tickets');
     expect(ro).not.toContain('close_ticket');
     expect(ro).not.toContain('claim_ticket');
