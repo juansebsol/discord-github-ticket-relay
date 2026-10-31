@@ -123,7 +123,7 @@ export function registerAnalyticsRoutes(app: FastifyInstance, web: Web): void {
     const perK = d.downloads.total > 0 ? (d.tickets.total / d.downloads.total) * 1000 : null;
     const prevPerK = d.downloads.prev ? (d.tickets.prev ?? 0) / d.downloads.prev * 1000 : null;
     // One repository (picked, or the only one): downloads by platform; several: all of them together.
-    const single = d.downloads.series.length > 1;
+    const single = d.downloads.series[0]?.key !== 'all';
     const noDownloads = !lifetime && metric === 'downloads' && (!d.recordingSince || (d.downloads.total === 0 && d.recordingSince.getTime() > w.start));
     const noStars = !lifetime && metric === 'stars' && !d.starErrors.length && (!d.starsSince || (d.stars.total === 0 && d.starsSince.getTime() > w.start));
     const per = `per ${w.step.id === '1d' ? 'day' : w.step.label}`;
@@ -172,7 +172,7 @@ export function registerAnalyticsRoutes(app: FastifyInstance, web: Web): void {
             : bars(single ? d.downloads.versions : d.downloads.byApp, { empty: 'Downloads show up after the first read.' })
           : metric === 'stars'
             ? chart(w, tz, { id: 'stars', title: 'Stars gained', unit: 'Stars gained', series: [{ key: 'stars', name: 'Stars gained', values: d.stars.values, slot: 1 }] })
-            : chart(w, tz, { id: 'downloads', title: 'Downloads', unit: 'Downloads', series: single ? d.downloads.series.map((s, i) => ({ ...s, slot: i + 1 })) : [{ ...d.downloads.series[0]!, slot: 1 }] })}
+            : chart(w, tz, { id: 'downloads', title: 'Downloads', unit: 'Downloads', series: d.downloads.series.map((s) => ({ ...s, slot: s.slot ?? 1 })) })}
       </section>
 
       ${metric === 'stars' ? (lifetime ? '' : html`<div class="an-grid">

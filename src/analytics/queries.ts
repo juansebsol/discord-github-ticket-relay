@@ -10,12 +10,17 @@ import type { RepoRef } from '../repo-status/tracker.js';
 import { ARCH_NAMES, PLATFORM_NAMES, type Platform } from './assets.js';
 import { bucketIndex, SLOT_MS, type Window } from './time.js';
 
-/** The download chart's series by platform, in fixed order (colour follows the platform). */
-export const PLATFORM_SERIES: { key: string; name: string; platforms: Platform[] }[] = [
-  { key: 'windows', name: 'Windows', platforms: ['windows'] },
-  { key: 'macos', name: 'macOS', platforms: ['macos'] },
-  { key: 'linux', name: 'Linux', platforms: ['linux'] },
-  { key: 'other', name: 'Other', platforms: ['freebsd', 'web', 'other'] },
+/**
+ * The download chart's series by platform, in fixed order; each keeps its colour (slot) whatever
+ * else is shown. FreeBSD, Web and Other only show when they have downloads in the period.
+ */
+export const PLATFORM_SERIES: { key: Platform; name: string; slot: number; always?: boolean }[] = [
+  { key: 'windows', name: PLATFORM_NAMES.windows, slot: 1, always: true },
+  { key: 'macos', name: PLATFORM_NAMES.macos, slot: 2, always: true },
+  { key: 'linux', name: PLATFORM_NAMES.linux, slot: 3, always: true },
+  { key: 'freebsd', name: PLATFORM_NAMES.freebsd, slot: 5 },
+  { key: 'web', name: PLATFORM_NAMES.web, slot: 6 },
+  { key: 'other', name: PLATFORM_NAMES.other, slot: 4 },
 ];
 
 export interface Series {
@@ -23,12 +28,14 @@ export interface Series {
   name: string;
   /** null: nothing known for that bucket (before recording began, or still to come). */
   values: (number | null)[];
+  /** The colour slot (1–6); the platform's own when by platform. */
+  slot?: number;
 }
 
 export interface Breakdown {
   label: string;
   value: number;
-  /** For platforms: the series colour slot (1–4). */
+  /** For platforms: the series colour slot (1–6). */
   slot?: number;
 }
 
@@ -126,7 +133,9 @@ export async function analyticsData(q: Queryable, workspaceId: string, repos: Re
   const inPrev = rows.filter((r) => r.at >= w.prevStart && r.at < w.prevEnd);
   const single = repos.length === 1;
   const series: Series[] = single
-    ? PLATFORM_SERIES.map((s) => ({ key: s.key, name: s.name, values: bucketed(w, inWindow.filter((r) => s.platforms.includes(r.a.platform)), knownFrom) }))
+    ? PLATFORM_SERIES.map((s) => ({ s, values: bucketed(w, inWindow.filter((r) => r.a.platform === s.key), knownFrom) }))
+      .filter(({ s, values }) => s.always || values.some((v) => v))
+      .map(({ s, values }) => ({ key: s.key, name: s.name, slot: s.slot, values }))
     : [{ key: 'all', name: 'Downloads', values: bucketed(w, inWindow, knownFrom) }];
   // All: GitHub's own lifetime totals for every release file, not only what was recorded.
   const lifetime = w.range.id === 'all';
@@ -139,7 +148,7 @@ export async function analyticsData(q: Queryable, workspaceId: string, repos: Re
     }
     return [...m].map(([label, value]) => ({ label, value })).sort((a, b) => b.value - a.value);
   };
-  const platforms = PLATFORM_SERIES.map((s, i) => ({ label: s.name, value: counted.filter((r) => s.platforms.includes(r.a.platform)).reduce((t, r) => t + r.n, 0), slot: i + 1 })).filter((b) => b.value > 0);
+  const platforms = PLATFORM_SERIES.map((s) => ({ label: s.name, value: counted.filter((r) => r.a.platform === s.key).reduce((t, r) => t + r.n, 0), slot: s.slot })).filter((b) => b.value > 0);
   const versionsAll = tally((r) => (single ? r.a.release : `${appNames.get(r.a.repo_id) ?? 'App'} ${r.a.release}`));
   const versions = versionsAll.length > 8 ? [...versionsAll.slice(0, 7), { label: 'Other versions', value: versionsAll.slice(7).reduce((t, v) => t + v.value, 0) }] : versionsAll;
   const prevKnown = !lifetime && recordingSince !== null && knownFrom <= w.prevStart;
