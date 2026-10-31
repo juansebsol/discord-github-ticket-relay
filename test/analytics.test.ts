@@ -216,13 +216,15 @@ describe('Analytics: the page', () => {
     expect(berlin.body).toContain('data-an-tz="Europe/Berlin"');
   });
 
-  it('shows FreeBSD and Web on their own when they have downloads, each in its own colour', async () => {
+  it('shows FreeBSD and Web on their own when they have downloads, each in its own colour, most downloaded first', async () => {
     seed();
     repo().releases![0]!.assets!.push({ name: 'photocraft-0.11.1-freebsd-x86_64.tar.gz', downloads: 0 }, { name: 'photocraft-web-0.11.1.zip', downloads: 0 });
     await post('/analytics/enabled', { enabled: '1' });
     const t0 = slotOf(Date.now()) - 10 * SLOT_MS;
     await tick(t0);
     asset('photocraft-0.11.1-windows-x64.msi').downloads += 300;
+    asset('photocraft-0.11.1-linux-x86_64.AppImage').downloads += 50;
+    asset('photocraft-0.11.1-macos-universal.dmg').downloads += 30;
     asset('photocraft-0.11.1-freebsd-x86_64.tar.gz').downloads += 20;
     asset('photocraft-web-0.11.1.zip').downloads += 10;
     await tick(t0 + SLOT_MS);
@@ -230,9 +232,9 @@ describe('Analytics: the page', () => {
     // The chart: Windows, macOS and Linux always, then FreeBSD and Web; no Other without downloads.
     const chart = body.match(/data-an-chart='([^']*)'/)![1]!.replaceAll('&quot;', '"');
     expect(JSON.parse(chart).series.map((s: { name: string; slot: number }) => `${s.name} ${s.slot}`)).toEqual(['Windows 1', 'macOS 2', 'Linux 3', 'FreeBSD 5', 'Web 6']);
-    // Platforms: only what was downloaded, in the same order and colours.
+    // Platforms: only what was downloaded, most first (Linux above macOS here), in the same colours.
     const bars = body.match(/aria-labelledby="an-pl-h">[\s\S]*?data-an-hbar='([^']*)'/)![1]!.replaceAll('&quot;', '"');
-    expect(JSON.parse(bars).items.map((b: { label: string; value: number; slot: number }) => `${b.label} ${b.value} ${b.slot}`)).toEqual(['Windows 300 1', 'FreeBSD 20 5', 'Web 10 6']);
+    expect(JSON.parse(bars).items.map((b: { label: string; value: number; slot: number }) => `${b.label} ${b.value} ${b.slot}`)).toEqual(['Windows 300 1', 'Linux 50 3', 'macOS 30 2', 'FreeBSD 20 5', 'Web 10 6']);
   });
 
   it('All shows totals since the beginning: GitHub’s own download and star totals, no timeline', async () => {

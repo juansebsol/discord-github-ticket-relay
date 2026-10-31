@@ -148,7 +148,9 @@ export async function analyticsData(q: Queryable, workspaceId: string, repos: Re
     }
     return [...m].map(([label, value]) => ({ label, value })).sort((a, b) => b.value - a.value);
   };
-  const platforms = PLATFORM_SERIES.map((s) => ({ label: s.name, value: counted.filter((r) => r.a.platform === s.key).reduce((t, r) => t + r.n, 0), slot: s.slot })).filter((b) => b.value > 0);
+  // Most downloaded first, like the other breakdowns; each keeps its platform's colour.
+  const platforms = PLATFORM_SERIES.map((s) => ({ label: s.name, value: counted.filter((r) => r.a.platform === s.key).reduce((t, r) => t + r.n, 0), slot: s.slot }))
+    .filter((b) => b.value > 0).sort((a, b) => b.value - a.value);
   const versionsAll = tally((r) => (single ? r.a.release : `${appNames.get(r.a.repo_id) ?? 'App'} ${r.a.release}`));
   const versions = versionsAll.length > 8 ? [...versionsAll.slice(0, 7), { label: 'Other versions', value: versionsAll.slice(7).reduce((t, v) => t + v.value, 0) }] : versionsAll;
   const prevKnown = !lifetime && recordingSince !== null && knownFrom <= w.prevStart;
