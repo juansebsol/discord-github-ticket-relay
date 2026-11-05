@@ -150,7 +150,10 @@ describe('Discord payloads respect platform limits', () => {
     const text = (modal.components[0] as { content: string }).content;
     expect(text).toMatch(/steps to reproduce/);
     expect(text).toMatch(/publicly on GitHub/);
-    expect(text).toMatch(/passwords, tokens or other secrets/);
+    expect(text).toMatch(/passwords or other private details/);
+    // The workspace's own notice replaces the default.
+    const own = m.buildTicketModal({ publicId: 'ABCDEFGHJK', name: 'PhotoCraft', repoId: 9, repoPrivate: false, notice: 'Anyone can read this.' });
+    expect((own.components[0] as { content: string }).content).toMatch(/\n\nAnyone can read this\.$/);
     for (const c of modal.components.slice(1) as unknown as { label: string; description: string; component: { placeholder: string; max_length: number } }[]) {
       expect(c.label.length).toBeLessThanOrEqual(45);
       expect(c.description.length).toBeLessThanOrEqual(100);

@@ -1,6 +1,6 @@
 /** Server-rendered previews of what members see in Discord. app.js keeps them in sync while typing. */
 import { escapeHtml, html, raw, type SafeHtml } from '../lib/html.js';
-import { formIntro, truncate, visibilityNotice } from '../discord/messages.js';
+import { formLead, truncate, visibilityNotice } from '../discord/messages.js';
 import type { FormSection } from '../domain/forms.js';
 import type { Deps } from '../domain/types.js';
 import { icon } from './ui.js';
@@ -63,20 +63,24 @@ export function selectPreview(placeholder: string): SafeHtml {
   return html`<div class="dp-select"><span>${placeholder}</span>${icon('chevron-down', 16)}</div>`;
 }
 
+type PreviewApp = { name: string; repoPrivate: boolean; notice?: string };
+
 /**
  * A ticket form as members see it in Discord. app.js redraws the sections while the form
- * builder is edited, from the same data attributes.
+ * builder is edited, from the same data attributes. noticeId names the notice's element, for
+ * the notice fields' live preview (Discord tickets › Panel).
  */
-export function formPreview(app: { name: string; repoPrivate: boolean }, type: { name: string } | undefined, sections: FormSection[], o: { id?: string } = {}): SafeHtml {
-  return html`<div class="dp dp-form" ${o.id ? html`id="${o.id}"` : ''} aria-label="Preview of the form in Discord" data-app="${app.name}" data-type="${type?.name ?? ''}" data-notice="${visibilityNotice(app.repoPrivate)}">
+export function formPreview(app: PreviewApp, type: { name: string } | undefined, sections: FormSection[], o: { id?: string; noticeId?: string } = {}): SafeHtml {
+  const notice = app.notice ?? visibilityNotice(app.repoPrivate);
+  return html`<div class="dp dp-form" ${o.id ? html`id="${o.id}"` : ''} aria-label="Preview of the form in Discord" data-app="${app.name}" data-type="${type?.name ?? ''}" data-notice="${notice}">
     <p class="dp-modal-title">${truncate(type ? `${type.name}: ${app.name}` : `New ticket: ${app.name}`, 45)}</p>
-    <div data-pv-sections>${sections.map((s) => formPreviewSection(app, type, s))}</div>
+    <div data-pv-sections>${sections.map((s) => formPreviewSection(app, type, s, notice, o.noticeId))}</div>
     <div class="dp-actions"><span class="dp-btn link">Cancel</span><span class="dp-btn">Submit</span></div>
   </div>`;
 }
 
-function formPreviewSection(app: { name: string; repoPrivate: boolean }, type: { name: string } | undefined, s: FormSection): SafeHtml {
-  if (s.kind === 'intro') return html`<p class="dp-text">${discordMd(formIntro(app, type, s.text, false))}</p>`;
+function formPreviewSection(app: PreviewApp, type: { name: string } | undefined, s: FormSection, notice: string, noticeId?: string): SafeHtml {
+  if (s.kind === 'intro') return html`<p class="dp-text">${discordMd(formLead(app, type, s.text, false))}<br><br><span ${noticeId ? html`id="${noticeId}"` : ''}>${discordMd(notice)}</span></p>`;
   const required = s.kind === 'title' || s.kind === 'description' || s.required;
   const field = s.kind === 'files'
     ? html`<div class="dp-drop">${icon('upload', 16)}<span>Drag and drop or click to upload</span></div>`

@@ -31,6 +31,9 @@ export interface WorkspaceRow {
   retention_days: number;
   panel_title: string | null;
   panel_intro: string | null;
+  /** Who can read a report and what to leave out, for public and private repositories (null = default). */
+  notice_public: string | null;
+  notice_private: string | null;
   created_at: Date;
 }
 

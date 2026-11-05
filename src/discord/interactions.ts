@@ -5,7 +5,7 @@ import { enabledTicketTypes, getTicketTypeByPublicId, type TicketType } from '..
 import { getAppByPublicId, getDiscordConnectionByGuild, getGitHubConnection, listApps } from '../domain/store.js';
 import { answerMax, filesId, formFor, MAX_FILES_LIMIT, questionId } from '../domain/forms.js';
 import { acceptSubmission, type IncomingFile, type TicketAnswer } from '../domain/submissions.js';
-import type { Deps } from '../domain/types.js';
+import type { Deps, WorkspaceRow } from '../domain/types.js';
 import { getWorkspace } from '../domain/workspaces.js';
 import * as m from './messages.js';
 
@@ -114,13 +114,13 @@ export async function handleInteraction(deps: Deps, processor: Processor, i: Int
       // With ticket types configured, members choose one before the form (required).
       const types = await enabledTicketTypes(deps.db, workspace.id);
       if (types.length) {
-        const picker = m.buildTypePicker({ publicId: app.public_id, name: app.name, repoId: app.repo_id, repoPrivate: app.repo_private }, types.map(toFormTypeOption));
+        const picker = m.buildTypePicker(ticketApp(app, workspace), types.map(toFormTypeOption));
         return { response: { type: ResponseType.ChannelMessage, data: picker } };
       }
       return {
         response: {
           type: ResponseType.Modal,
-          data: m.buildTicketModal({ publicId: app.public_id, name: app.name, repoId: app.repo_id, repoPrivate: app.repo_private }),
+          data: m.buildTicketModal(ticketApp(app, workspace)),
         },
       };
     }
@@ -136,7 +136,7 @@ export async function handleInteraction(deps: Deps, processor: Processor, i: Int
         response: {
           type: ResponseType.Modal,
           data: m.buildTicketModal(
-            { publicId: app.public_id, name: app.name, repoId: app.repo_id, repoPrivate: app.repo_private },
+            ticketApp(app, workspace),
             { publicId: type.public_id, name: type.name, guidance: type.guidance, placeholder: type.placeholder },
             formFor(type),
           ),
@@ -245,4 +245,9 @@ function toFormTypeOption(t: TicketType) {
 
 function toPanelApp(a: { public_id: string; name: string; description: string | null }): m.PanelApp {
   return { publicId: a.public_id, name: a.name, description: a.description };
+}
+
+/** The app for the type picker and the form, with the workspace's notice for its repository. */
+function ticketApp(a: { public_id: string; name: string; repo_id: number; repo_private: boolean }, ws: WorkspaceRow): m.TicketApp {
+  return { publicId: a.public_id, name: a.name, repoId: a.repo_id, repoPrivate: a.repo_private, notice: m.visibilityNotice(a.repo_private, ws) };
 }

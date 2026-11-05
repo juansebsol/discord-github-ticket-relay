@@ -222,12 +222,15 @@ describe('Analytics: the page', () => {
     await post('/analytics/enabled', { enabled: '1' });
     const t0 = slotOf(Date.now()) - 10 * SLOT_MS;
     await tick(t0);
+    // After the first half hour: the chart leaves the slot recording began in blank, and at 3-hour
+    // steps that slot can close a column, whatever the time of day.
+    await tick(t0 + SLOT_MS);
     asset('photocraft-0.11.1-windows-x64.msi').downloads += 300;
     asset('photocraft-0.11.1-linux-x86_64.AppImage').downloads += 50;
     asset('photocraft-0.11.1-macos-universal.dmg').downloads += 30;
     asset('photocraft-0.11.1-freebsd-x86_64.tar.gz').downloads += 20;
     asset('photocraft-web-0.11.1.zip').downloads += 10;
-    await tick(t0 + SLOT_MS);
+    await tick(t0 + 2 * SLOT_MS);
     const body = (await page('/analytics?range=7d')).body;
     // The chart: Windows, macOS and Linux always, then FreeBSD and Web; no Other without downloads.
     const chart = body.match(/data-an-chart='([^']*)'/)![1]!.replaceAll('&quot;', '"');

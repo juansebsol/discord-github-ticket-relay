@@ -20,6 +20,7 @@ import {
 } from '../../domain/ticket-types.js';
 import { UserFacingError } from '../../domain/types.js';
 import { html, raw, type SafeHtml } from '../../lib/html.js';
+import { visibilityNotice } from '../../discord/messages.js';
 import { formPreview, previewCaption } from '../discord-preview.js';
 import { setFlash } from '../session.js';
 import type { Web, WorkspaceRequestContext } from '../server.js';
@@ -363,7 +364,8 @@ export function registerTicketTypeRoutes(app: FastifyInstance, web: Web): void {
     // Someone who can only see types gets the sections and the preview, nothing to change.
     const edit = can(ctx.membership, 'types.edit');
     const apps = (await listApps(deps.db, ctx.workspace.id)).filter((a) => a.enabled);
-    const sample = apps[0] ? { name: apps[0].name, repoPrivate: apps[0].repo_private } : { name: 'Your app', repoPrivate: false };
+    const repoPrivate = apps[0]?.repo_private ?? false;
+    const sample = { name: apps[0]?.name ?? 'Your app', repoPrivate, notice: visibilityNotice(repoPrivate, ctx.workspace) };
     const custom = Boolean(t.form);
     const addButtons: { kind: SectionKind; label: string; icon: IconName }[] = [
       { kind: 'short', label: 'Short answer', icon: 'text-cursor-input' },

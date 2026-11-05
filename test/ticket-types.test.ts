@@ -46,6 +46,38 @@ describe('ticket types in Discord', () => {
     expect(modal.data.components[2].component.placeholder).toBe('1. Open…  2. Click…');
   });
 
+  it('shows the workspace’s own privacy notice when choosing a type and on the form, without publishing', async () => {
+    const [bug] = await addTypes();
+    const panelUrl = `/w/${ws.workspace.id}/tickets/panel`;
+    const before = (await env.server.inject({ method: 'GET', url: panelUrl, ...get(ws.owner) })).body;
+    // Mobile App's repository is private, Website's public: a field for each, naming its apps.
+    expect(before).toContain('id="notice_public"');
+    expect(before).toContain('id="notice_private"');
+    expect(before).toContain('For Website.');
+    expect(before).toContain('For Mobile App.');
+    // The previews show Mobile App, so the private field feeds them.
+    expect(before).toMatch(/id="notice_private"[^>]*data-preview="pv-notice pv-notice-form"/);
+    expect(before).toMatch(/<span id="pv-notice">Your report goes to a private repository/);
+
+    const notice = 'Only the **team** reads this. Leave out keys and passwords.';
+    const saved = await env.server.inject({ method: 'POST', url: panelUrl, ...form(ws.owner, { notice_private: notice, notice_public: '', intent: 'save' }) });
+    expect(saved.statusCode).toBe(302);
+    const row = async () => (await env.db.query('SELECT notice_public, notice_private FROM workspaces WHERE id = $1', [ws.workspace.id])).rows[0];
+    expect(await row()).toEqual({ notice_public: null, notice_private: notice });
+    const step = (await pickApp()).json();
+    expect(step.data.embeds[0].description).toBe(`Choose a type for your **Mobile App** ticket.\n\n${notice}`);
+    const modal = (await sendInteraction(env, { id: nextInteractionId(), type: 3, token: 't', guild_id: ws.guildId, member: member(), data: { custom_id: step.data.components[0].components[0].custom_id, values: [bug!.public_id] } })).json();
+    expect(modal.data.components[0].content.endsWith(`\n\n${notice}`)).toBe(true);
+    // Website's repository is public: still the default there.
+    expect((await pickApp(ws.apps[1]!.public_id)).json().data.embeds[0].description).toContain('Your report will be posted publicly on GitHub, where anyone can read it.');
+    expect((await env.server.inject({ method: 'GET', url: panelUrl, ...get(ws.owner) })).body).toContain('<span id="pv-notice">Only the <strong>team</strong> reads this.');
+
+    // Emptied: back to the default.
+    await env.server.inject({ method: 'POST', url: panelUrl, ...form(ws.owner, { notice_private: '  ', intent: 'save' }) });
+    expect(await row()).toEqual({ notice_public: null, notice_private: null });
+    expect((await pickApp()).json().data.embeds[0].description).toContain('Your report goes to a private repository');
+  });
+
   it('files the issue with the type label, the app labels and a title prefix', async () => {
     const [bug, feature] = await addTypes();
     env.github.repos.get(ws.repoIds[0]!)!.labels.push('enhancement');

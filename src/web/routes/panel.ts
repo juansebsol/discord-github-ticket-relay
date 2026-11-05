@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import { DEFAULT_PANEL_INTRO, DEFAULT_PANEL_TITLE, MORE_APPS_VALUE } from '../../discord/messages.js';
+import { DEFAULT_NOTICE, DEFAULT_PANEL_INTRO, DEFAULT_PANEL_TITLE, MORE_APPS_VALUE, visibilityNotice } from '../../discord/messages.js';
 import { formFor } from '../../domain/forms.js';
 import { inspectGuild } from '../../domain/discord-checks.js';
 import { checkPanel, panelPayloadFor, publishPanel, unpublishPanel } from '../../domain/panel.js';
@@ -9,7 +9,7 @@ import { acceptSubmission } from '../../domain/submissions.js';
 import { enabledTicketTypes, getTicketType } from '../../domain/ticket-types.js';
 import { UserFacingError } from '../../domain/types.js';
 import { validateWorkspace, type Check } from '../../domain/validation.js';
-import { updatePanelText } from '../../domain/workspaces.js';
+import { updateNotices, updatePanelText } from '../../domain/workspaces.js';
 import { html, raw, type SafeHtml } from '../../lib/html.js';
 import { botIdentity, botMessage, discordMd, formPreview, previewCaption, selectPreview } from '../discord-preview.js';
 import { setFlash } from '../session.js';
@@ -18,7 +18,14 @@ import { csrfField, icon, linkBtn, pill, selectWrap, setting, submitBtn, timeAgo
 import { toolHeader } from './tool.js';
 import { viewOnlyFooter } from './triage.js';
 
-const LIMITS = { panel_title: 200, panel_intro: 1500 } as const;
+const LIMITS = { panel_title: 200, panel_intro: 1500, notice: 500 } as const;
+
+/** "For PhotoCraft and DesignCraft." under a notice field: the apps it's shown for. */
+function usedBy(names: string[], none: string): string {
+  if (!names.length) return none;
+  const shown = names.length > 3 ? [...names.slice(0, 2), `${names.length - 2} more`] : names;
+  return `For ${shown.length > 1 ? `${shown.slice(0, -1).join(', ')} and ${shown.at(-1)!}` : shown[0]!}.`;
+}
 
 const CHECK_ICONS: Record<Check['status'], [IconName, string]> = { ok: ['circle-check', 'ok'], warning: ['triangle-alert', 'warn'], error: ['circle-x', 'danger'] };
 
@@ -119,6 +126,14 @@ export function registerPanelRoutes(app: FastifyInstance, web: Web): void {
     const sample = enabledApps[0];
     // Fix links only for pages this person can use; the rest stay as text.
     const checks = report.checks.filter((c) => c.area !== 'panel').map((c) => ({ ...c, fix: fixFor(m, b, c.fix) }));
+    // The notice: a field for each kind of repository the apps use (public while there are none).
+    const publicApps = apps.filter((a) => !a.repo_private).map((a) => a.name);
+    const privateApps = apps.filter((a) => a.repo_private).map((a) => a.name);
+    const showPublic = publicApps.length > 0 || !privateApps.length || Boolean(ws.notice_public);
+    const showPrivate = privateApps.length > 0 || Boolean(ws.notice_private);
+    // The previews show the sample app's notice, so its field updates them while typing.
+    const sampleNotice = sample ? visibilityNotice(sample.repo_private, ws) : '';
+    const noticePreview = (repoPrivate: boolean) => (sample?.repo_private === repoPrivate ? 'pv-notice pv-notice-form' : undefined);
 
     const sections = html`
           <div class="section" id="channel">
@@ -130,6 +145,14 @@ export function registerPanelRoutes(app: FastifyInstance, web: Web): void {
             <div class="fields">
               ${textField({ id: 'panel_title', label: 'Heading', value: title, max: LIMITS.panel_title, placeholder: DEFAULT_PANEL_TITLE, preview: 'pv-title' })}
               ${textField({ id: 'panel_intro', label: 'Introduction', value: intro, max: LIMITS.panel_intro, rows: 3, placeholder: DEFAULT_PANEL_INTRO, preview: 'pv-intro', md: true, hint: edit ? 'Discord formatting works, for example **bold**.' : undefined })}
+            </div>
+          </div>
+          <div class="section" id="notice">
+            <div class="section-h"><div><h3>Privacy notice</h3><div class="desc">Shown when members choose a ticket type and at the top of the form, so they know who can read their report. Changes show right away, without publishing the panel.</div></div>
+              ${edit ? html`<button type="button" class="btn ghost sm" data-reset-fields="notice_public notice_private"><span class="lead">${icon('undo-2', 14)}</span><span class="lbl">Reset to default</span></button>` : ''}</div>
+            <div class="fields">
+              ${showPublic ? textField({ id: 'notice_public', label: 'Public repositories', value: visibilityNotice(false, ws), max: LIMITS.notice, rows: 3, placeholder: DEFAULT_NOTICE.public, preview: noticePreview(false), md: true, hint: usedBy(publicApps, 'No app has a public repository yet.') }) : ''}
+              ${showPrivate ? textField({ id: 'notice_private', label: 'Private repositories', value: visibilityNotice(true, ws), max: LIMITS.notice, rows: 3, placeholder: DEFAULT_NOTICE.private, preview: noticePreview(true), md: true, hint: usedBy(privateApps, 'No app has a private repository yet.') }) : ''}
             </div>
           </div>
           <div class="section">
@@ -184,8 +207,9 @@ export function registerPanelRoutes(app: FastifyInstance, web: Web): void {
           ${sample ? html`
             ${previewCaption(null, null, types.length ? 'Next steps · ' : 'Form · ')}
             ${types.length ? html`<div class="dp"><p class="dp-modal-title">What kind of ticket is this?</p>
+                <p class="dp-text">Choose a type for your <strong>${sample.name}</strong> ticket.<br><br><span id="pv-notice">${discordMd(sampleNotice)}</span></p>
                 <div class="dp-options">${types.map((t) => html`<div class="dp-option"><strong>${t.name}</strong>${t.description ? html`<span>${t.description}</span>` : ''}</div>`)}</div></div><div class="mt-8"></div>` : ''}
-            ${formPreview({ name: sample.name, repoPrivate: sample.repo_private }, firstType ? { name: firstType.name } : undefined, formFor(firstType ?? null))}
+            ${formPreview({ name: sample.name, repoPrivate: sample.repo_private, notice: sampleNotice }, firstType ? { name: firstType.name } : undefined, formFor(firstType ?? null), { noticeId: 'pv-notice-form' })}
             <p class="dp-note">${firstType ? html`Form for “${firstType.name}”. ${can(m, 'types.edit') ? html`Change the questions on <a href="${b}/tickets/types/${firstType.id}/form">its form page</a>. ` : ''}` : ''}After submitting, the member gets a private confirmation with the ticket number and a link to the issue.</p>` : ''}
         </div>
       </div>
@@ -201,12 +225,26 @@ export function registerPanelRoutes(app: FastifyInstance, web: Web): void {
     const back = `${ctx.base}/tickets/panel`;
     const body = (req.body ?? {}) as Record<string, string | undefined>;
     const wid = ctx.workspace.id;
+    const ws = ctx.workspace;
     try {
+      let textChanged = false;
       if (body.panel_title !== undefined || body.panel_intro !== undefined) {
-        await updatePanelText(deps.db, wid, {
-          panelTitle: body.panel_title !== undefined ? cleanText(body.panel_title, LIMITS.panel_title, DEFAULT_PANEL_TITLE) : ctx.workspace.panel_title,
-          panelIntro: body.panel_intro !== undefined ? cleanText(body.panel_intro, LIMITS.panel_intro, DEFAULT_PANEL_INTRO) : ctx.workspace.panel_intro,
-        });
+        const text = {
+          panelTitle: body.panel_title !== undefined ? cleanText(body.panel_title, LIMITS.panel_title, DEFAULT_PANEL_TITLE) : ws.panel_title,
+          panelIntro: body.panel_intro !== undefined ? cleanText(body.panel_intro, LIMITS.panel_intro, DEFAULT_PANEL_INTRO) : ws.panel_intro,
+        };
+        textChanged = text.panelTitle !== ws.panel_title || text.panelIntro !== ws.panel_intro;
+        await updatePanelText(deps.db, wid, text);
+      }
+      // The notice isn't part of the panel message: it's used from the next ticket on.
+      let noticeChanged = false;
+      if (body.notice_public !== undefined || body.notice_private !== undefined) {
+        const notices = {
+          public: body.notice_public !== undefined ? cleanText(body.notice_public, LIMITS.notice, DEFAULT_NOTICE.public) : ws.notice_public,
+          private: body.notice_private !== undefined ? cleanText(body.notice_private, LIMITS.notice, DEFAULT_NOTICE.private) : ws.notice_private,
+        };
+        noticeChanged = notices.public !== ws.notice_public || notices.private !== ws.notice_private;
+        if (noticeChanged) await updateNotices(deps.db, wid, notices);
       }
       if (body.channel_id) {
         const conn = await getDiscordConnection(deps.db, wid);
@@ -231,8 +269,12 @@ export function registerPanelRoutes(app: FastifyInstance, web: Web): void {
           recreated: `The old panel was deleted, so a new one was posted${where}`,
           moved: `Panel moved${where}`,
         }[result]);
+      } else if (noticeChanged && !textChanged) {
+        setFlash(reply, 'success', 'Notice saved. Members see it the next time they open a ticket.');
       } else {
-        setFlash(reply, 'success', 'Changes saved. Publish the panel to show them in Discord.');
+        setFlash(reply, 'success', noticeChanged
+          ? 'Changes saved. The notice is live now; publish the panel to show the new heading and introduction.'
+          : 'Changes saved. Publish the panel to show them in Discord.');
       }
     } catch (err) {
       if (!(err instanceof UserFacingError)) throw err;

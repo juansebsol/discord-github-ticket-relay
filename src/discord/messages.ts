@@ -182,10 +182,26 @@ export function buildPickerPage(apps: PanelApp[], requestedPage: number, ids: Pi
   };
 }
 
-export function visibilityNotice(repoPrivate: boolean): string {
-  return repoPrivate
-    ? 'Your report goes to a private repository, so only the team and people with access to it can see it.'
-    : 'Your report will be posted publicly on GitHub, where anyone can read it.';
+export const DEFAULT_NOTICE = {
+  public: 'Your report will be posted publicly on GitHub, where anyone can read it. Don’t include passwords or other private details, in the text or in screenshots.',
+  private: 'Your report goes to a private repository, so only the team and people with access to it can see it. Don’t include passwords or other private details, in the text or in screenshots.',
+} as const;
+
+/**
+ * Who can read the report and what to leave out, shown when a member picks a type and at the top
+ * of the form: the workspace's own text (Discord tickets › Panel), or the default.
+ */
+export function visibilityNotice(repoPrivate: boolean, ws?: { notice_public: string | null; notice_private: string | null } | null): string {
+  return (repoPrivate ? ws?.notice_private : ws?.notice_public)?.trim() || DEFAULT_NOTICE[repoPrivate ? 'private' : 'public'];
+}
+
+/** The app a ticket is for; notice is the workspace's (visibilityNotice), the default when left out. */
+export interface TicketApp {
+  publicId: string;
+  name: string;
+  repoId: number;
+  repoPrivate: boolean;
+  notice?: string;
 }
 
 export interface FormType {
@@ -196,12 +212,12 @@ export interface FormType {
 }
 
 /** Ephemeral step between choosing the app and the form: what kind of ticket is it? */
-export function buildTypePicker(app: { publicId: string; name: string; repoId: number; repoPrivate: boolean }, types: { publicId: string; name: string; description: string | null }[]) {
+export function buildTypePicker(app: TicketApp, types: { publicId: string; name: string; description: string | null }[]) {
   return {
     content: '',
     embeds: [{
       title: 'What kind of ticket is this?',
-      description: `Choose a type for your **${escapeMarkdown(app.name)}** ticket.\n\n${visibilityNotice(app.repoPrivate)} Don’t include passwords or other private details, in the text or in screenshots.`,
+      description: truncate(`Choose a type for your **${escapeMarkdown(app.name)}** ticket.\n\n${app.notice ?? visibilityNotice(app.repoPrivate)}`, 4096),
       color: COLORS.brand,
     }],
     flags: EPHEMERAL,
@@ -226,11 +242,16 @@ export function buildTypePicker(app: { publicId: string; name: string; repoId: n
   };
 }
 
-/** The intro text at the top of a form, always followed by who can see the report. */
-export function formIntro(app: { name: string; repoPrivate: boolean }, type: { name: string } | undefined, text: string, escape = true): string {
+/** The first paragraph of a form: which app and type, and the intro text. */
+export function formLead(app: { name: string }, type: { name: string } | undefined, text: string, escape = true): string {
   const e = escape ? escapeMarkdown : (v: string) => v;
   const lead = type ? `**${e(type.name)}** for **${e(app.name)}**.` : `Describe your problem with **${e(app.name)}**.`;
-  return [`${lead} ${text.trim()}`, '', `${visibilityNotice(app.repoPrivate)} Do not include passwords, tokens or other secrets.`].join('\n');
+  return `${lead} ${text.trim()}`;
+}
+
+/** The intro text at the top of a form, always followed by who can see the report. */
+export function formIntro(app: Pick<TicketApp, 'name' | 'repoPrivate' | 'notice'>, type: { name: string } | undefined, text: string, escape = true): string {
+  return [formLead(app, type, text, escape), '', app.notice ?? visibilityNotice(app.repoPrivate)].join('\n');
 }
 
 function labelled(s: FormSection, component: Record<string, unknown>) {
@@ -247,7 +268,7 @@ function textInput(s: FormSection, o: { custom_id: string; style: 1 | 2; min_len
 }
 
 /** The ticket form for an app (and type), built from the type's sections. */
-export function buildTicketModal(app: { publicId: string; name: string; repoId: number; repoPrivate: boolean }, type?: FormType, sections?: FormSection[]) {
+export function buildTicketModal(app: TicketApp, type?: FormType, sections?: FormSection[]) {
   const form = sections ?? defaultForm(type ? { name: type.name, guidance: type.guidance, placeholder: type.placeholder } : null);
   return {
     custom_id: CustomId.form(app.publicId, app.repoId, type?.publicId),

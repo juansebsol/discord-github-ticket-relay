@@ -644,8 +644,10 @@
   function syncField(el) {
     var counter = el.id && document.querySelector('[data-counter-for="' + el.id + '"]');
     if (counter) counter.textContent = el.value.length + ' / ' + el.getAttribute('maxlength');
-    var target = el.getAttribute('data-preview') && document.getElementById(el.getAttribute('data-preview'));
-    if (target) {
+    // data-preview: the element (or several, ids separated by spaces) showing this field.
+    (el.getAttribute('data-preview') || '').split(/\s+/).forEach(function (id) {
+      var target = id && document.getElementById(id);
+      if (!target) return;
       var value = el.value.trim() ? el.value : (el.getAttribute('placeholder') || '');
       if (target.hasAttribute('data-tpl')) {
         target.setAttribute('data-tpl', value);
@@ -657,7 +659,7 @@
       } else {
         target.textContent = value;
       }
-    }
+    });
   }
   $$('[data-preview],[maxlength][id]').forEach(function (el) {
     if (el.tagName !== 'INPUT' && el.tagName !== 'TEXTAREA') return;
@@ -971,7 +973,7 @@
           var app = preview.getAttribute('data-app'), type = preview.getAttribute('data-type');
           var lead = type ? '**' + type + '** for **' + app + '**.' : 'Describe your problem with **' + app + '**.';
           var p = el('p', 'dp-text');
-          p.innerHTML = discordHtml(lead + ' ' + text(sec, 'text') + '\n\n' + preview.getAttribute('data-notice') + ' Do not include passwords, tokens or other secrets.', {});
+          p.innerHTML = discordHtml(lead + ' ' + text(sec, 'text') + '\n\n' + preview.getAttribute('data-notice'), {});
           box.appendChild(p);
           return;
         }
