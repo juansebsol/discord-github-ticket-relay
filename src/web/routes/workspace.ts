@@ -6,8 +6,9 @@ import { checkPanel } from '../../domain/panel.js';
 import { AREAS, areasOf, can, levelOf, TOOL_NAMES, TOOLS, toolAccess, type Area, type MemberAccess, type Tool } from '../../domain/permissions.js';
 import { getDiscordConnection, getGitHubConnection, listApps } from '../../domain/store.js';
 import { countByStatus, decryptPayload, filedThisWeek } from '../../domain/submissions.js';
-import type { AppRow, DiscordConnectionRow, SubmissionStatus } from '../../domain/types.js';
-import { updateWorkspaceGeneral, userNames } from '../../domain/workspaces.js';
+import { UserFacingError, type AppRow, type DiscordConnectionRow, type SubmissionStatus } from '../../domain/types.js';
+import { createLinkedWorkspace, listLinked, mainOf, MAIN_ONLY_TOOLS, panelOwnerId } from '../../domain/linked.js';
+import { getWorkspace, updateWorkspaceGeneral, userNames } from '../../domain/workspaces.js';
 import { html, raw, type SafeHtml } from '../../lib/html.js';
 import type { LogDetail, TriageAction } from '../../triage/engine.js';
 import { getTriageSettings, monthlyUsage } from '../../triage/settings.js';
@@ -118,13 +119,15 @@ interface Shared {
 
 async function ticketsCard({ web, ctx, dc, counts }: Shared): Promise<ToolCard> {
   const b = ctx.base;
-  const [panel, filed] = await Promise.all([checkPanel(web.deps, ctx.workspace.id, { live: false }), filedThisWeek(web.deps.db, ctx.workspace.id)]);
+  // A linked workspace on its main's panel: that panel's state.
+  const owner = panelOwnerId(ctx.workspace);
+  const [panel, filed, panelConn] = await Promise.all([checkPanel(web.deps, owner, { live: false }), filedThisWeek(web.deps.db, ctx.workspace.id), owner === ctx.workspace.id ? Promise.resolve(dc) : getDiscordConnection(web.deps.db, owner)]);
   const attention = counts.failed + counts.uncertain;
   // Members can't open tickets until the panel is in Discord: that comes first for whoever can post it.
   const publish = panel.state === 'not_published' || panel.state === 'missing';
   return {
     tool: 'tickets',
-    meta: `Members open them from ${dc?.tickets_channel_name ? `#${dc.tickets_channel_name}` : 'the ticket panel'} · each becomes a GitHub issue`,
+    meta: `Members open them from ${panelConn?.tickets_channel_name ? `#${panelConn.tickets_channel_name}` : 'the ticket panel'} · each becomes a GitHub issue`,
     status: panelPill(panel.state),
     stats: [
       { label: 'Filed this week', value: filed, area: 'inbox', href: `${b}/tickets?status=filed`, title: 'Tickets filed as GitHub issues in the last 7 days' },
@@ -132,7 +135,7 @@ async function ticketsCard({ web, ctx, dc, counts }: Shared): Promise<ToolCard> 
       { label: 'Queued', value: counts.pending + counts.processing, area: 'inbox', href: `${b}/tickets?status=open`, title: 'Tickets waiting to be filed' },
     ],
     go: [
-      ...(publish && can(ctx.membership, 'panel.edit') ? [{ area: 'panel' as const, label: panel.state === 'missing' ? 'Post panel again' : 'Publish panel', primary: true }] : []),
+      ...(publish && owner === ctx.workspace.id && can(ctx.membership, 'panel.edit') ? [{ area: 'panel' as const, label: panel.state === 'missing' ? 'Post panel again' : 'Publish panel', primary: true }] : []),
       { area: 'inbox', label: 'Open inbox' },
       { area: 'panel', label: 'Panel' },
       { area: 'types', label: 'Ticket types' },
@@ -579,7 +582,8 @@ export function registerWorkspaceRoutes(app: FastifyInstance, web: Web): void {
     const repos = new Map(apps.map((a) => [a.repo_id, a.repo_name]));
     const shared: Shared = { web, ctx, dc, apps, repos, counts };
     // One card per tool this person can open a page of.
-    const tools = OVERVIEW_TOOLS.filter((t) => firstPage(m, t) !== null);
+    // A linked workspace has no contributor roles, announcements or bot features (its main does).
+    const tools = OVERVIEW_TOOLS.filter((t) => firstPage(m, t) !== null && !(ctx.workspace.parent_id && (MAIN_ONLY_TOOLS as readonly string[]).includes(t)));
     const [cards, feed] = await Promise.all([Promise.all(tools.map((t) => CARDS[t](shared))), latestFeed(shared)]);
     const enabledApps = apps.filter((a) => a.enabled);
     const act = can(m, 'inbox.edit');
@@ -613,7 +617,7 @@ export function registerWorkspaceRoutes(app: FastifyInstance, web: Web): void {
       },
       {
         state: p.discord, icon: 'message-circle', name: 'Discord', href: `${b}/setup/discord`, cta: 'Connect Discord',
-        detail: dc ? `${dc.guild_name} · ${dc.status === 'active' ? 'bot ready' : 'bot removed'}` : 'Add the bot to your Discord server.',
+        detail: dc ? `${dc.guild_name} · ${dc.status === 'active' ? 'bot ready' : 'bot removed'}${ctx.workspace.parent_id ? ' · from the main workspace' : ''}` : ctx.workspace.parent_id ? 'The main workspace connects Discord.' : 'Add the bot to your Discord server.',
       },
       {
         state: p.apps, icon: 'boxes', name: 'Apps & repositories', href: `${b}/apps`, cta: 'Add apps',
@@ -666,8 +670,61 @@ export function registerWorkspaceRoutes(app: FastifyInstance, web: Web): void {
           ${submitBtn('Save changes', { variant: 'primary', loading: 'Saving…', attrs: raw('data-dirty-enable') })}
         </div></div>
       </form>
+      ${await linkedCard(ctx)}
       ${await claudeCard(web, ctx)}`;
     return web.render(reply, ctx, 'Settings', 'settings', body);
+  });
+
+  /**
+   * Linked workspaces. A main lists its own and makes new ones; a linked workspace says what it
+   * shares with its main and what's its own.
+   */
+  async function linkedCard(ctx: WorkspaceRequestContext): Promise<SafeHtml> {
+    const ws = ctx.workspace;
+    const main = await mainOf(deps.db, ws);
+    if (main) {
+      const canOpenMain = (ctx.memberships ?? []).some((x) => x.workspace.id === main.id);
+      return html`<div class="card">
+        <div class="card-h"><div><h2>Linked workspace</h2><div class="desc">${ws.name} is linked to ${canOpenMain ? html`<a href="/w/${main.id}">${main.name}</a>` : main.name}.</div></div></div>
+        ${setting('Its own', null, html`<span class="value">GitHub organization, apps, ticket types, tickets, AI triage, moderation and analytics</span>`, { stacked: true })}
+        ${setting(`From ${main.name}`, null, html`<span class="value">The Discord server; contributor roles, announcements and bot features; its owner and admins, who are admins here; and its global moderators, who are moderators here</span>`, { stacked: true })}
+      </div>`;
+    }
+    const linked = await listLinked(deps.db, ws.id);
+    const github = await Promise.all(linked.map((l) => getGitHubConnection(deps.db, l.id)));
+    const rows = linked.map((l, i) => {
+      const gh = github[i];
+      const where = l.on_main_panel ? `On ${ws.name}’s panel` : 'Its own panel';
+      return html`<a class="line setup-row" href="/w/${l.id}">${icon('corner-down-right', 16, 'muted')}<span class="grow"><span class="name">${l.name}</span><span class="small muted"> · ${gh ? `GitHub: ${gh.account_login}` : 'GitHub not connected'} · ${where}</span></span>${icon('chevron-right', 16, 'muted')}</a>`;
+    });
+    return html`<div class="card" id="linked">
+      <div class="card-h"><div><h2>Linked workspaces</h2><div class="desc">For apps whose repositories are in another GitHub organization. Each one has its own GitHub connection, apps, tickets, AI triage and analytics, and uses this workspace’s Discord server. Its apps go on this panel or a panel of their own. This workspace’s owner and admins are its admins, and global moderators are its moderators.</div></div></div>
+      ${rows.length ? html`<div>${rows}</div>` : ''}
+      <form method="post" action="${ctx.base}/settings/linked" class="card-f linked-new">${csrfField(ctx.csrf)}
+        <label class="sr-only" for="linked-name">Name of the linked workspace</label>
+        <input id="linked-name" type="text" name="name" placeholder="Name, for example the app or team" required maxlength="80">
+        <div class="end">${submitBtn('Create linked workspace', { icon: 'plus', loading: 'Creating…' })}</div>
+      </form>
+    </div>`;
+  }
+
+  app.post('/w/:wid/settings/linked', async (req, reply) => {
+    const ctx = await web.requireWorkspace(req, reply);
+    if (!ctx) return reply;
+    const parsed = z.string().trim().min(1).max(80).safeParse((req.body as { name?: string }).name);
+    if (!parsed.success) {
+      setFlash(reply, 'error', 'Enter a name for the linked workspace (up to 80 characters).');
+      return reply.redirect(`${ctx.base}/settings#linked`);
+    }
+    try {
+      const linked = await createLinkedWorkspace(deps.db, (await getWorkspace(deps.db, ctx.workspace.id))!, parsed.data);
+      setFlash(reply, 'success', `${linked.name} was created. Connect its GitHub organization next.`);
+      return reply.redirect(`/w/${linked.id}`);
+    } catch (err) {
+      if (!(err instanceof UserFacingError)) throw err;
+      setFlash(reply, 'error', err.message);
+      return reply.redirect(`${ctx.base}/settings#linked`);
+    }
   });
 
   const settingsSchema = z.object({

@@ -23,7 +23,8 @@ import {
   type Tool,
 } from '../../domain/permissions.js';
 import { UserFacingError, type Role } from '../../domain/types.js';
-import { createInvite, listInvites, listMembers, removeMember, revokeInvite, setMcpAccess, setMemberRole, setModeratorAccess } from '../../domain/workspaces.js';
+import { listLinked, mainOf } from '../../domain/linked.js';
+import { createInvite, inheritedMembers, listInvites, listMembers, removeMember, revokeInvite, setMcpAccess, setMemberRole, setModeratorAccess } from '../../domain/workspaces.js';
 import { html, raw, type SafeHtml } from '../../lib/html.js';
 import { setFlash } from '../session.js';
 import type { Web, WorkspaceRequestContext } from '../server.js';
@@ -44,6 +45,7 @@ import {
   plural,
   segRadios,
   selectWrap,
+  setting,
   submitBtn,
   switchInput,
   tag,
@@ -167,18 +169,26 @@ export function registerMemberRoutes(app: FastifyInstance, web: Web): void {
   async function renderMembers(ctx: WorkspaceRequestContext, reply: FastifyReply, o: { invite?: boolean; inviteUrl?: string; inviteRole?: string; mod?: string } = {}) {
     const b = ctx.base;
     const ws = ctx.workspace;
-    const [members, invites] = await Promise.all([listMembers(deps.db, ws.id), listInvites(deps.db, ws.id)]);
+    const [members, invites, inherited, main, linked] = await Promise.all([
+      listMembers(deps.db, ws.id), listInvites(deps.db, ws.id), inheritedMembers(deps.db, ws.id), mainOf(deps.db, ws), ws.parent_id ? Promise.resolve([]) : listLinked(deps.db, ws.id),
+    ]);
     type Member = (typeof members)[number];
     const owner = can(ctx.membership, 'members');
     const mods = members.filter((m) => m.role === 'moderator');
     const showInvite = owner && (o.invite || o.inviteUrl);
+    // "Global moderator": a main's moderator who is in its linked workspaces too.
+    const roleName = (m: { role: Role; global_mod?: boolean }) => (m.role === 'moderator' && m.global_mod && !main ? 'Global moderator' : ROLE_LABELS[m.role]);
+    const linkedNames = linked.map((l) => l.name);
+    const everyLinked = linkedNames.length ? `in ${linkedNames.length > 2 ? `${linkedNames.length} linked workspaces` : linkedNames.join(' and ')}` : 'in any linked workspace you add';
+    const canOpenMain = main ? (ctx.memberships ?? []).some((x) => x.workspace.id === main.id) : false;
 
     const rowMenu = (m: Member) => {
       if (m.role === 'owner' || m.id === ctx.user.id) return '';
       const name = nameOf(m);
       return menu([
         m.role === 'moderator' ? { href: `${b}/members?mod=${m.id}#moderator-access`, label: 'Edit access', icon: 'sliders-horizontal' } : null,
-        owner ? { dialog: `role-${m.id}`, label: 'Change role…', icon: 'user-cog' } : null,
+        // A linked workspace has moderators only: nothing to change.
+        owner && !main ? { dialog: `role-${m.id}`, label: 'Change role…', icon: 'user-cog' } : null,
         owner ? 'sep' : null,
         owner ? { post: `${b}/members/${m.id}/remove`, label: 'Remove from workspace…', icon: 'user-x', danger: true, confirm: { title: `Remove ${name} from the workspace?`, body: `${name} loses access to the console right away. Their Discord roles aren’t affected.`, label: 'Remove', danger: true } } : null,
       ], { csrf: ctx.csrf, label: `Actions for ${name}` });
@@ -188,15 +198,20 @@ export function registerMemberRoutes(app: FastifyInstance, web: Web): void {
       ? html`<div class="card readable" id="invite">
           <div class="card-h"><div><h2>Invite someone</h2><div class="desc">Creates a one-time link. Send it to them privately, for example in a Discord DM.</div></div>${iconBtn('x', 'Close invite', { size: 'sm', href: `${b}/members` })}</div>
           ${o.inviteUrl
-            ? html`<div class="card-b"><div class="field"><label for="invite-url">${ROLE_LABELS[(o.inviteRole as Role) ?? 'moderator']} invite link</label>${copyField('invite-url', o.inviteUrl, 'Invite link')}
+            ? html`<div class="card-b"><div class="field"><label for="invite-url">${o.inviteRole === 'global' ? 'Global moderator' : ROLE_LABELS[(o.inviteRole as Role) ?? 'moderator']} invite link</label>${copyField('invite-url', o.inviteUrl, 'Invite link')}
                 <div class="hint">One use · expires in 7 days · it won’t be shown again, so copy it now.</div></div></div>
                 <div class="card-f plain"><span></span><div class="end">${linkBtn(`${b}/members?invite=1#invite`, 'Create another', { variant: 'ghost', icon: 'plus' })}</div></div>`
             : html`<form method="post" action="${b}/members/invites">${csrfField(ctx.csrf)}
-                <div class="card-b"><div class="invite-grid">
-                  <span class="lbl" id="invite-role-label">Role</span>
-                  <div class="stack gap-8">${segRadios('role', [{ value: 'moderator', label: 'Moderator' }, { value: 'admin', label: 'Admin' }], 'moderator', 'Role')}
-                    <p class="small muted">Moderators start with the tickets inbox and contributor verifications, view only. Choose what else they can open under Moderator access once they join. Admins can change setup, panels and settings.</p></div>
-                </div></div>
+                ${main
+                  // A linked workspace invites moderators of its own: admins and global moderators come from its main.
+                  ? html`<input type="hidden" name="role" value="moderator">
+                    <div class="card-b"><p class="small muted">They join as a moderator of ${ws.name} only, starting with the tickets inbox, view only. Choose what else they can open under Moderator access once they join. Admins and global moderators come from ${main.name}.</p></div>`
+                  : html`<div class="card-b"><div class="invite-grid">
+                    <span class="lbl" id="invite-role-label">Role</span>
+                    <div class="stack gap-8">${segRadios('role', [{ value: 'moderator', label: 'Moderator' }, { value: 'admin', label: 'Admin' }], 'moderator', 'Role', { idPrefix: 'invite-role' })}
+                      <p class="small muted">Moderators start with the tickets inbox and contributor verifications, view only. Choose what else they can open under Moderator access once they join. Admins can change setup, panels and settings${linkedNames.length ? ', here and in linked workspaces' : ''}.</p>
+                      <div data-follows="invite-role-moderator">${setting('Global moderator', `Also a moderator ${everyLinked}, with the same pages. Off: only in ${ws.name}.`, switchInput({ name: 'global', id: 'invite-global', checked: false, label: 'Global moderator' }), { switchRow: true, flat: true, for: 'invite-global' })}</div></div>
+                  </div></div>`}
                 <div class="card-f plain"><span></span><div class="end">${submitBtn('Create invite link', { variant: 'primary', icon: 'link', loading: 'Creating…' })}</div></div></form>`}
         </div>`
       : '';
@@ -205,17 +220,17 @@ export function registerMemberRoutes(app: FastifyInstance, web: Web): void {
         <thead><tr><th>Member</th><th>Role</th><th class="col-main">Access</th><th class="num">Joined</th><th class="actions"><span class="sr-only">Actions</span></th></tr></thead>
         <tbody>${members.map((m) => html`<tr>
           <td><span class="who-cell">${avatar(nameOf(m), 28, { src: discordAvatar(m) })}<span><span class="name">${nameOf(m)}${m.id === ctx.user.id ? tag('You', { cls: 'subtle' }) : ''}</span><span class="sub">@${m.username}</span></span></span></td>
-          <td>${tag(ROLE_LABELS[m.role])}</td>
+          <td>${tag(roleName(m))}</td>
           <td><div class="tags">${accessTags(m)}</div></td>
           <td class="num">${when(m.joined_at)}</td>
           <td class="actions">${rowMenu(m)}</td></tr>`)}</tbody></table></div>
       <ul class="list only-mobile">${members.map((m) => html`<li><div class="list-row">
-        <span class="who-cell">${avatar(nameOf(m), 32, { src: discordAvatar(m) })}<span><span class="name">${nameOf(m)}${m.id === ctx.user.id ? tag('You', { cls: 'subtle' }) : ''}</span><span class="sub">${ROLE_LABELS[m.role]} · @${m.username}</span></span></span>${rowMenu(m)}</div></li>`)}</ul>`;
+        <span class="who-cell">${avatar(nameOf(m), 32, { src: discordAvatar(m) })}<span><span class="name">${nameOf(m)}${m.id === ctx.user.id ? tag('You', { cls: 'subtle' }) : ''}</span><span class="sub">${roleName(m)} · @${m.username}</span></span></span>${rowMenu(m)}</div></li>`)}</ul>`;
 
     const pending = invites.length
       ? html`<div class="sub-h">Pending invites · ${String(invites.length)}</div>
           ${invites.map((i) => html`<div class="line"><span class="av av-28 pending" aria-hidden="true"></span>
-            <div class="grow"><div class="name">${ROLE_LABELS[i.role]} invite</div><div class="sub">Created${i.created_by_name ? ` by ${i.created_by_name}` : ''} ${timeAgo(i.created_at)} · expires ${timeAgo(i.expires_at)}</div></div>
+            <div class="grow"><div class="name">${i.role === 'moderator' && i.global_mod ? 'Global moderator' : ROLE_LABELS[i.role]} invite</div><div class="sub">Created${i.created_by_name ? ` by ${i.created_by_name}` : ''} ${timeAgo(i.created_at)} · expires ${timeAgo(i.expires_at)}</div></div>
             ${owner ? menu([{ post: `${b}/members/invites/${i.id}/revoke`, label: 'Revoke invite', icon: 'link-2-off', danger: true, confirm: { title: 'Revoke this invite?', body: 'The link stops working right away.', label: 'Revoke invite', danger: true } }], { csrf: ctx.csrf, label: 'Invite actions' }) : ''}</div>`)}`
       : '';
 
@@ -343,6 +358,16 @@ export function registerMemberRoutes(app: FastifyInstance, web: Web): void {
         : empty('users', 'No moderators yet', 'Moderators can read the tickets inbox. Invite someone as a moderator, then choose what else they can open here.', owner ? linkBtn(`${b}/members?invite=1#invite`, 'Invite', { icon: 'user-plus' }) : null)}
     </div>`;
 
+    // A linked workspace: who's here through its main. Changed on the main's Members page.
+    const fromMain = main
+      ? html`<div class="card">
+          <div class="card-h"><div><div class="title"><h2>From ${main.name}</h2>${badge(inherited.length)}</div><div class="desc">${main.name}’s owner and admins are admins here, and its global moderators are moderators here with the pages they have there. Change them on ${canOpenMain ? html`<a href="/w/${main.id}/members">${main.name}’s Members page</a>` : `${main.name}’s Members page`}.</div></div></div>
+          <ul class="list">${inherited.map((m) => html`<li><div class="list-row">
+            <span class="who-cell">${avatar(nameOf(m), 28, { src: discordAvatar(m) })}<span><span class="name">${nameOf(m)}${m.id === ctx.user.id ? tag('You', { cls: 'subtle' }) : ''}</span><span class="sub">@${m.username}</span></span></span>
+            ${tag(m.role === 'moderator' ? 'Global moderator' : m.role === 'owner' ? 'Owner' : 'Admin')}</div></li>`)}</ul>
+        </div>`
+      : '';
+
     const mark = (v: string) => (v === 'yes' ? html`${icon('circle-check', 16, 'ok')}<span class="sr-only">Yes</span>` : v === 'maybe' ? html`<span class="xs muted">If allowed</span>` : html`<span class="em" aria-label="No">—</span>`);
     const body = html`
       ${pageHeader({
@@ -351,9 +376,12 @@ export function registerMemberRoutes(app: FastifyInstance, web: Web): void {
         actions: owner && !showInvite ? linkBtn(`${b}/members?invite=1#invite`, 'Invite', { variant: 'primary', icon: 'user-plus' }) : undefined,
       })}
       ${inviteCard}
+      ${fromMain}
       <div class="card">
-        <div class="card-h"><div><div class="title"><h2>Members</h2>${badge(members.length)}</div><div class="desc inline">${icon('lock', 14)}Only the owner can invite people and change roles.</div></div></div>
-        <div class="card-b flush">${memberTable}</div>
+        <div class="card-h"><div><div class="title"><h2>${main ? `Only in ${ws.name}` : 'Members'}</h2>${badge(members.length)}</div><div class="desc inline">${icon('lock', 14)}${main ? 'Moderators invited to this workspace alone. Only the owner can invite them.' : 'Only the owner can invite people and change roles.'}</div></div></div>
+        <div class="card-b flush">${main && !members.length
+          ? empty('users', 'No one yet', `Invite moderators who should only see ${ws.name}’s tickets.`, owner && !showInvite ? linkBtn(`${b}/members?invite=1#invite`, 'Invite', { icon: 'user-plus' }) : null)
+          : memberTable}</div>
         ${pending}
       </div>
       ${modAccess}
@@ -363,14 +391,15 @@ export function registerMemberRoutes(app: FastifyInstance, web: Web): void {
           <thead><tr><th class="col-main">Capability</th><th class="center">Owner</th><th class="center">Admin</th><th class="center">Moderator</th></tr></thead>
           <tbody>${CAPABILITIES.map(([c, o1, a, m]) => html`<tr><td>${c}</td><td class="center">${mark(o1)}</td><td class="center">${mark(a)}</td><td class="center">${mark(m)}</td></tr>`)}</tbody></table></div>
       </details>
-      ${owner ? members.filter((m) => m.role !== 'owner').map((m) => dialog(`role-${m.id}`, {
+      ${owner && !main ? members.filter((m) => m.role !== 'owner').map((m) => dialog(`role-${m.id}`, {
         title: `Change ${nameOf(m)}’s role`,
         action: `${b}/members/${m.id}/role`,
         csrf: ctx.csrf,
         body: choices('role', [
-          { value: 'admin', title: 'Admin', desc: 'Everything except inviting people and changing roles.' },
-          { value: 'moderator', title: 'Moderator', desc: 'The tickets inbox, plus the pages chosen under Moderator access.' },
-        ], m.role),
+          { value: 'admin', title: 'Admin', desc: `Everything except inviting people and changing roles${linkedNames.length ? ', here and in linked workspaces' : ''}.` },
+          { value: 'global', title: 'Global moderator', desc: `The tickets inbox, plus the pages chosen under Moderator access, here and ${everyLinked}.` },
+          { value: 'moderator', title: 'Moderator', desc: `The tickets inbox, plus the pages chosen under Moderator access, only in ${ws.name}.` },
+        ], m.role === 'moderator' && m.global_mod ? 'global' : m.role),
         submit: submitBtn('Save', { variant: 'primary' }),
       })) : ''}`;
     return web.render(reply, ctx, 'Members & permissions', 'members', body, { width: 'full' });
@@ -386,9 +415,11 @@ export function registerMemberRoutes(app: FastifyInstance, web: Web): void {
   app.post('/w/:wid/members/invites', async (req, reply) => {
     const ctx = await web.requireWorkspace(req, reply, { permission: 'members' });
     if (!ctx) return reply;
-    const role = (req.body as { role?: string }).role === 'admin' ? 'admin' : 'moderator';
-    const token = await createInvite(deps.db, ctx.workspace.id, ctx.user.id, role);
-    return renderMembers(ctx, reply, { inviteUrl: web.publicUrl(`/invite/${token}`), inviteRole: role });
+    const body = req.body as { role?: string; global?: string };
+    const role = body.role === 'admin' && !ctx.workspace.parent_id ? 'admin' : 'moderator';
+    const global = role === 'moderator' && body.global === '1' && !ctx.workspace.parent_id;
+    const token = await createInvite(deps.db, ctx.workspace.id, ctx.user.id, role, { global });
+    return renderMembers(ctx, reply, { inviteUrl: web.publicUrl(`/invite/${token}`), inviteRole: global ? 'global' : role });
   });
 
   app.post('/w/:wid/members/invites/:inviteId/revoke', async (req, reply) => {
@@ -404,9 +435,9 @@ export function registerMemberRoutes(app: FastifyInstance, web: Web): void {
     if (!ctx) return reply;
     const role = (req.body as { role?: string }).role;
     try {
-      if (role !== 'admin' && role !== 'moderator') throw new UserFacingError('Choose Admin or Moderator.');
-      await setMemberRole(deps.db, ctx.workspace.id, (req.params as { userId: string }).userId, role);
-      setFlash(reply, 'success', `Role changed to ${ROLE_LABELS[role]}`);
+      if (role !== 'admin' && role !== 'moderator' && role !== 'global') throw new UserFacingError('Choose Admin, Global moderator or Moderator.');
+      await setMemberRole(deps.db, ctx.workspace.id, (req.params as { userId: string }).userId, role === 'admin' ? 'admin' : 'moderator', { global: role === 'global' });
+      setFlash(reply, 'success', `Role changed to ${role === 'global' ? 'Global moderator' : ROLE_LABELS[role]}`);
     } catch (err) {
       if (!(err instanceof UserFacingError)) throw err;
       setFlash(reply, 'error', err.message);

@@ -6,6 +6,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { checkContributorPanel, getContributorSettings } from '../../domain/contributors.js';
 import type { Queryable } from '../../db/database.js';
+import { panelOwnerId } from '../../domain/linked.js';
 import { checkPanel, type PanelState } from '../../domain/panel.js';
 import { AREAS, areasOf, can, firstArea, hasEdit, TOOL_NAMES, type Area, type MemberAccess, type Tool } from '../../domain/permissions.js';
 import { getDiscordConnection, listApps } from '../../domain/store.js';
@@ -174,7 +175,9 @@ async function toolState(web: Web, ctx: WorkspaceRequestContext, tool: ToolName,
   const wid = ctx.workspace.id;
   const m = ctx.membership;
   if (tool === 'tickets') {
-    const [state, conn] = await Promise.all([checkPanel(web.deps, wid, { live: false }), getDiscordConnection(db, wid)]);
+    // A linked workspace on its main's panel: that panel's state and channel.
+    const owner = panelOwnerId(ctx.workspace);
+    const [state, conn] = await Promise.all([checkPanel(web.deps, owner, { live: false }), getDiscordConnection(db, owner)]);
     return {
       status: panelPill(state.state),
       description: `Members open tickets from ${conn?.tickets_channel_name ? `#${conn.tickets_channel_name}` : 'a panel'} in Discord. Each one is filed as a GitHub issue in the app’s repository.`,

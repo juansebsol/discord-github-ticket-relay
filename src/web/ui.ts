@@ -323,8 +323,9 @@ export function segLinks(label: string, items: { href: string; label: string; co
 }
 
 /** Segmented control made of radio buttons (form values). */
-export function segRadios(name: string, options: { value: string; label: string }[], checked: string, label: string): SafeHtml {
-  return html`<div class="seg" role="radiogroup" aria-label="${label}">${options.map((o) => html`<label><input type="radio" name="${name}" value="${o.value}" ${o.value === checked ? raw('checked') : ''}><span class="seg-item">${o.label}</span></label>`)}</div>`;
+/** Radio buttons as a segmented control. `idPrefix`: each radio gets the id "<prefix>-<value>" (for data-follows). */
+export function segRadios(name: string, options: { value: string; label: string }[], checked: string, label: string, o: { idPrefix?: string } = {}): SafeHtml {
+  return html`<div class="seg" role="radiogroup" aria-label="${label}">${options.map((x) => html`<label><input type="radio" name="${name}" value="${x.value}" ${o.idPrefix ? html`id="${o.idPrefix}-${x.value}"` : ''} ${x.value === checked ? raw('checked') : ''}><span class="seg-item">${x.label}</span></label>`)}</div>`;
 }
 
 export function copyField(id: string, value: string, label: string): SafeHtml {

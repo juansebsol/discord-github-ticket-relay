@@ -2,10 +2,11 @@ import { handlePingComponent, PING_PREFIX } from '../announcements/pings.js';
 import { handleContributorComponent } from '../domain/contributors.js';
 import type { Processor } from '../domain/processor.js';
 import { enabledTicketTypes, getTicketTypeByPublicId, type TicketType } from '../domain/ticket-types.js';
-import { getAppByPublicId, getDiscordConnectionByGuild, getGitHubConnection, listApps } from '../domain/store.js';
+import { panelApps, panelScope, serverApp, splitScope, withScope } from '../domain/linked.js';
+import { getDiscordConnectionByGuild, getGitHubConnection } from '../domain/store.js';
 import { answerMax, filesId, formFor, MAX_FILES_LIMIT, questionId } from '../domain/forms.js';
 import { acceptSubmission, type IncomingFile, type TicketAnswer } from '../domain/submissions.js';
-import type { AppRow, Deps, WorkspaceRow } from '../domain/types.js';
+import type { AppRow, Deps, DiscordConnectionRow, WorkspaceRow } from '../domain/types.js';
 import { getWorkspace } from '../domain/workspaces.js';
 import * as m from './messages.js';
 import { handleMyTickets } from './my-tickets.js';
@@ -81,52 +82,76 @@ export async function handleInteraction(deps: Deps, processor: Processor, i: Int
     return notice('Use the server panel', 'Tickets can only be submitted from the ticket panel in a server.');
   }
 
+  // The server's workspace (a main); a linked workspace's own panel tags its custom_ids with its ID.
   const conn = await getDiscordConnectionByGuild(deps.db, i.guild_id);
-  const workspace = conn ? await getWorkspace(deps.db, conn.workspace_id) : null;
-  if (!conn || !workspace || conn.status !== 'active') {
+  const main = conn ? await getWorkspace(deps.db, conn.workspace_id) : null;
+  if (!conn || !main || conn.status !== 'active') {
     return notice('Not set up', 'Ticket submission is not set up for this server.');
   }
-  const customId = i.data?.custom_id ?? '';
+  const [customId, scopeId] = splitScope(i.data?.custom_id ?? '');
+  const scope = await panelScope(deps.db, main, scopeId);
+  if (!scope) return notice('Out of date', 'This button is no longer active. Please use the current ticket panel.');
+  const result = await route(deps, processor, i, { conn, main, scope, customId });
+  // Replies to a linked workspace's own panel keep its tag, so the next click comes back to it too.
+  if (scope.id === main.id) return result;
+  const response = result.response as { data?: unknown };
+  return { ...result, response: response.data ? { ...response, data: withScope(response.data, scope.id) } : response };
+}
 
+interface Route {
+  conn: DiscordConnectionRow;
+  /** The server's workspace: contributor roles and update pings are its. */
+  main: WorkspaceRow;
+  /** The panel the click came from: the main's, or a linked workspace's own. Its apps are listed. */
+  scope: WorkspaceRow;
+  customId: string;
+}
+
+async function route(deps: Deps, processor: Processor, i: Interaction, { conn, main, scope, customId }: Route): Promise<InteractionResult> {
   // ---- App picker -------------------------------------------------------------------------
   if (i.type === InteractionType.MessageComponent) {
     // Contributor-role panel (separate feature, separate custom_id prefix).
-    if (customId.startsWith('cv:')) return handleContributorComponent(deps, i, workspace);
+    if (customId.startsWith('cv:')) return handleContributorComponent(deps, i, main);
     // Release announcements: a member turns update pings on or off.
-    if (customId.startsWith(PING_PREFIX)) return handlePingComponent(deps, i, workspace);
+    if (customId.startsWith(PING_PREFIX)) return handlePingComponent(deps, i, main);
     if (customId.startsWith('tr:page:')) {
-      const apps = (await listApps(deps.db, workspace.id)).filter((a) => a.enabled);
+      const apps = (await panelApps(deps.db, scope)).filter((a) => a.enabled);
       const page = Number(customId.slice('tr:page:'.length)) || 0;
       const { flags: _flags, ...data } = m.buildPickerPage(apps.map(toPanelApp), page);
       return { response: { type: ResponseType.UpdateMessage, data } };
     }
     // Panel buttons: Open a ticket (the app menu, privately; one app goes straight on) and My tickets.
     if (customId === m.CustomId.openTicket) {
-      const apps = (await listApps(deps.db, workspace.id)).filter((a) => a.enabled);
+      const apps = (await panelApps(deps.db, scope)).filter((a) => a.enabled);
       if (!apps.length) return notice('No apps yet', 'No app is taking tickets here right now. Please ask a server admin.');
-      if (apps.length === 1) return startTicket(deps, workspace, apps[0]!, { update: false });
+      if (apps.length === 1) {
+        const only = await serverApp(deps.db, main, apps[0]!.public_id);
+        if (only) return startTicket(deps, only.workspace, only.app, { update: false });
+      }
       return { response: { type: ResponseType.ChannelMessage, data: m.buildPickerPage(apps.map(toPanelApp), 0) } };
     }
-    if (customId === m.CustomId.myTickets || customId.startsWith('tr:mine:')) return handleMyTickets(deps, i, workspace, customId);
+    if (customId === m.CustomId.myTickets || customId.startsWith('tr:mine:')) return handleMyTickets(deps, i, scope, customId);
     if (customId === m.CustomId.panelSelect || customId === m.CustomId.pickerSelect) {
       const value = i.data?.values?.[0] ?? '';
       if (value === m.MORE_APPS_VALUE) {
-        const apps = (await listApps(deps.db, workspace.id)).filter((a) => a.enabled);
+        const apps = (await panelApps(deps.db, scope)).filter((a) => a.enabled);
         return { response: { type: ResponseType.ChannelMessage, data: m.buildPickerPage(apps.map(toPanelApp), 0) } };
       }
-      const app = await getAppByPublicId(deps.db, workspace.id, value);
-      if (!app || !app.enabled) {
+      // The app files in its own workspace (a linked workspace's app on the main's panel too).
+      const picked = await serverApp(deps.db, main, value);
+      if (!picked || !picked.app.enabled) {
         return notice('App unavailable', 'That app is no longer accepting tickets here. The menu may be out of date; please pick another app or ask a server admin.');
       }
       // From the private menu, the next step replaces it rather than stacking under it.
-      return startTicket(deps, workspace, app, { update: customId === m.CustomId.pickerSelect });
+      return startTicket(deps, picked.workspace, picked.app, { update: customId === m.CustomId.pickerSelect });
     }
     const typeMatch = /^tr:type:([0-9A-Z]{10}):(\d+)$/.exec(customId);
     if (typeMatch) {
-      const app = await getAppByPublicId(deps.db, workspace.id, typeMatch[1]!);
-      if (!app || !app.enabled || app.repo_id !== Number(typeMatch[2])) {
+      const picked = await serverApp(deps.db, main, typeMatch[1]!);
+      if (!picked || !picked.app.enabled || picked.app.repo_id !== Number(typeMatch[2])) {
         return notice('App unavailable', 'That app is no longer accepting tickets here. Please start again from the ticket panel.');
       }
+      const { app, workspace } = picked;
       const type = await getTicketTypeByPublicId(deps.db, workspace.id, i.data?.values?.[0] ?? '');
       if (!type || !type.enabled) return notice('Type unavailable', 'That ticket type is no longer available. Please start again from the ticket panel.');
       return {
@@ -144,7 +169,7 @@ export async function handleInteraction(deps: Deps, processor: Processor, i: Int
   }
 
   // ---- My tickets: details or screenshots added to a ticket -----------------------------------
-  if (customId.startsWith('tr:mine:')) return handleMyTickets(deps, i, workspace, customId);
+  if (customId.startsWith('tr:mine:')) return handleMyTickets(deps, i, scope, customId);
 
   // ---- Ticket form submitted ----------------------------------------------------------------
   const match = /^tr:form:([0-9A-Z]{10}):(\d+)(?::([0-9A-Z]{8}))?$/.exec(customId);
@@ -159,10 +184,12 @@ export async function handleInteraction(deps: Deps, processor: Processor, i: Int
     return echo('Please check your ticket', `The title needs 3–${m.TITLE_MAX} characters and the description 10–${m.DESCRIPTION_MAX} characters.`, ticket);
   }
 
-  const app = await getAppByPublicId(deps.db, workspace.id, publicId!);
-  if (!app || !app.enabled) {
+  const picked = await serverApp(deps.db, main, publicId!);
+  if (!picked || !picked.app.enabled) {
     return echo('App unavailable', 'This app stopped accepting tickets while you were filling in the form, so your ticket was not sent.', ticket);
   }
+  // Filed in the app's own workspace: its GitHub connection, ticket types, limits and tickets.
+  const { app, workspace } = picked;
   if (app.repo_id !== Number(repoIdText)) {
     // Don't silently send a ticket somewhere other than where it was routed when the form opened.
     return echo('Please submit again', 'The ticket settings for this app changed while you were filling in the form, so your ticket was not sent. Please open the form again from the panel.', ticket);
@@ -191,7 +218,7 @@ export async function handleInteraction(deps: Deps, processor: Processor, i: Int
     }
   }
 
-  const member = i.member;
+  const member = i.member!;
   const result = await acceptSubmission(deps, {
     workspace,
     app,
@@ -199,7 +226,7 @@ export async function handleInteraction(deps: Deps, processor: Processor, i: Int
     source: 'discord',
     interactionId: i.id,
     interactionToken: i.token,
-    guildId: i.guild_id,
+    guildId: i.guild_id!,
     guildName: conn.guild_name,
     channelId: i.channel_id ?? null,
     reporter: {

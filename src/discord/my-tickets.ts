@@ -7,7 +7,8 @@
 import {
   addDetails, addScreenshots, closeMine, memberActions, ownSubmission, waitMinutes, MAX_NEW_FILES, MEMBER_CLOSE, type MemberCloseKey,
 } from '../domain/member-actions.js';
-import { closeConfirm, detailsModal, memberTickets, myTicketDetail, myTicketsPage, screenshotsModal, statusWords, type MemberTicket } from '../domain/my-tickets.js';
+import { panelWorkspaces, withScope } from '../domain/linked.js';
+import { closeConfirm, detailsModal, myTicketDetail, myTicketsPage, panelTickets, screenshotsModal, statusWords, type MemberTicket } from '../domain/my-tickets.js';
 import { UserFacingError, type Deps, type WorkspaceRow } from '../domain/types.js';
 import { GitHubApiError } from '../github/client.js';
 import { modalFiles, modalValues, type Interaction, type InteractionResult } from './interactions.js';
@@ -28,21 +29,26 @@ function edited(data: { flags?: number }) {
 
 const ACTION = /^tr:mine:(v|d|f|c|cw|cn):([A-Za-z0-9-]{1,40}):(\d+)$/;
 
-/** Clicks and forms from My tickets (custom_id "tr:mine…"). */
-export async function handleMyTickets(deps: Deps, i: Interaction, workspace: WorkspaceRow, customId: string): Promise<InteractionResult> {
-  if (!workspace.my_tickets) {
+/**
+ * Clicks and forms from My tickets (custom_id "tr:mine…") on a panel: the main's lists the tickets
+ * of its linked workspaces on it too. Each ticket follows its own workspace's switches and limits.
+ */
+export async function handleMyTickets(deps: Deps, i: Interaction, panel: WorkspaceRow, customId: string): Promise<InteractionResult> {
+  if (!panel.my_tickets) {
     return { response: { type: R.ChannelMessage, data: m.noticeMessage('Not available', 'My tickets is turned off on this server. The panel may be out of date; please ask a server admin.') } };
   }
   const userId = i.member!.user.id;
-  const [tickets, words] = await Promise.all([memberTickets(deps, workspace.id, userId), statusWords(deps, workspace.id)]);
-  const actions = memberActions(workspace);
+  const family = await panelWorkspaces(deps.db, panel);
+  const [tickets, words] = await Promise.all([panelTickets(deps, family.map((w) => w.id), userId), statusWords(deps, panel.id)]);
+  // The ticket's workspace: what members may do on it, its notice, and where it's changed.
+  const home = (t: MemberTicket) => family.find((w) => w.id === t.workspaceId) ?? panel;
   const pageMatch = /^tr:mine:p:(\d+)$/.exec(customId);
   if (pageMatch) return update(myTicketsPage(tickets, Number(pageMatch[1]), words));
   const pickMatch = /^tr:mine:t:(\d+)$/.exec(customId);
   if (pickMatch) {
     // Only one of their own: anything else shows the list again.
     const ticket = tickets.find((t) => t.ref === i.data?.values?.[0]);
-    return update(ticket ? myTicketDetail(ticket, Number(pickMatch[1]), words, { actions }) : myTicketsPage(tickets, Number(pickMatch[1]), words));
+    return update(ticket ? myTicketDetail(ticket, Number(pickMatch[1]), words, { actions: memberActions(home(ticket)) }) : myTicketsPage(tickets, Number(pickMatch[1]), words));
   }
   const match = ACTION.exec(customId);
   if (!match) return { response: { type: R.ChannelMessage, data: myTicketsPage(tickets, 0, words) } };
@@ -51,6 +57,8 @@ export async function handleMyTickets(deps: Deps, i: Interaction, workspace: Wor
   const page = Number(pageText);
   const t = tickets.find((x) => x.ref === ref);
   if (!t) return update(myTicketsPage(tickets, page, words));
+  const workspace = home(t);
+  const actions = memberActions(workspace);
   const isModal = i.type === 5;
   // Details they wrote come back whenever they can't be added, so nothing typed is lost.
   const details = isModal && action === 'd' ? (modalValues(i.data?.components)[m.CustomId.detailsInput] ?? '').trim() : '';
@@ -88,8 +96,9 @@ export async function handleMyTickets(deps: Deps, i: Interaction, workspace: Wor
       else deps.log.warn({ err: (err as Error).message, submission: t.ref }, 'my tickets action failed');
       banner = failed(err);
     }
-    const fresh = (await memberTickets(deps, workspace.id, userId).catch(() => [] as MemberTicket[])).find((x) => x.ref === t.ref) ?? t;
-    await deps.discord?.editOriginalResponse(i.token, edited(myTicketDetail(fresh, page, words, { actions, banner })))
+    const fresh = (await panelTickets(deps, [workspace.id], userId).catch(() => [] as MemberTicket[])).find((x) => x.ref === t.ref) ?? t;
+    // A linked workspace's own panel: its buttons keep the panel's tag.
+    await deps.discord?.editOriginalResponse(i.token, withScope(edited(myTicketDetail(fresh, page, words, { actions, banner })), panel.parent_id ? panel.id : null))
       .catch((err) => deps.log.warn({ err: (err as Error).message }, 'my tickets reply failed'));
   };
   const later = 'Please try again in a few minutes.';

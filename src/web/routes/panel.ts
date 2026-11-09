@@ -4,7 +4,8 @@ import { DEFAULT_MEMBER_TEXT, MAX_NEW_FILES, MEMBER_CLOSE, MEMBER_LIMITS, MEMBER
 import { myTicketDetail, myTicketsPage, statusWords, type MemberTicket } from '../../domain/my-tickets.js';
 import { formFor } from '../../domain/forms.js';
 import { inspectGuild } from '../../domain/discord-checks.js';
-import { checkPanel, panelPayloadFor, publishPanel, unpublishPanel } from '../../domain/panel.js';
+import { listLinked, mainOf, setOnMainPanel } from '../../domain/linked.js';
+import { checkPanel, panelContent, panelPayloadFor, publishPanel, unpublishPanel } from '../../domain/panel.js';
 import { can, type MemberAccess } from '../../domain/permissions.js';
 import { getApp, getDiscordConnection, getGitHubConnection, getPanel, listApps, setTicketsChannel } from '../../domain/store.js';
 import { acceptSubmission } from '../../domain/submissions.js';
@@ -73,7 +74,7 @@ function exampleTickets(app: { name: string; repo_owner: string; repo_name: stri
   const now = Date.now();
   const url = (n: number) => (app ? `https://github.com/${app.repo_owner}/${app.repo_name}/issues/${n}` : null);
   const t = (n: number, title: string, daysAgo: number, status: MemberTicket['status'], more: Partial<MemberTicket> = {}): MemberTicket => ({
-    ref: `TR-EXAMPLE${n}`, app: app?.name ?? 'Your app', type: null, title, at: new Date(now - daysAgo * day), filedAt: new Date(now - daysAgo * day),
+    ref: `TR-EXAMPLE${n}`, workspaceId: '', app: app?.name ?? 'Your app', type: null, title, at: new Date(now - daysAgo * day), filedAt: new Date(now - daysAgo * day),
     status, version: null, releaseAt: null, issue: { number: n, url: url(n) }, sameAs: null, pull: null, closedAt: null, done: status === 'released',
     repoPrivate: false, issueOpen: status !== 'released', shared: false, updates: [], ...more,
   });
@@ -108,22 +109,38 @@ export function registerPanelRoutes(app: FastifyInstance, web: Web): void {
     ]);
     const state = await checkPanel(deps, wid, { live: false });
     const guild = deps.discord && conn && conn.status === 'active' ? await inspectGuild(deps.discord, conn.guild_id) : null;
-    const enabledApps = apps.filter((a) => a.enabled);
-    const title = ws.panel_title?.trim() || DEFAULT_PANEL_TITLE;
-    const intro = ws.panel_intro?.trim() || defaultPanelIntro(ws.my_tickets);
+    // A linked workspace's apps are on its main's panel, or on one of its own. A main's panel also
+    // lists the apps of its linked workspaces that are on it.
+    const main = await mainOf(deps.db, ws);
+    const onMain = Boolean(main && ws.on_main_panel);
+    const panelWs = onMain ? main! : ws;
+    const [content, mainState, mainPanel, mainConn, others] = await Promise.all([
+      panelContent(deps, panelWs),
+      onMain ? checkPanel(deps, main!.id, { live: false }) : Promise.resolve(null),
+      onMain ? getPanel(deps.db, main!.id) : Promise.resolve(null),
+      onMain ? getDiscordConnection(deps.db, main!.id) : Promise.resolve(null),
+      main ? Promise.resolve([]) : listLinked(deps.db, ws.id).then((l) => l.filter((x) => x.on_main_panel)),
+    ]);
+    const ownEnabled = apps.filter((a) => a.enabled);
+    const enabledApps = content.apps.filter((a) => a.enabled);
+    const otherApps = enabledApps.filter((a) => a.workspace_id !== panelWs.id);
+    const title = panelWs.panel_title?.trim() || DEFAULT_PANEL_TITLE;
+    const intro = panelWs.panel_intro?.trim() || defaultPanelIntro(panelWs.my_tickets);
     // The preview has the menu and the buttons, so the My tickets switch can show either while it's changed.
     const layout = (on: boolean) => {
-      const { payload } = panelPayloadFor({ ...ws, my_tickets: on }, apps, types.length > 0);
-      const own = ws.panel_intro?.trim() || defaultPanelIntro(on);
+      const { payload } = panelPayloadFor({ ...panelWs, my_tickets: on }, content.apps, content.hasTypes);
+      const own = panelWs.panel_intro?.trim() || defaultPanelIntro(on);
       const first = payload.components[0]!.components[0]!;
       return { rest: payload.embeds[0]!.description.slice(own.length).replace(/^\n+/, ''), options: 'options' in first ? first.options : [] };
     };
     const menu = layout(false);
     const buttons = layout(true);
-    const shows = (on: boolean) => html`data-layout="${on ? 'buttons' : 'menu'}" ${ws.my_tickets === on ? '' : raw('hidden')}`;
-    const words = await statusWords(deps, wid);
-    const messageLink = panel && conn && state.state === 'published' ? `https://discord.com/channels/${conn.guild_id}/${panel.channel_id}/${panel.message_id}` : null;
-    const channelName = conn?.tickets_channel_name ?? null;
+    const shows = (on: boolean) => html`data-layout="${on ? 'buttons' : 'menu'}" ${panelWs.my_tickets === on ? '' : raw('hidden')}`;
+    const words = await statusWords(deps, panelWs.id);
+    const shownPanel = onMain ? mainPanel : panel;
+    const shownConn = onMain ? mainConn : conn;
+    const messageLink = shownPanel && shownConn && (onMain ? mainState : state)?.state === 'published' ? `https://discord.com/channels/${shownConn.guild_id}/${shownPanel.channel_id}/${shownPanel.message_id}` : null;
+    const channelName = shownConn?.tickets_channel_name ?? null;
 
     const strip =
       state.state === 'published'
@@ -135,6 +152,12 @@ export function registerPanelRoutes(app: FastifyInstance, web: Web): void {
         : state.state === 'missing'
           ? html`${pill('Deleted in Discord', 'warn')}<span class="small muted">${edit ? 'Someone deleted the panel message. Publish it again.' : 'Someone deleted the panel message.'}</span>`
           : html`${pill('Not published', 'neutral')}<span class="small muted">${report.canPublish ? 'Ready to post.' : edit ? 'Fix the health checks below to publish.' : 'The health checks below need fixing first.'}</span>`;
+    // On the main's panel: that panel's state, which the main's admins publish.
+    const mainStrip = onMain && main
+      ? mainState?.state === 'published'
+        ? html`${pill(`On ${main.name}’s panel`, 'ok')}<span class="small muted">in #${channelName ?? ''}${mainState.outdated && !panelWs.my_tickets ? ` · ${main.name}’s panel needs publishing to show changes` : ''}</span>`
+        : html`${pill(`On ${main.name}’s panel`, 'neutral')}<span class="small muted">${main.name}’s panel isn’t published yet.</span>`
+      : null;
     const publishLabel = state.state === 'published' ? (state.channelChanged ? 'Move panel' : 'Update panel') : state.state === 'missing' ? 'Publish again' : 'Publish panel';
 
     const channelControl = !conn
@@ -150,7 +173,8 @@ export function registerPanelRoutes(app: FastifyInstance, web: Web): void {
         : html`<span class="small muted">${guild && !guild.ok ? guild.message : 'Discord can’t be reached right now.'}</span>`;
 
     const firstType = types[0];
-    const sample = enabledApps[0];
+    // Previews of the form and My tickets: this workspace's own first app (the panel may list others' too).
+    const sample = ownEnabled[0];
     // Fix links only for pages this person can use; the rest stay as text.
     const checks = report.checks.filter((c) => c.area !== 'panel').map((c) => ({ ...c, fix: fixFor(m, b, c.fix) }));
     // The notice: a field for each kind of repository the apps use (public while there are none).
@@ -180,10 +204,34 @@ export function registerPanelRoutes(app: FastifyInstance, web: Web): void {
     };
     const examples = exampleTickets(sample);
 
+    // A linked workspace: on its main's panel, or a panel of its own (the parts below are for that one).
+    const homeChoice = (value: 'main' | 'own', t: string, d: string) => html`<label class="choice"><input type="radio" name="panel_home" value="${value}" id="home-${value}" ${(value === 'main') === onMain ? raw('checked') : ''}><span><span class="t">${t}</span><span class="d">${d}</span></span></label>`;
+    const where = main
+      ? html`<div class="section" id="where">
+          <div class="section-h"><div><h3>Where members open tickets</h3><div class="desc">${ws.name} uses ${main.name}’s Discord server.</div></div></div>
+          <input type="hidden" name="panel_home_sent" value="1">
+          <div class="choices" role="radiogroup" aria-label="Where members open tickets">
+            ${homeChoice('main', `On ${main.name}’s panel`, `Its apps are listed after ${main.name}’s. The panel’s channel, text and My tickets switch are set on ${main.name}’s Panel page.`)}
+            ${homeChoice('own', 'Its own panel', `A panel just for ${ws.name}’s apps, in a channel of ${main.name}’s server.`)}
+          </div>
+        </div>`
+      : '';
+    // A main: the linked workspaces whose apps are on this panel too.
+    const alsoHere = others.length
+      ? html`<div class="section"><div class="section-h"><div><h3>Also on this panel</h3><div class="desc">Apps from linked workspaces, after your own. Each one files tickets in its own workspace.</div></div></div>
+          ${others.map((l) => {
+            const n = otherApps.filter((a) => a.workspace_id === l.id).length;
+            return html`<div class="line">${icon('corner-down-right', 16, 'muted')}<span class="grow"><span class="name">${l.name}</span><span class="small muted"> · ${n ? `${n} app${n === 1 ? '' : 's'}: ${otherApps.filter((a) => a.workspace_id === l.id).map((a) => a.name).join(', ')}` : 'no enabled apps yet'}</span></span>${linkBtn(`/w/${l.id}/tickets/panel`, 'Open', { variant: 'ghost', size: 'sm', trail: 'arrow-right' })}</div>`;
+          })}</div>`
+      : '';
+    const ownOnly = (inner: SafeHtml) => (main ? html`<div data-follows="home-own" ${onMain ? raw('hidden') : ''}>${inner}</div>` : inner);
+
     const sections = html`
-          <div class="section" id="channel">
+          ${where}
+          ${ownOnly(html`<div class="section" id="channel">
             ${setting('Channel', 'Where members open tickets. The bot needs to post there.', channelControl, { for: guild?.ok ? 'channel' : undefined, flat: true })}
           </div>
+          ${alsoHere}
           <div class="section">
             <div class="section-h"><div><h3>Content</h3><div class="desc">The heading and introduction at the top of the panel.</div></div>
               ${edit ? html`<button type="button" class="btn ghost sm" data-reset-fields="panel_title panel_intro"><span class="lead">${icon('undo-2', 14)}</span><span class="lbl">Reset to default</span></button>` : ''}</div>
@@ -192,13 +240,16 @@ export function registerPanelRoutes(app: FastifyInstance, web: Web): void {
               ${textField({ id: 'panel_intro', label: 'Introduction', value: intro, max: LIMITS.panel_intro, rows: 3, placeholder: defaultPanelIntro(ws.my_tickets), preview: 'pv-intro', md: true, hint: edit ? 'Discord formatting works, for example **bold**.' : undefined, attrs: html`data-default-menu="${DEFAULT_PANEL_INTRO}" data-default-buttons="${DEFAULT_PANEL_INTRO_BUTTONS}"` })}
             </div>
           </div>
+          `)}
           <div class="section" id="my-tickets">
-            ${setting('My tickets', html`The panel shows two buttons instead of the app menu: <strong>Open a ticket</strong>, and <strong>My tickets</strong>, where members see the tickets they’ve sent here and what’s happening with each. Each member sees only their own. Publish the panel to show the change.`,
+            ${ownOnly(setting('My tickets', html`The panel shows two buttons instead of the app menu: <strong>Open a ticket</strong>, and <strong>My tickets</strong>, where members see the tickets they’ve sent here and what’s happening with each. Each member sees only their own. Publish the panel to show the change.`,
               html`<input type="hidden" name="my_tickets_sent" value="1">${switchInput({ name: 'my_tickets', id: 'my_tickets', checked: ws.my_tickets, label: 'My tickets', attrs: raw('data-layout-switch') })}`,
-              { switchRow: true, flat: true, for: 'my_tickets' })}
-            <div class="member-actions" data-follows="my_tickets" ${ws.my_tickets ? '' : raw('hidden')}>
+              { switchRow: true, flat: true, for: 'my_tickets' }))}
+            <div class="member-actions" ${main ? '' : html`data-follows="my_tickets" ${ws.my_tickets ? '' : raw('hidden')}`}>
               <input type="hidden" name="member_actions_sent" value="1">
-              <div class="section-h"><div><h4>On each open ticket</h4><div class="desc">Buttons members can use on one of their tickets while it’s open on GitHub. Changes show right away, without publishing the panel.</div></div>
+              <div class="section-h"><div><h4>On each open ticket</h4><div class="desc">${main
+                ? `Buttons members can use on one of their ${ws.name} tickets while it’s open on GitHub, from My tickets on the panel it’s on. Changes show right away.`
+                : 'Buttons members can use on one of their tickets while it’s open on GitHub. Changes show right away, without publishing the panel.'}</div></div>
                 ${edit ? html`<button type="button" class="btn ghost sm" data-reset-fields="${MEMBER_TEXT_KEYS.map((k) => `member_text_${k}`).join(' ')}"><span class="lead">${icon('undo-2', 14)}</span><span class="lbl">Reset comments</span></button>` : ''}</div>
               ${memberAction('details', 'Add details', html`Members write more about the problem. It’s posted on the issue as a comment, inside your text below.`, actions.details,
                 [commentField('details', 'Comment on GitHub', html`<code>{details}</code> is what they wrote and has to stay in. <code>{app}</code> is the app’s name.`)])}
@@ -224,13 +275,13 @@ export function registerPanelRoutes(app: FastifyInstance, web: Web): void {
     const settingsCard = edit
       ? html`<form method="post" action="${b}/tickets/panel" class="card" data-dirty>
           ${csrfField(ctx.csrf)}
-          <div class="card-h strip"><div class="row">${strip}</div></div>
+          <div class="card-h strip"><div class="row">${mainStrip ?? strip}</div></div>
           ${sections}
           <div class="section">
             <div class="section-h"><div><h3>Test ticket</h3><div class="desc">Files a real GitHub issue through the whole pipeline, marked as a test and attributed to you.</div></div></div>
-            ${enabledApps.length
+            ${ownEnabled.length
               ? html`<div class="row">
-                  ${selectWrap(html`<select name="app_id" form="test-form" aria-label="App for the test ticket">${enabledApps.map((a) => html`<option value="${a.id}">${a.name} · ${a.repo_owner}/${a.repo_name}</option>`)}</select>`)}
+                  ${selectWrap(html`<select name="app_id" form="test-form" aria-label="App for the test ticket">${ownEnabled.map((a) => html`<option value="${a.id}">${a.name} · ${a.repo_owner}/${a.repo_name}</option>`)}</select>`)}
                   ${types.length ? selectWrap(html`<select name="type_id" form="test-form" aria-label="Ticket type">${types.map((t) => html`<option value="${t.id}">${t.name}</option>`)}</select>`) : ''}
                   ${submitBtn('Send test', { icon: 'send', loading: 'Creating issue…', form: 'test-form' })}</div>`
               : html`<p class="small muted">Add an app first.</p>`}
@@ -238,21 +289,32 @@ export function registerPanelRoutes(app: FastifyInstance, web: Web): void {
           <div class="card-f">
             ${panel ? html`<button type="submit" class="btn ghost danger" form="remove-form"><span class="lead">${icon('trash-2')}</span><span class="lbl">Remove panel</span></button>` : html`<span></span>`}
             <div class="end">
-              ${report.canPublish ? '' : html`<span class="small muted" data-clean-show>Fix the problems under Health to publish.</span>`}
+              ${report.canPublish || onMain ? '' : html`<span class="small muted" data-clean-show>Fix the problems under Health to publish.</span>`}
               <span class="row small muted" data-dirty-show hidden><span class="dot c4" aria-hidden="true"></span>Unsaved changes</span>
               <button type="button" class="btn ghost" data-discard data-dirty-show hidden>Discard</button>
-              ${report.canPublish
+              ${report.canPublish && !onMain
                 ? submitBtn(publishLabel, { variant: 'primary', icon: 'send', loading: 'Publishing…', name: 'intent', value: 'publish' })
                 : html`${submitBtn('Save changes', { variant: 'primary', loading: 'Saving…', name: 'intent', value: 'save', attrs: raw('data-dirty-enable') })}`}
             </div>
           </div>
         </form>`
       : html`<div class="card">
-          <div class="card-h strip"><div class="row">${strip}</div></div>
+          <div class="card-h strip"><div class="row">${mainStrip ?? strip}</div></div>
           <fieldset class="plain view-only" disabled>${sections}</fieldset>
           <div class="card-f">${viewOnlyFooter('the panel')}</div>
         </div>`;
 
+    // "your 3 enabled apps, then 1 from Mailcraft", or on the main's panel "Main’s 3 enabled apps, then 1 from Mailcraft".
+    const countOf = (n: number) => `${n} enabled app${n === 1 ? '' : 's'}`;
+    const ownOnPanel = enabledApps.length - otherApps.length;
+    const othersText = [...new Set(otherApps.map((a) => a.workspace_id))].map((id) => {
+      const n = otherApps.filter((a) => a.workspace_id === id).length;
+      const name = id === ws.id ? ws.name : others.find((l) => l.id === id)?.name ?? 'a linked workspace';
+      return `${n} from ${name}`;
+    });
+    const appCount = onMain
+      ? `${main!.name}’s ${countOf(ownOnPanel)}, then ${othersText.join(' and ')}`
+      : othersText.length ? `your ${countOf(ownOnPanel)}, then ${othersText.join(' and ')}` : `your ${countOf(enabledApps.length)}`;
     const body = html`
       ${await toolHeader(web, ctx, 'tickets', 'panel')}
       <div class="panel-grid">
@@ -267,8 +329,8 @@ export function registerPanelRoutes(app: FastifyInstance, web: Web): void {
               ${menu.options.length ? html`<div class="dp-options">${menu.options.map((o) => html`<div class="dp-option"><strong>${o.label}</strong>${'description' in o && o.description ? html`<span>${o.description}</span>` : ''}${o.value === MORE_APPS_VALUE ? html`<span>Opens a private, page-by-page list</span>` : ''}</div>`)}</div>` : ''}
             </div>
             <div class="dp-buttons" ${shows(true)}><span class="dp-button blurple">Open a ticket</span><span class="dp-button grey">My tickets</span></div>`, 'Preview of the ticket panel in Discord')}
-          <p class="dp-note" ${shows(false)}>${enabledApps.length ? `The menu lists your ${enabledApps.length} enabled app${enabledApps.length === 1 ? '' : 's'}.${types.length ? ' Members pick a ticket type next.' : ''}` : 'No enabled apps yet, so the menu is empty.'}</p>
-          <p class="dp-note" ${shows(true)}>${enabledApps.length > 1 ? `Open a ticket shows a private menu of your ${enabledApps.length} enabled apps.` : enabledApps.length ? 'Open a ticket goes straight on: there’s one enabled app.' : 'No enabled apps yet.'}${types.length ? ' Members pick a ticket type next.' : ''}</p>
+          <p class="dp-note" ${shows(false)}>${enabledApps.length ? `The menu lists ${appCount}.${content.hasTypes ? ' Members pick a ticket type next.' : ''}` : 'No enabled apps yet, so the menu is empty.'}</p>
+          <p class="dp-note" ${shows(true)}>${enabledApps.length > 1 ? `Open a ticket shows a private menu of ${appCount}.` : enabledApps.length ? 'Open a ticket goes straight on: there’s one enabled app.' : 'No enabled apps yet.'}${content.hasTypes ? ' Members pick a ticket type next.' : ''}</p>
           <div ${shows(true)}>
             ${previewCaption(null, null, 'My tickets · ')}
             ${myTicketsPreview(bot, myTicketsPage(examples, 0, words))}
@@ -309,6 +371,19 @@ export function registerPanelRoutes(app: FastifyInstance, web: Web): void {
             text: Object.fromEntries(MEMBER_TEXT_KEYS.map((k) => [k, body[`member_text_${k}`]]).filter(([, v]) => v !== undefined)),
           }, current)
         : null;
+      // A linked workspace: on its main's panel, or a panel of its own.
+      const main = await mainOf(deps.db, ws);
+      let moved: 'main' | 'own' | null = null;
+      let removedOwn = false;
+      if (main && body.panel_home_sent !== undefined && (body.panel_home === 'main' || body.panel_home === 'own') && (body.panel_home === 'main') !== ws.on_main_panel) {
+        moved = body.panel_home;
+        await setOnMainPanel(deps.db, wid, moved === 'main');
+        // Its own panel comes down: its apps are on the main's now.
+        if (moved === 'main' && (await getPanel(deps.db, wid))) {
+          await unpublishPanel(deps, wid);
+          removedOwn = true;
+        }
+      }
       let textChanged = false;
       if (body.panel_title !== undefined || body.panel_intro !== undefined) {
         const text = {
@@ -353,7 +428,13 @@ export function registerPanelRoutes(app: FastifyInstance, web: Web): void {
           await setTicketsChannel(deps.db, wid, channel);
         }
       }
-      if (body.intent === 'publish') {
+      if (moved && main) {
+        // The main's menu is built when Open a ticket is pressed; a menu in the panel message needs publishing.
+        const live = main.my_tickets;
+        setFlash(reply, 'success', moved === 'main'
+          ? `${ws.name}’s apps are on ${main.name}’s panel now.${removedOwn ? ' Its own panel was removed from Discord.' : ''} ${live ? `They’re in ${main.name}’s Open a ticket menu already.` : `Publish ${main.name}’s panel to add them to its menu.`}`
+          : `${ws.name} has its own panel now. Choose its channel and publish it. ${live ? `Its apps left ${main.name}’s Open a ticket menu.` : `Publish ${main.name}’s panel to take its apps off that menu.`}`);
+      } else if (body.intent === 'publish') {
         const result = await publishPanel(deps, wid, ctx.user.id);
         const conn = await getDiscordConnection(deps.db, wid);
         const where = conn?.tickets_channel_name ? ` in #${conn.tickets_channel_name}` : '';

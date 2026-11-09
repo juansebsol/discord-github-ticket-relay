@@ -1,20 +1,32 @@
 import { DiscordApiError, DiscordErrorCode } from '../discord/client.js';
 import { buildPanelMessage } from '../discord/messages.js';
 import { sha256 } from '../lib/crypto.js';
-import { deletePanel, getDiscordConnection, getPanel, listApps, markPanel, savePanel } from './store.js';
+import { panelApps, panelWorkspaces, withScope } from './linked.js';
+import { deletePanel, getDiscordConnection, getPanel, markPanel, savePanel } from './store.js';
 import { UserFacingError, type AppRow, type Deps, type WorkspaceRow } from './types.js';
 import { enabledTicketTypes } from './ticket-types.js';
 import { getWorkspace } from './workspaces.js';
 
+/**
+ * The panel message for these apps (a main's include its linked workspaces' on it). A linked
+ * workspace's own panel tags its custom_ids with its ID, so its clicks come back to it.
+ */
 export function panelPayloadFor(workspace: WorkspaceRow, apps: AppRow[], hasTypes = false) {
-  const payload = buildPanelMessage({
+  const payload = withScope(buildPanelMessage({
     hasTypes,
     myTickets: workspace.my_tickets,
     title: workspace.panel_title,
     intro: workspace.panel_intro,
     apps: apps.filter((a) => a.enabled).map((a) => ({ publicId: a.public_id, name: a.name, description: a.description })),
-  });
+  }), workspace.parent_id ? workspace.id : null);
   return { payload, hash: sha256(JSON.stringify(payload)) };
+}
+
+/** The panel's apps, and whether any of their workspaces has ticket types (the steps mention choosing one). */
+export async function panelContent(deps: Pick<Deps, 'db'>, workspace: WorkspaceRow): Promise<{ apps: AppRow[]; hasTypes: boolean }> {
+  const [apps, family] = await Promise.all([panelApps(deps.db, workspace), panelWorkspaces(deps.db, workspace)]);
+  const types = await Promise.all(family.map((w) => enabledTicketTypes(deps.db, w.id)));
+  return { apps, hasTypes: types.some((t) => t.length > 0) };
 }
 
 export type PanelState =
@@ -29,7 +41,8 @@ export async function checkPanel(deps: Deps, workspaceId: string, opts: { live: 
   if (!panel) return { state: 'not_published' };
   const workspace = (await getWorkspace(deps.db, workspaceId))!;
   const conn = await getDiscordConnection(deps.db, workspaceId);
-  const { hash } = panelPayloadFor(workspace, await listApps(deps.db, workspaceId), (await enabledTicketTypes(deps.db, workspaceId)).length > 0);
+  const content = await panelContent(deps, workspace);
+  const { hash } = panelPayloadFor(workspace, content.apps, content.hasTypes);
   const channelChanged = conn?.tickets_channel_id !== panel.channel_id;
 
   if (opts.live && deps.discord) {
@@ -73,9 +86,10 @@ export async function publishPanel(deps: Deps, workspaceId: string, userId: stri
   const conn = await getDiscordConnection(deps.db, workspaceId);
   if (!conn?.tickets_channel_id) throw new UserFacingError('Choose a tickets channel first.');
   const workspace = (await getWorkspace(deps.db, workspaceId))!;
-  const apps = await listApps(deps.db, workspaceId);
+  if (workspace.parent_id && workspace.on_main_panel) throw new UserFacingError('This workspace’s apps are on its main workspace’s panel. Choose “Its own panel” first.');
+  const { apps, hasTypes } = await panelContent(deps, workspace);
   if (!apps.some((a) => a.enabled)) throw new UserFacingError('Add at least one enabled app before publishing the panel.');
-  const { payload, hash } = panelPayloadFor(workspace, apps, (await enabledTicketTypes(deps.db, workspaceId)).length > 0);
+  const { payload, hash } = panelPayloadFor(workspace, apps, hasTypes);
   const existing = await getPanel(deps.db, workspaceId);
 
   if (existing && existing.channel_id === conn.tickets_channel_id) {

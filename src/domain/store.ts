@@ -20,7 +20,8 @@ export async function saveGitHubConnection(
   q: Queryable,
   workspaceId: string,
   c: { installationId: number; accountLogin: string; accountType: string; accountAvatarUrl: string | null; repositorySelection: string; suspended: boolean },
-  userId: string,
+  /** Who connected it; null through an install link (someone without an account here). */
+  userId: string | null,
 ): Promise<void> {
   await q.query(
     `INSERT INTO github_connections (workspace_id, installation_id, account_login, account_type, account_avatar_url,
@@ -62,8 +63,18 @@ export async function deleteGitHubConnection(q: Queryable, workspaceId: string):
 
 // ---- Discord connection -------------------------------------------------------------------
 
+/**
+ * The workspace's Discord server. A linked workspace uses its main's server: it gets the main's
+ * connection, with its own ID and its own panel channel as the tickets channel.
+ */
 export async function getDiscordConnection(q: Queryable, workspaceId: string): Promise<DiscordConnectionRow | null> {
-  const { rows } = await q.query<DiscordConnectionRow>('SELECT * FROM discord_connections WHERE workspace_id = $1', [workspaceId]);
+  const { rows } = await q.query<DiscordConnectionRow>(
+    `SELECT d.*, w.id AS workspace_id,
+       CASE WHEN w.parent_id IS NULL THEN d.tickets_channel_id ELSE w.panel_channel_id END AS tickets_channel_id,
+       CASE WHEN w.parent_id IS NULL THEN d.tickets_channel_name ELSE w.panel_channel_name END AS tickets_channel_name
+     FROM workspaces w JOIN discord_connections d ON d.workspace_id = coalesce(w.parent_id, w.id) WHERE w.id = $1`,
+    [workspaceId],
+  );
   return rows[0] ?? null;
 }
 
@@ -99,6 +110,8 @@ export async function saveDiscordGuild(
          connected_by = EXCLUDED.connected_by, connected_at = now_ms(), updated_at = now_ms()`,
       [workspaceId, guild.id, guild.name, guild.icon, userId, sameGuild],
     );
+    // Linked workspaces follow to the new server: their own panels' channels were in the old one.
+    if (!sameGuild) await q.query('UPDATE workspaces SET panel_channel_id = NULL, panel_channel_name = NULL WHERE parent_id = $1', [workspaceId]);
   } catch (err) {
     if (isUniqueViolation(err)) {
       throw new UserFacingError('That Discord server is already connected to another workspace. Disconnect it there first.', 409);
@@ -107,15 +120,18 @@ export async function saveDiscordGuild(
   }
 }
 
+/** Where the ticket panel is posted. A linked workspace's own panel keeps its channel on the workspace. */
 export async function setTicketsChannel(q: Queryable, workspaceId: string, channel: { id: string; name: string }): Promise<void> {
+  await q.query('UPDATE workspaces SET panel_channel_id = $2, panel_channel_name = $3, updated_at = now_ms() WHERE id = $1 AND parent_id IS NOT NULL', [workspaceId, channel.id, channel.name]);
   await q.query(
     `UPDATE discord_connections SET tickets_channel_id = $2, tickets_channel_name = $3, updated_at = now_ms() WHERE workspace_id = $1`,
     [workspaceId, channel.id, channel.name],
   );
 }
 
+/** The server's status, found from any workspace using it (a linked workspace's is its main's). */
 export async function setDiscordStatus(q: Queryable, workspaceId: string, status: DiscordConnectionRow['status'], detail: string | null) {
-  await q.query('UPDATE discord_connections SET status = $2, status_detail = $3, updated_at = now_ms() WHERE workspace_id = $1', [
+  await q.query('UPDATE discord_connections SET status = $2, status_detail = $3, updated_at = now_ms() WHERE workspace_id = (SELECT coalesce(parent_id, id) FROM workspaces WHERE id = $1)', [
     workspaceId,
     status,
     detail,

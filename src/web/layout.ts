@@ -91,10 +91,11 @@ function stepMark(state: StepState): SafeHtml {
   return html`${icon('circle-dashed', 14, 'faint')}<span class="sr-only"> (not done)</span>`;
 }
 
-export function roleLabel(access: MemberAccess): string {
+export function roleLabel(access: MemberAccess & { global?: boolean }): string {
+  const name = access.role === 'moderator' && access.global ? 'Global moderator' : ROLE_LABELS[access.role];
   // View only: a moderator who can't change anything anywhere.
-  if (access.role === 'moderator' && !AREA_KEYS.some((a) => can(access, `${a}.edit`))) return 'Moderator · View only';
-  return ROLE_LABELS[access.role];
+  if (access.role === 'moderator' && !AREA_KEYS.some((a) => can(access, `${a}.edit`))) return `${name} · View only`;
+  return name;
 }
 
 function toastsFor(flash: PageContext['flash']): SafeHtml {
@@ -136,9 +137,7 @@ export function layout(ctx: PageContext, opts: { title: string; active: string; 
         ${tool(access, 'issues')}
         ${tool(access, 'triage', review)}
         ${tool(access, 'moderation')}
-        ${tool(access, 'contributors')}
-        ${tool(access, 'announcements')}
-        ${tool(access, 'bot')}
+        ${ws.parent_id ? '' : html`${tool(access, 'contributors')}${tool(access, 'announcements')}${tool(access, 'bot')}`}
         ${canUseMcp(access) ? navItem(`${base}/mcp`, 'MCP', 'plug', a === 'mcp') : lockedNavItem('MCP', 'plug', { grantable: true })}
         <div class="nav-label">Workspace</div>
         ${manage ? navItem(`${base}/members`, 'Members & permissions', 'users', a === 'members') : lockedNavItem('Members & permissions', 'users')}
@@ -148,15 +147,17 @@ export function layout(ctx: PageContext, opts: { title: string; active: string; 
       </nav>`
     : html``;
 
+  const linkedTo = ws?.parent_id ? (ctx.memberships ?? []).find((m) => m.workspace.id === ws.parent_id)?.workspace.name ?? 'its main workspace' : null;
   const wsButton = ws
     ? menu(
         [
-          ...(ctx.memberships ?? []).map((m) => ({ href: `/w/${m.workspace.id}`, label: m.workspace.name, current: m.workspace.id === ws.id })),
+          // A linked workspace sits under its main, marked with an arrow.
+          ...(ctx.memberships ?? []).map((m) => ({ href: `/w/${m.workspace.id}`, label: m.workspace.name, current: m.workspace.id === ws.id, ...(m.workspace.parent_id && (ctx.memberships ?? []).some((x) => x.workspace.id === m.workspace.parent_id) ? { icon: 'corner-down-right' as const } : {}) })),
           'sep',
           { href: '/workspaces', label: 'All workspaces' },
         ],
         {
-          trigger: (id) => html`<button type="button" class="ws" aria-haspopup="menu" aria-expanded="false" aria-controls="${id}" data-menu="${id}" title="Switch workspace"><span class="ws-tile" aria-hidden="true">${initials(ws.name, 2)}</span><span class="ws-name">${ws.name}</span>${icon('chevrons-up-down', 14)}</button>`,
+          trigger: (id) => html`<button type="button" class="ws" aria-haspopup="menu" aria-expanded="false" aria-controls="${id}" data-menu="${id}" title="Switch workspace"><span class="ws-tile" aria-hidden="true">${initials(ws.name, 2)}</span><span class="ws-name">${ws.name}${linkedTo ? html`<span class="ws-sub">Linked to ${linkedTo}</span>` : ''}</span>${icon('chevrons-up-down', 14)}</button>`,
         },
       )
     : html``;

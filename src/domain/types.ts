@@ -38,6 +38,17 @@ export interface WorkspaceRow {
   my_tickets: boolean;
   /** What members can do on their own tickets in My tickets, and the comments posted for it (see member-actions.ts). */
   member_actions: unknown;
+  /** A linked workspace: its main workspace (see linked.ts). Null for every other workspace. */
+  parent_id: string | null;
+  /** A linked workspace's apps are on its main's panel (else on a panel of its own). */
+  on_main_panel: boolean;
+  /** A linked workspace's own panel channel, in its main's Discord server. */
+  panel_channel_id: string | null;
+  panel_channel_name: string | null;
+  /** A one-time link to install the GitHub App for this workspace (see github.ts). */
+  github_link_hash: string | null;
+  github_link_enc: string | null;
+  github_link_expires_at: Date | null;
   created_at: Date;
 }
 

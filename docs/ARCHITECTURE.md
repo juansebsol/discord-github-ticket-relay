@@ -225,6 +225,30 @@ Discord endpoint, OAuth), one or more queue workers, and an optional triage work
 - All data is scoped to a **workspace**: one GitHub App installation and one Discord server.
 - A Discord server maps to exactly one workspace, because interactions are routed by `guild_id`.
   This is enforced by a unique constraint.
+- **Linked workspaces** (`src/domain/linked.ts`) are made from a main workspace (`parent_id`),
+  one level deep, for apps whose repositories are in another GitHub organization. Each has its
+  own GitHub connection, apps, ticket types, tickets, triage, moderation and analytics, and uses
+  its main's Discord server: `getDiscordConnection()` returns the main's row with the linked
+  workspace's ID and its own panel channel (`workspaces.panel_channel_*`). Contributor roles,
+  announcements and bot features stay with the main (`isMainOnlyPath()` turns those routes
+  away). People: the main's owner and admins are its admins, and the main's **global
+  moderators** (`workspace_members.global_mod`) its moderators with their main access map,
+  computed in `getMembership()`/`listMemberships()` (they win over a membership of their own);
+  it can invite moderators of its own, never admins. Turning someone's global off or removing
+  them from the main ends their claims and revokes their MCP tokens in linked workspaces.
+- **Panels across workspaces:** a linked workspace's apps are on its main's panel
+  (`on_main_panel`, after the main's apps) or on a panel of its own. Discord interactions arrive
+  for the main; a linked workspace's own panel tags its ticket custom_ids `~<workspace id>`
+  (`withScope()`, applied to every reply and edit) so its menus and My tickets stay with it. An
+  app is found by its public ID among the server's workspaces (`serverApp()`) and filed in its
+  own workspace, with that workspace's GitHub installation, ticket types, notice and limits. My
+  tickets lists the tickets of every workspace on that panel (`panelTickets()`); each ticket's
+  actions follow its own workspace's switches.
+- **Install links** (`src/domain/github-link.ts`): an admin makes a one-time link (7 days, hashed
+  for lookup, kept encrypted so it can be copied again) for someone who owns the organization.
+  `/github/connect/:token` sends them to GitHub to install (or sign in); the callback checks
+  `GET /user/installations` like any install and connects without a session. Several
+  installations: plain links carrying a one-time state.
 - People sign in with Discord OAuth and hold an `owner`, `admin` or `moderator` role per
   workspace. Moderators always see the tickets inbox; admins give each one *No access*, *View*
   or *Edit* page by page (one access map per moderator, `AREAS` in `src/domain/permissions.ts`).
@@ -295,6 +319,7 @@ stable user ID are recorded in the body.
 | `POST /discord/interactions` | Discord | Ed25519 signature, 5-minute timestamp window |
 | `GET /oauth/discord/callback` | Browser | One-time state, bound to session (bot install) or nonce cookie (sign-in) |
 | `GET /oauth/github/callback` | Browser | One-time state. Installation verified via `GET /user/installations`. |
+| `GET /github/connect/:token`, `…/install`, `…/signin`, `GET /github/connect/choose` | Browser (no account) | Install link (hashed, expiring, one use), then one-time state; installation verified the same way |
 | `POST /github/webhook` | GitHub | HMAC-SHA256 (`X-Hub-Signature-256`). 404 when no secret is configured. |
 | `GET /healthz` | Load balancer | none (DB ping) |
 | `/w/:workspaceId/*` | Owners, admins, moderators | Session cookie, workspace membership and role permission, CSRF on POST |
@@ -303,8 +328,8 @@ stable user ID are recorded in the body.
 
 | Table | Purpose |
 |---|---|
-| `workspaces` | Tenant root, with rate-limit, duplicate-window, retention and panel-copy settings, the privacy notices, My tickets and what members can do on their tickets |
-| `users`, `workspace_members`, `workspace_invites` | Admin identities (Discord), roles, one-time invites |
+| `workspaces` | Tenant root, with rate-limit, duplicate-window, retention and panel-copy settings, the privacy notices, My tickets and what members can do on their tickets; a linked workspace's main, where its apps are offered and its own panel channel; the GitHub install link |
+| `users`, `workspace_members`, `workspace_invites` | Admin identities (Discord), roles (and whether a moderator is global), one-time invites |
 | `sessions`, `oauth_states` | Hashed session tokens with CSRF token, and single-use OAuth state |
 | `github_connections` | Installation ID, account and status per workspace |
 | `discord_connections` | Guild (globally unique), tickets channel and status per workspace |

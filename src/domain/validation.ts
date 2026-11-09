@@ -3,6 +3,7 @@ import { inspectGuild } from './discord-checks.js';
 import { checkPanel } from './panel.js';
 import { getDiscordConnection, getGitHubConnection, listApps, refreshAppRepo, setDiscordStatus, setGitHubStatus } from './store.js';
 import type { Deps } from './types.js';
+import { getWorkspace } from './workspaces.js';
 
 export interface Check {
   area: 'deployment' | 'github' | 'discord' | 'apps' | 'panel';
@@ -53,11 +54,14 @@ export async function validateWorkspace(deps: Deps, workspaceId: string, base: s
     }
   }
 
-  // ---- Discord
+  // ---- Discord (a linked workspace's is its main's server)
   const dc = await getDiscordConnection(deps.db, workspaceId);
+  const ws = await getWorkspace(deps.db, workspaceId);
+  // A linked workspace's apps on its main's panel: no channel or panel of its own to check.
+  const onMain = Boolean(ws?.parent_id && ws.on_main_panel);
   let discordOk = false;
   if (!dc) {
-    add({ area: 'discord', status: 'error', title: 'No Discord server connected', fix: { label: 'Connect Discord', href: `${base}/setup/discord` } });
+    add({ area: 'discord', status: 'error', title: ws?.parent_id ? 'The main workspace hasn’t connected a Discord server' : 'No Discord server connected', fix: { label: ws?.parent_id ? 'Discord' : 'Connect Discord', href: `${base}/setup/discord` } });
   } else if (deps.discord) {
     const access = await inspectGuild(deps.discord, dc.guild_id);
     if (!access.ok) {
@@ -66,7 +70,10 @@ export async function validateWorkspace(deps: Deps, workspaceId: string, base: s
     } else {
       if (dc.status !== 'active') await setDiscordStatus(deps.db, workspaceId, 'active', null);
       add({ area: 'discord', status: 'ok', title: `Bot is in the “${access.guild.name}” server` });
-      if (!dc.tickets_channel_id) {
+      if (onMain) {
+        discordOk = true;
+        add({ area: 'discord', status: 'ok', title: 'Its apps are on the main workspace’s panel' });
+      } else if (!dc.tickets_channel_id) {
         add({ area: 'discord', status: 'error', title: 'No tickets channel selected', fix: { label: 'Choose channel', href: `${base}/tickets/panel#channel` } });
       } else {
         const channel = access.channels.find((c) => c.id === dc.tickets_channel_id);
@@ -134,7 +141,7 @@ export async function validateWorkspace(deps: Deps, workspaceId: string, base: s
   }
 
   // ---- Panel
-  if (discordOk) {
+  if (discordOk && !onMain) {
     const panel = await checkPanel(deps, workspaceId);
     if (panel.state === 'not_published') add({ area: 'panel', status: 'warning', title: 'The ticket panel has not been published yet' });
     else if (panel.state === 'missing') add({ area: 'panel', status: 'warning', title: 'The ticket panel was deleted from Discord', detail: 'Publish it again to restore it.' });

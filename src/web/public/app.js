@@ -870,8 +870,9 @@
     });
   });
 
-  // Parts shown while a switch is on, anywhere on the page: data-follows names the switch's id
-  // (Discord tickets › Panel: what members can do on a ticket, its comments and its preview's buttons).
+  // Parts shown while a switch (or a radio choice) is on, anywhere on the page: data-follows names its
+  // id (Discord tickets › Panel: what members can do on a ticket, its comments and its preview's
+  // buttons; Members: the Global moderator switch while Moderator is chosen).
   var followers = $$('[data-follows]');
   if (followers.length) {
     var syncFollowers = function () {
@@ -880,7 +881,7 @@
         if (sw) el.hidden = !sw.checked;
       });
     };
-    document.addEventListener('change', function (e) { if (e.target && e.target.type === 'checkbox') syncFollowers(); });
+    document.addEventListener('change', function (e) { if (e.target && (e.target.type === 'checkbox' || e.target.type === 'radio')) syncFollowers(); });
     syncFollowers();
   }
 

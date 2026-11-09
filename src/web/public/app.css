@@ -177,6 +177,9 @@ hr { border: 0; border-top: 1px solid var(--border); margin: 0; }
 .ws:hover { background: var(--nav-hover); text-decoration: none; }
 .ws-tile { width: 24px; height: 24px; border-radius: var(--r-sm); background: var(--accent-soft); color: var(--accent-text); font: 600 11px/24px var(--font); text-align: center; flex: none; }
 .ws-name { flex: 1; min-width: 0; font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A linked workspace: its main under the name. */
+.ws-sub { display: block; font: 400 12px/16px var(--font); color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
+.ws:has(.ws-sub) { height: 44px; }
 .ws .ic { color: var(--muted); }
 
 .nav { display: flex; flex-direction: column; gap: 2px; }
@@ -710,6 +713,8 @@ dl.props dd .ic { color: var(--muted); }
 /* Discord tickets › Panel › My tickets: what members can do on an open ticket, under the switch. */
 .member-actions { margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--border); }
 .member-actions .section-h h4 { font-size: 14px; line-height: 20px; }
+/* A linked workspace on its main's panel: no My tickets switch above, so nothing to separate from. */
+.section > [hidden]:first-child + .member-actions { margin-top: 0; padding-top: 0; border-top: 0; }
 .member-action + .member-action { margin-top: 20px; }
 .member-action > .fields { margin-top: 12px; padding-left: 14px; border-left: 2px solid var(--border); }
 .member-action code { font-size: 12px; }
@@ -753,6 +758,11 @@ dl.props dd .ic { color: var(--muted); }
 .ws-list a + a { border-top: 1px solid var(--border); }
 .ws-list a:hover { background: var(--surface-2); text-decoration: none; }
 .ws-list .ic { margin-left: auto; color: var(--muted); }
+.ws-list a.linked { padding-left: 32px; }
+/* Settings › Linked workspaces: the new workspace's name, then its button (stacked on phones). */
+.linked-new { flex-wrap: wrap; gap: 8px; }
+.linked-new > input { flex: 1 1 240px; min-width: 0; }
+@media (max-width: 640px) { .linked-new > .end { flex: 1 1 100%; justify-content: flex-end; } }
 
 /* ---- Responsive ---------------------------------------------------------------------------- */
 

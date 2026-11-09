@@ -56,6 +56,7 @@ and filed by a GitHub App. Reporters never need a GitHub account.
 **Team**
 
 - **Roles:** owners, admins and moderators; several workspaces on one install.
+- **Linked workspaces:** for an app whose repository lives in another GitHub organization. It gets its own workspace, with its own GitHub connection, apps, tickets, AI triage and analytics, and shares your Discord server: its apps join your ticket panel (or get one of their own), and My tickets shows members their tickets from both. Your admins are its admins and your **global moderators** its moderators; you can also invite moderators just for it. An install link lets the organization's owner install the GitHub App without an account.
 - **Moderators:** start with the tickets inbox and contributor verifications, view only. Admins give each one no access, view or edit on every page of every tool (tickets, issues, AI triage, moderation, contributor roles, Apps & repositories, server health), a whole tool at once or page by page, and each MCP tool for their coding agent on or off.
 
 **Reliable and secure**

@@ -14,6 +14,7 @@ import { runShown } from '../triage/knowledge-runs.js';
 import { getDiscordConnection, getGitHubConnection, getPanel, listApps } from '../domain/store.js';
 import { UserFacingError, type Deps, type Role } from '../domain/types.js';
 import { getMembership, listMemberships, type Membership } from '../domain/workspaces.js';
+import { isMainOnlyPath } from '../domain/linked.js';
 import { areaLabel, can, isArea, type Permission } from '../domain/permissions.js';
 import { layout, simplePage, type PageContext, type PageWidth, type SetupProgress } from './layout.js';
 import { loadSession, SESSION_COOKIE, takeFlash, type AuthContext } from './session.js';
@@ -249,6 +250,18 @@ export async function buildServer(deps: Deps, processor: Processor, opts: { logg
         return null;
       }
       const [memberships, progress] = await Promise.all([listMemberships(deps.db, auth.user.id), computeProgress(deps, wid)]);
+      // A linked workspace uses its main's Discord server: the tools that post there stay with the main.
+      if (membership.workspace.parent_id && isMainOnlyPath(req.url)) {
+        const main = memberships.find((x) => x.workspace.id === membership.workspace.parent_id);
+        const ctx = { ...web.pageContext(req, reply), workspace: membership.workspace, role: membership.role, membership, base: `/w/${membership.workspace.id}`, memberships, progress };
+        if (web.wantsJson(req) || req.method !== 'GET') {
+          reply.code(404).send({ ok: false, error: 'This is set up in the main workspace.' });
+          return null;
+        }
+        web.render(reply, ctx, 'In the main workspace', '', html`${pageHeader({ title: 'In the main workspace' })}
+          <div class="card">${empty('building-2', 'Set up in the main workspace', `${membership.workspace.name} uses ${main?.workspace.name ?? 'its main workspace'}’s Discord server, so contributor roles, announcements and bot features are set up there.`, main ? linkBtn(`/w/${main.workspace.id}`, `Go to ${main.workspace.name}`) : null)}</div>`);
+        return null;
+      }
       return {
         ...web.pageContext(req, reply),
         workspace: membership.workspace,

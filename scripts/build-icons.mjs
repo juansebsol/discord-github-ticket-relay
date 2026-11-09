@@ -39,6 +39,8 @@ const NAMES = [
   'shield', 'reply', 'keyboard', 'pin',
   // MCP
   'plug', 'square-terminal',
+  // Linked workspaces
+  'corner-down-right', 'building-2',
 ];
 
 const require = createRequire(import.meta.url);

@@ -52,6 +52,8 @@ export interface MemberUpdate {
 
 export interface MemberTicket {
   ref: string;
+  /** The workspace it was filed in (a main's panel lists its linked workspaces' tickets too). */
+  workspaceId: string;
   app: string;
   type: string | null;
   title: string;
@@ -168,7 +170,7 @@ export async function memberTickets(deps: Pick<Deps, 'db' | 'box'>, workspaceId:
       const title = stripPrefix(own?.title ?? '') || decryptPayload(deps.box, r)?.title?.trim() || `Ticket ${r.ref}`;
       const theirs = updates.get(r.id) ?? [];
       const base = {
-        ref: r.ref, app: r.app_name, type: r.ticket_type_name, title, at: r.created_at, filedAt: r.completed_at,
+        ref: r.ref, workspaceId, app: r.app_name, type: r.ticket_type_name, title, at: r.created_at, filedAt: r.completed_at,
         version: null, releaseAt: null, sameAs: null, pull: null, closedAt: null, repoPrivate: r.repo_private, updates: theirs,
         issue: r.issue_number ? { number: r.issue_number, url: hidden ? null : (own?.html_url ?? r.issue_url) } : null,
       };
@@ -213,6 +215,12 @@ export async function memberTickets(deps: Pick<Deps, 'db' | 'box'>, workspaceId:
     }
   }
   return out.sort((a, b) => Number(a.done) - Number(b.done) || b.at.getTime() - a.at.getTime());
+}
+
+/** This member's tickets in each of a panel's workspaces, together: open ones first, newest first. */
+export async function panelTickets(deps: Pick<Deps, 'db' | 'box'>, workspaceIds: string[], discordUserId: string): Promise<MemberTicket[]> {
+  const all = (await Promise.all(workspaceIds.map((id) => memberTickets(deps, id, discordUserId)))).flat();
+  return all.sort((a, b) => Number(a.done) - Number(b.done) || b.at.getTime() - a.at.getTime()).slice(0, MAX_TICKETS);
 }
 
 /** What each ticket's member did on it from My tickets, oldest first, and the team reopening it. */

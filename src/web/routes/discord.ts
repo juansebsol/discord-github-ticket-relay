@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { DiscordGuildSummary } from '../../discord/client.js';
 import { canManageGuild, REQUIRED_CHANNEL_PERMISSIONS } from '../../discord/permissions.js';
 import { inspectGuild } from '../../domain/discord-checks.js';
+import { listLinked, mainOf } from '../../domain/linked.js';
 import { unpublishPanel } from '../../domain/panel.js';
 import { getContributorSettings, inspectRoles } from '../../domain/contributors.js';
 import { deleteDiscordConnection, getDiscordConnection, saveDiscordGuild } from '../../domain/store.js';
@@ -38,6 +39,22 @@ export function registerDiscordRoutes(app: FastifyInstance, web: Web): void {
     const b = ctx.base;
     const wid = ctx.workspace.id;
     const conn = await getDiscordConnection(deps.db, wid);
+    // A linked workspace uses its main's server: shown here, changed there.
+    const main = await mainOf(deps.db, ctx.workspace);
+    if (main) {
+      const canOpenMain = (ctx.memberships ?? []).some((x) => x.workspace.id === main.id);
+      const own = !ctx.workspace.on_main_panel;
+      const body = html`
+        ${pageHeader({ eyebrow: 'Setup · Step 2 of 3', title: 'Discord', after: !conn ? pill('Not connected', 'neutral') : conn.status === 'active' ? pill('Connected', 'ok') : pill('Bot removed', 'danger'), description: `${ctx.workspace.name} uses ${main.name}’s Discord server. It’s connected and changed there.` })}
+        <div class="card">
+          <div class="card-h"><div><h2>Connection</h2><div class="desc">From ${main.name}.</div></div>${canOpenMain ? linkBtn(`/w/${main.id}/setup/discord`, `Open in ${main.name}`, { size: 'sm', variant: 'ghost', trail: 'arrow-right' }) : ''}</div>
+          ${conn
+            ? setting('Server', null, html`<span class="row">${avatar(conn.guild_name, 32, { src: guildIcon({ id: conn.guild_id, icon: conn.guild_icon }), square: true, letters: 2 })}<span class="name">${conn.guild_name}</span></span>`)
+            : html`<div class="card-b"><p class="small muted">${main.name} hasn’t connected a Discord server yet.</p></div>`}
+          ${setting('Ticket panel', null, html`<span class="value">${own ? (conn?.tickets_channel_name ? `Its own, in #${conn.tickets_channel_name}` : 'Its own, no channel chosen yet') : `On ${main.name}’s panel`}</span>${linkBtn(`${b}/tickets/panel`, 'Open', { variant: 'ghost', size: 'sm', trail: 'arrow-right' })}`)}
+        </div>`;
+      return web.render(reply, ctx, 'Discord', 'discord', body);
+    }
     const changing = (req.query as { change?: string }).change === '1';
     const status = !conn ? pill('Not connected', 'neutral') : conn.status === 'active' ? pill('Connected', 'ok') : pill('Bot removed', 'danger');
     const perms = REQUIRED_CHANNEL_PERMISSIONS.map((p) => p.name).join(', ');
@@ -134,7 +151,7 @@ export function registerDiscordRoutes(app: FastifyInstance, web: Web): void {
   app.post('/w/:wid/setup/discord/server', async (req, reply) => {
     const ctx = await web.requireWorkspace(req, reply);
     if (!ctx) return reply;
-    if (!deps.discord) return reply.redirect(`${ctx.base}/setup/discord`);
+    if (!deps.discord || ctx.workspace.parent_id) return reply.redirect(`${ctx.base}/setup/discord`);
     const guildId = String((req.body as { guild_id?: string }).guild_id ?? '');
     const back = `${ctx.base}/setup/discord`;
     try {
@@ -155,6 +172,9 @@ export function registerDiscordRoutes(app: FastifyInstance, web: Web): void {
   app.post('/w/:wid/setup/discord/disconnect', async (req, reply) => {
     const ctx = await web.requireWorkspace(req, reply);
     if (!ctx) return reply;
+    if (ctx.workspace.parent_id) return reply.redirect(`${ctx.base}/setup/discord`);
+    // Linked workspaces' own panels are in this server too.
+    for (const l of await listLinked(deps.db, ctx.workspace.id)) await unpublishPanel(deps, l.id);
     await unpublishPanel(deps, ctx.workspace.id);
     await deleteDiscordConnection(deps.db, ctx.workspace.id);
     setFlash(reply, 'success', 'Discord disconnected and the panel removed. You can also remove the bot from the server in Discord.');

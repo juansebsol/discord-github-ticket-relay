@@ -23,9 +23,13 @@ export async function upsertUser(
 
 export interface Membership extends MemberAccess {
   workspace: WorkspaceRow;
+  /** A main workspace's moderator who is also in each of its linked workspaces. */
+  global?: boolean;
+  /** In a linked workspace through its main (the main's name): owner, admin or global moderator there. */
+  via?: string;
 }
 
-const MEMBER_COLUMNS = 'm.role, m.access';
+const MEMBER_COLUMNS = 'm.role, m.access, m.global_mod';
 
 /** What a new moderator can do: see tickets (always) and contributor verifications. */
 const NEW_MODERATOR_ACCESS: MemberAccess['access'] = { verifications: 'view' };
@@ -35,28 +39,49 @@ function accessMap(v: unknown): MemberAccess['access'] {
 }
 
 function toMembership(row: Record<string, unknown>): Membership {
-  const { role, access, ...workspace } = row;
-  return { workspace: workspace as unknown as WorkspaceRow, role: role as Role, access: accessMap(access) };
+  const { role, access, global_mod, via_main, ...workspace } = row;
+  return {
+    workspace: workspace as unknown as WorkspaceRow, role: role as Role, access: accessMap(access), global: Boolean(global_mod),
+    ...(typeof via_main === 'string' ? { via: via_main } : {}),
+  };
 }
 
+/**
+ * Who is in a linked workspace through its main: the main's owner and admins (same role), and its
+ * global moderators (with the pages they have there). They win over a membership of their own.
+ */
+const INHERITED = `SELECT w.*, ${MEMBER_COLUMNS}, p.name AS via_main FROM workspaces w
+  JOIN workspaces p ON p.id = w.parent_id JOIN workspace_members m ON m.workspace_id = p.id
+  WHERE m.user_id = $1 AND (m.role <> 'moderator' OR m.global_mod = 1)`;
+
+/** Every workspace this person can open: mains first, each followed by its linked workspaces. */
 export async function listMemberships(q: Queryable, userId: string): Promise<Membership[]> {
   const { rows } = await q.query(
-    `SELECT w.*, ${MEMBER_COLUMNS} FROM workspace_members m JOIN workspaces w ON w.id = m.workspace_id
-     WHERE m.user_id = $1 ORDER BY w.created_at`,
+    `SELECT w.*, ${MEMBER_COLUMNS}, NULL AS via_main FROM workspace_members m JOIN workspaces w ON w.id = m.workspace_id WHERE m.user_id = $1
+     UNION ALL ${INHERITED}`,
     [userId],
   );
-  return rows.map(toMembership);
+  const byId = new Map<string, Membership>();
+  for (const r of rows.map(toMembership)) {
+    if (!byId.has(r.workspace.id) || r.via) byId.set(r.workspace.id, r);
+  }
+  const all = [...byId.values()].sort((a, b) => a.workspace.created_at.getTime() - b.workspace.created_at.getTime());
+  // A linked workspace right after its main; one whose main they can't open stands on its own.
+  const top = all.filter((m) => !m.workspace.parent_id || !byId.has(m.workspace.parent_id));
+  return top.flatMap((m) => [m, ...all.filter((x) => x.workspace.parent_id === m.workspace.id)]);
 }
 
-/** Returns the membership only if the user belongs to the workspace. */
+/** Returns the membership only if the user belongs to the workspace (directly or through its main). */
 export async function getMembership(q: Queryable, userId: string, workspaceId: string): Promise<Membership | null> {
   if (!/^[0-9a-f-]{36}$/i.test(workspaceId)) return null;
   const { rows } = await q.query(
-    `SELECT w.*, ${MEMBER_COLUMNS} FROM workspace_members m JOIN workspaces w ON w.id = m.workspace_id
-     WHERE m.user_id = $1 AND m.workspace_id = $2`,
+    `SELECT w.*, ${MEMBER_COLUMNS}, NULL AS via_main FROM workspace_members m JOIN workspaces w ON w.id = m.workspace_id
+     WHERE m.user_id = $1 AND m.workspace_id = $2
+     UNION ALL ${INHERITED} AND w.id = $2`,
     [userId, workspaceId],
   );
-  return rows[0] ? toMembership(rows[0]) : null;
+  const found = rows.map(toMembership);
+  return found.find((m) => m.via) ?? found[0] ?? null;
 }
 
 export async function getWorkspace(q: Queryable, id: string): Promise<WorkspaceRow | null> {
@@ -137,13 +162,39 @@ export async function userNames(q: Queryable, ids: (string | null | undefined)[]
 }
 
 export async function listMembers(q: Queryable, workspaceId: string) {
-  const { rows } = await q.query<UserRow & MemberAccess & { joined_at: Date }>(
+  const { rows } = await q.query<UserRow & MemberAccess & { global_mod: boolean; joined_at: Date }>(
     `SELECT u.*, ${MEMBER_COLUMNS}, m.created_at AS joined_at FROM workspace_members m JOIN users u ON u.id = m.user_id
      WHERE m.workspace_id = $1
      ORDER BY CASE m.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END, m.created_at`,
     [workspaceId],
   );
   return rows.map((r) => ({ ...r, access: accessMap(r.access) }));
+}
+
+/**
+ * The people in a linked workspace through its main: the main's owner and admins, and its global
+ * moderators (shown as moderators). Empty for any other workspace.
+ */
+export async function inheritedMembers(q: Queryable, workspaceId: string) {
+  const { rows } = await q.query<UserRow & MemberAccess & { global_mod: boolean; joined_at: Date }>(
+    `SELECT u.*, ${MEMBER_COLUMNS}, m.created_at AS joined_at FROM workspaces w JOIN workspace_members m ON m.workspace_id = w.parent_id JOIN users u ON u.id = m.user_id
+     WHERE w.id = $1 AND (m.role <> 'moderator' OR m.global_mod = 1)
+     ORDER BY CASE m.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END, m.created_at`,
+    [workspaceId],
+  );
+  return rows.map((r) => ({ ...r, access: accessMap(r.access) }));
+}
+
+/**
+ * Someone stopped being in a main's linked workspaces (removed, or no longer a global moderator):
+ * there, where they have no membership of their own, their coding agents lose access and the
+ * tickets they claimed are free again.
+ */
+async function leaveLinked(q: Queryable, mainId: string, userId: string): Promise<void> {
+  const linked = `SELECT w.id FROM workspaces w WHERE w.parent_id = $1
+    AND NOT EXISTS (SELECT 1 FROM workspace_members m WHERE m.workspace_id = w.id AND m.user_id = $2)`;
+  await q.query(`UPDATE mcp_tokens SET revoked_at = now_ms() WHERE workspace_id IN (${linked}) AND user_id = $2 AND revoked_at IS NULL`, [mainId, userId]);
+  await q.query(`UPDATE ticket_claims SET ended_at = now_ms(), end_reason = 'left' WHERE workspace_id IN (${linked}) AND user_id = $2 AND ended_at IS NULL`, [mainId, userId]);
 }
 
 export async function removeMember(db: Db, workspaceId: string, userId: string): Promise<void> {
@@ -161,28 +212,35 @@ export async function removeMember(db: Db, workspaceId: string, userId: string):
     // Their coding agents lose access, and the tickets they claimed are free again.
     await c.query('UPDATE mcp_tokens SET revoked_at = now_ms() WHERE workspace_id = $1 AND user_id = $2 AND revoked_at IS NULL', [workspaceId, userId]);
     await c.query(`UPDATE ticket_claims SET ended_at = now_ms(), end_reason = 'left' WHERE workspace_id = $1 AND user_id = $2 AND ended_at IS NULL`, [workspaceId, userId]);
+    await leaveLinked(c, workspaceId, userId);
   });
 }
 
-export async function createInvite(q: Queryable, workspaceId: string, createdBy: string, role: 'admin' | 'moderator' = 'admin'): Promise<string> {
+/**
+ * A one-time invite link. `global`: a moderator who is also in every linked workspace. A linked
+ * workspace only invites moderators of its own (its admins and global moderators come from its main).
+ */
+export async function createInvite(q: Queryable, workspaceId: string, createdBy: string, role: 'admin' | 'moderator' = 'admin', o: { global?: boolean } = {}): Promise<string> {
+  const ws = await getWorkspace(q, workspaceId);
+  if (ws?.parent_id && role !== 'moderator') throw new UserFacingError('A linked workspace only has moderators of its own. Make admins in its main workspace.');
   const token = randomToken(24);
   await q.query(
-    `INSERT INTO workspace_invites (id, workspace_id, token_hash, created_by, expires_at, role)
-     VALUES ($4, $1, $2, $3, now_ms() + 604800000, $5)`,
-    [workspaceId, sha256(token), createdBy, randomUUID(), role],
+    `INSERT INTO workspace_invites (id, workspace_id, token_hash, created_by, expires_at, role, global_mod)
+     VALUES ($4, $1, $2, $3, now_ms() + 604800000, $5, $6)`,
+    [workspaceId, sha256(token), createdBy, randomUUID(), role, role === 'moderator' && Boolean(o.global) && !ws?.parent_id],
   );
   return token;
 }
 
 export async function listInvites(q: Queryable, workspaceId: string) {
   const { rows } = await q.query(
-    `SELECT i.id, i.role, i.created_at, i.expires_at, COALESCE(u.display_name, u.username) AS created_by_name
+    `SELECT i.id, i.role, i.global_mod, i.created_at, i.expires_at, COALESCE(u.display_name, u.username) AS created_by_name
      FROM workspace_invites i LEFT JOIN users u ON u.id = i.created_by
      WHERE i.workspace_id = $1 AND i.used_at IS NULL AND i.revoked_at IS NULL AND i.expires_at > now_ms()
      ORDER BY i.created_at DESC`,
     [workspaceId],
   );
-  return rows as { id: string; role: 'admin' | 'moderator'; created_at: Date; expires_at: Date; created_by_name: string | null }[];
+  return rows as { id: string; role: 'admin' | 'moderator'; global_mod: boolean; created_at: Date; expires_at: Date; created_by_name: string | null }[];
 }
 
 export async function revokeInvite(q: Queryable, workspaceId: string, inviteId: string): Promise<void> {
@@ -191,11 +249,11 @@ export async function revokeInvite(q: Queryable, workspaceId: string, inviteId: 
 
 export async function findInvite(q: Queryable, token: string) {
   const { rows } = await q.query(
-    `SELECT i.id, i.workspace_id, i.role, w.name AS workspace_name FROM workspace_invites i JOIN workspaces w ON w.id = i.workspace_id
+    `SELECT i.id, i.workspace_id, i.role, i.global_mod, w.name AS workspace_name FROM workspace_invites i JOIN workspaces w ON w.id = i.workspace_id
      WHERE i.token_hash = $1 AND i.used_at IS NULL AND i.revoked_at IS NULL AND i.expires_at > now_ms()`,
     [sha256(token)],
   );
-  return (rows[0] as { id: string; workspace_id: string; role: 'admin' | 'moderator'; workspace_name: string } | undefined) ?? null;
+  return (rows[0] as { id: string; workspace_id: string; role: 'admin' | 'moderator'; global_mod: boolean; workspace_name: string } | undefined) ?? null;
 }
 
 export async function acceptInvite(db: Db, token: string, userId: string): Promise<string> {
@@ -203,29 +261,40 @@ export async function acceptInvite(db: Db, token: string, userId: string): Promi
     const { rows } = await c.query(
       `UPDATE workspace_invites SET used_at = now_ms(), used_by = $2
        WHERE token_hash = $1 AND used_at IS NULL AND revoked_at IS NULL AND expires_at > now_ms()
-       RETURNING workspace_id, role`,
+       RETURNING workspace_id, role, global_mod`,
       [sha256(token), userId],
     );
     if (!rows[0]) throw new UserFacingError('This invitation link is invalid, expired or has already been used.', 404);
     await c.query(
-      `INSERT INTO workspace_members (workspace_id, user_id, role, access) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
-      [rows[0].workspace_id, userId, rows[0].role, rows[0].role === 'moderator' ? NEW_MODERATOR_ACCESS : {}],
+      `INSERT INTO workspace_members (workspace_id, user_id, role, access, global_mod) VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING`,
+      [rows[0].workspace_id, userId, rows[0].role, rows[0].role === 'moderator' ? NEW_MODERATOR_ACCESS : {}, rows[0].role === 'moderator' && Boolean(rows[0].global_mod)],
     );
     return rows[0].workspace_id as string;
   });
 }
 
-/** Owner only: switch a member between Admin and Moderator. The owner's own role can't change here. */
-export async function setMemberRole(q: Queryable, workspaceId: string, userId: string, role: 'admin' | 'moderator'): Promise<void> {
-  const { rows } = await q.query<{ role: Role }>('SELECT role FROM workspace_members WHERE workspace_id = $1 AND user_id = $2', [workspaceId, userId]);
-  if (!rows[0]) throw new UserFacingError('That person is not a member of this workspace.', 404);
-  if (rows[0].role === 'owner') throw new UserFacingError('The owner’s role can’t be changed.');
-  // An admin who becomes a moderator keeps the access they had as one, or starts like a new moderator.
-  await q.query(
-    `UPDATE workspace_members SET role = $3, access = CASE WHEN $3 = 'moderator' AND role <> 'moderator' AND access = '{}' THEN $4 ELSE access END
-     WHERE workspace_id = $1 AND user_id = $2`,
-    [workspaceId, userId, role, NEW_MODERATOR_ACCESS],
-  );
+/**
+ * Owner only: make a member an Admin, a Moderator or (in a main workspace) a Global moderator, who
+ * is also in every linked workspace. The owner's own role can't change here, and a linked
+ * workspace has no admins of its own.
+ */
+export async function setMemberRole(db: Db, workspaceId: string, userId: string, role: 'admin' | 'moderator', o: { global?: boolean } = {}): Promise<void> {
+  await withTransaction(db, async (q) => {
+    const ws = await getWorkspace(q, workspaceId);
+    if (ws?.parent_id && role !== 'moderator') throw new UserFacingError('A linked workspace only has moderators of its own. Make admins in its main workspace.');
+    const { rows } = await q.query<{ role: Role; global_mod: boolean }>('SELECT role, global_mod FROM workspace_members WHERE workspace_id = $1 AND user_id = $2', [workspaceId, userId]);
+    if (!rows[0]) throw new UserFacingError('That person is not a member of this workspace.', 404);
+    if (rows[0].role === 'owner') throw new UserFacingError('The owner’s role can’t be changed.');
+    const global = role === 'moderator' && Boolean(o.global) && !ws?.parent_id;
+    // An admin who becomes a moderator keeps the access they had as one, or starts like a new moderator.
+    await q.query(
+      `UPDATE workspace_members SET role = $3, global_mod = $5, access = CASE WHEN $3 = 'moderator' AND role <> 'moderator' AND access = '{}' THEN $4 ELSE access END
+       WHERE workspace_id = $1 AND user_id = $2`,
+      [workspaceId, userId, role, NEW_MODERATOR_ACCESS, global],
+    );
+    // No longer in the linked workspaces: an admin or global moderator who became a moderator here only.
+    if (role === 'moderator' && !global && (rows[0].role !== 'moderator' || rows[0].global_mod)) await leaveLinked(q, workspaceId, userId);
+  });
 }
 
 /**
