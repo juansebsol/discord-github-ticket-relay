@@ -489,10 +489,21 @@
     return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
   // Tiny Discord-markdown renderer matching the server preview: headings, lists, **bold**, links, role mentions.
+  // A Discord timestamp (<t:…:R>) as members read it: "3 days ago". Mirrors relativeTime() in discord-preview.ts.
+  function relativeTime(seconds) {
+    var diff = Math.round(Date.now() / 1000 - seconds);
+    var units = [[31536000, 'year'], [2592000, 'month'], [86400, 'day'], [3600, 'hour'], [60, 'minute']];
+    for (var i = 0; i < units.length; i++) {
+      var n = Math.floor(Math.abs(diff) / units[i][0]);
+      if (n >= 1) return diff >= 0 ? n + ' ' + units[i][1] + (n === 1 ? '' : 's') + ' ago' : 'in ' + n + ' ' + units[i][1] + (n === 1 ? '' : 's');
+    }
+    return 'just now';
+  }
   function discordHtml(text, roles) {
     var parts = escapeHtml(text).split('\n').map(function (line) {
       var out = line
         .replace(/&lt;@&amp;(\d+)&gt;/g, function (_m, id) { return '<span class="dp-mention">@' + escapeHtml(roles[id] || 'unknown-role') + '</span>'; })
+        .replace(/&lt;t:(\d+)(?::[tTdDfFR])?&gt;/g, function (_m, s) { return '<span class="dp-ts">' + relativeTime(Number(s)) + '</span>'; })
         .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
         .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<span class="dp-a">$1</span>');
       var h = /^#{1,3} (.*)$/.exec(out);
@@ -839,6 +850,24 @@
     if (e.key !== 'Enter' || !e.target.matches || !e.target.matches('input[name="every_n"][form="kn-auto"]')) return;
     e.preventDefault();
     e.target.blur();
+  });
+
+  // Discord tickets › Panel: the My tickets switch shows the buttons or the app menu in the preview,
+  // and swaps the introduction while it's still the other one's default.
+  $$('[data-layout-switch]').forEach(function (sw) {
+    sw.addEventListener('change', function () {
+      var on = sw.checked;
+      $$('[data-layout]').forEach(function (el) { el.hidden = el.getAttribute('data-layout') !== (on ? 'buttons' : 'menu'); });
+      var intro = document.getElementById('panel_intro');
+      if (!intro) return;
+      var from = intro.getAttribute(on ? 'data-default-menu' : 'data-default-buttons');
+      var to = intro.getAttribute(on ? 'data-default-buttons' : 'data-default-menu');
+      intro.setAttribute('placeholder', to);
+      if (intro.value.trim() === from) {
+        intro.value = to;
+        intro.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    });
   });
 
   // "Reset to default" puts each field's default (its placeholder) back.

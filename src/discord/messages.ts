@@ -31,6 +31,11 @@ export const CustomId = {
   pickerPage: (page: number) => `tr:page:${page}`,
   form: (appPublicId: string, repoId: number, typePublicId?: string) => `tr:form:${appPublicId}:${repoId}${typePublicId ? `:${typePublicId}` : ''}`,
   typeSelect: (appPublicId: string, repoId: number) => `tr:type:${appPublicId}:${repoId}`,
+  // Panel buttons (My tickets on): open a ticket privately, and the member's own tickets.
+  openTicket: 'tr:open',
+  myTickets: 'tr:mine',
+  myTicketsPage: (page: number) => `tr:mine:p:${page}`,
+  myTicketsPick: (page: number) => `tr:mine:t:${page}`,
   titleInput: 'title',
   descriptionInput: 'description',
   // Contributor panel (separate prefix so it never collides with the ticket flow).
@@ -69,11 +74,20 @@ export interface PanelOptions {
   apps: PanelApp[];
   /** When the workspace has ticket types, the steps mention choosing one. */
   hasTypes?: boolean;
+  /** Open a ticket and My tickets buttons instead of the app menu. */
+  myTickets?: boolean;
 }
 
 export const DEFAULT_PANEL_TITLE = 'Need help? Open a ticket';
 export const DEFAULT_PANEL_INTRO =
   'Pick the app you need help with from the menu below. A short form will open where you can describe the problem.';
+export const DEFAULT_PANEL_INTRO_BUTTONS =
+  'Press **Open a ticket** to tell us about a problem. A short form will open where you can describe it.';
+
+/** The introduction used when the workspace hasn't written its own, for the menu or the buttons. */
+export function defaultPanelIntro(myTickets: boolean): string {
+  return myTickets ? DEFAULT_PANEL_INTRO_BUTTONS : DEFAULT_PANEL_INTRO;
+}
 
 function appOption(app: PanelApp) {
   return {
@@ -94,21 +108,24 @@ export function buildPanelMessage(opts: PanelOptions) {
       description: `Browse all ${opts.apps.length} apps`,
     });
   }
+  const buttons = Boolean(opts.myTickets);
+  const first = buttons ? `1. Press **Open a ticket**${opts.apps.length > 1 ? ' and choose your app' : ''}.` : '1. Choose your app from the menu.';
   const description = [
-    opts.intro?.trim() || DEFAULT_PANEL_INTRO,
+    opts.intro?.trim() || defaultPanelIntro(buttons),
     '',
     '**How it works**',
     ...(opts.hasTypes
       ? [
-          '1. Choose your app from the menu.',
+          first,
           '2. Pick what kind of ticket it is.',
           '3. Fill in a title and a description, then submit. You will get a private confirmation with your ticket number.',
         ]
       : [
-          '1. Choose your app from the menu.',
+          first,
           '2. Fill in a title and a description. Steps to reproduce, what you expected and what actually happened help a lot.',
           '3. Submit. You will get a private confirmation with your ticket number.',
         ]),
+    ...(buttons ? ['', 'Press **My tickets** any time to see what’s happening with the tickets you’ve sent. Only you can see them.'] : []),
     '',
     'You do not need a GitHub account. Please never include passwords, tokens or other secrets.',
   ].join('\n');
@@ -125,16 +142,21 @@ export function buildPanelMessage(opts: PanelOptions) {
     components: [
       {
         type: ComponentType.ActionRow,
-        components: [
-          {
-            type: ComponentType.StringSelect,
-            custom_id: CustomId.panelSelect,
-            placeholder: 'Choose an app…',
-            min_values: 1,
-            max_values: 1,
-            options,
-          },
-        ],
+        components: buttons
+          ? [
+              { type: ComponentType.Button, style: 1, label: 'Open a ticket', custom_id: CustomId.openTicket },
+              { type: ComponentType.Button, style: 2, label: 'My tickets', custom_id: CustomId.myTickets },
+            ]
+          : [
+              {
+                type: ComponentType.StringSelect,
+                custom_id: CustomId.panelSelect,
+                placeholder: 'Choose an app…',
+                min_values: 1,
+                max_values: 1,
+                options,
+              },
+            ],
       },
     ],
     allowed_mentions: NO_MENTIONS,
@@ -150,12 +172,13 @@ export interface PickerIds {
 const TICKET_PICKER: PickerIds = { select: CustomId.pickerSelect, page: CustomId.pickerPage };
 export const CONTRIBUTOR_PICKER: PickerIds = { select: CustomId.contributorPickerSelect, page: CustomId.contributorPage };
 
+/** The private app menu (Open a ticket, or "More apps…"); Previous and Next only when it has pages. */
 export function buildPickerPage(apps: PanelApp[], requestedPage: number, ids: PickerIds = TICKET_PICKER) {
   const pageCount = Math.max(1, Math.ceil(apps.length / SELECT_MAX));
   const page = Math.min(Math.max(0, requestedPage), pageCount - 1);
   const slice = apps.slice(page * SELECT_MAX, (page + 1) * SELECT_MAX);
   return {
-    content: `Choose the app you need help with (page ${page + 1} of ${pageCount}).`,
+    content: pageCount > 1 ? `Choose the app you need help with (page ${page + 1} of ${pageCount}).` : 'Choose the app you need help with.',
     embeds: [],
     flags: EPHEMERAL,
     components: [
@@ -170,13 +193,15 @@ export function buildPickerPage(apps: PanelApp[], requestedPage: number, ids: Pi
           },
         ],
       },
-      {
-        type: ComponentType.ActionRow,
-        components: [
-          { type: ComponentType.Button, style: 2, label: 'Previous', custom_id: ids.page(page - 1), disabled: page === 0 },
-          { type: ComponentType.Button, style: 2, label: 'Next', custom_id: ids.page(page + 1), disabled: page >= pageCount - 1 },
-        ],
-      },
+      ...(pageCount > 1
+        ? [{
+            type: ComponentType.ActionRow,
+            components: [
+              { type: ComponentType.Button, style: 2, label: 'Previous', custom_id: ids.page(page - 1), disabled: page === 0 },
+              { type: ComponentType.Button, style: 2, label: 'Next', custom_id: ids.page(page + 1), disabled: page >= pageCount - 1 },
+            ],
+          }]
+        : []),
     ],
     allowed_mentions: NO_MENTIONS,
   };

@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
-import { DEFAULT_NOTICE, DEFAULT_PANEL_INTRO, DEFAULT_PANEL_TITLE, MORE_APPS_VALUE, visibilityNotice } from '../../discord/messages.js';
+import { DEFAULT_NOTICE, DEFAULT_PANEL_INTRO, DEFAULT_PANEL_INTRO_BUTTONS, DEFAULT_PANEL_TITLE, defaultPanelIntro, MORE_APPS_VALUE, visibilityNotice } from '../../discord/messages.js';
+import { myTicketsPage, statusWords, type MemberTicket } from '../../domain/my-tickets.js';
 import { formFor } from '../../domain/forms.js';
 import { inspectGuild } from '../../domain/discord-checks.js';
 import { checkPanel, panelPayloadFor, publishPanel, unpublishPanel } from '../../domain/panel.js';
@@ -9,12 +10,12 @@ import { acceptSubmission } from '../../domain/submissions.js';
 import { enabledTicketTypes, getTicketType } from '../../domain/ticket-types.js';
 import { UserFacingError } from '../../domain/types.js';
 import { validateWorkspace, type Check } from '../../domain/validation.js';
-import { updateNotices, updatePanelText } from '../../domain/workspaces.js';
+import { setMyTickets, updateNotices, updatePanelText } from '../../domain/workspaces.js';
 import { html, raw, type SafeHtml } from '../../lib/html.js';
-import { botIdentity, botMessage, discordMd, formPreview, previewCaption, selectPreview } from '../discord-preview.js';
+import { botIdentity, botMessage, discordMd, formPreview, myTicketsPreview, previewCaption, selectPreview } from '../discord-preview.js';
 import { setFlash } from '../session.js';
 import type { Web } from '../server.js';
-import { csrfField, icon, linkBtn, pill, selectWrap, setting, submitBtn, timeAgo, type IconName } from '../ui.js';
+import { csrfField, icon, linkBtn, pill, selectWrap, setting, submitBtn, switchInput, timeAgo, type IconName } from '../ui.js';
 import { toolHeader } from './tool.js';
 import { viewOnlyFooter } from './triage.js';
 
@@ -38,8 +39,8 @@ export function checklist(checks: { status: Check['status']; title: string; deta
 }
 
 /** A labelled text field with a live character counter. */
-export function textField(o: { id: string; name?: string; label: string; value: string; max: number; rows?: number; placeholder?: string; preview?: string; md?: boolean; hint?: SafeHtml | string; defaultValue?: string }): SafeHtml {
-  const attrs = html`id="${o.id}" name="${o.name ?? o.id}" maxlength="${String(o.max)}" ${o.placeholder ? html`placeholder="${o.placeholder}"` : ''} ${o.defaultValue !== undefined ? html`data-default="${o.defaultValue}"` : ''} ${o.preview ? html`data-preview="${o.preview}"` : ''} ${o.md ? raw('data-preview-md') : ''}`;
+export function textField(o: { id: string; name?: string; label: string; value: string; max: number; rows?: number; placeholder?: string; preview?: string; md?: boolean; hint?: SafeHtml | string; defaultValue?: string; attrs?: SafeHtml }): SafeHtml {
+  const attrs = html`id="${o.id}" name="${o.name ?? o.id}" maxlength="${String(o.max)}" ${o.placeholder ? html`placeholder="${o.placeholder}"` : ''} ${o.defaultValue !== undefined ? html`data-default="${o.defaultValue}"` : ''} ${o.preview ? html`data-preview="${o.preview}"` : ''} ${o.md ? raw('data-preview-md') : ''} ${o.attrs ?? ''}`;
   return html`<div class="field"><div class="field-head"><label for="${o.id}">${o.label}</label><span class="counter" data-counter-for="${o.id}">${String(o.value.length)} / ${String(o.max)}</span></div>
     ${o.rows ? html`<textarea ${attrs} rows="${String(o.rows)}">${o.value}</textarea>` : html`<input type="text" class="full" ${attrs} value="${o.value}">`}
     ${o.hint ? html`<div class="hint">${o.hint}</div>` : ''}</div>`;
@@ -59,10 +60,26 @@ function fixFor(m: MemberAccess, base: string, fix: { label: string; href: strin
   return can(m, 'manage') ? fix : undefined;
 }
 
-/** Saved panel text, or null when it matches the built-in default. */
-function cleanText(value: unknown, max: number, fallback: string): string | null {
+/** Saved panel text, or null when it matches a built-in default (the intro has one for the menu and one for the buttons). */
+function cleanText(value: unknown, max: number, fallback: string | string[]): string | null {
   const v = String(value ?? '').replace(/\r\n/g, '\n').trim().slice(0, max);
-  return v && v !== fallback ? v : null;
+  return v && ![fallback].flat().includes(v) ? v : null;
+}
+
+/** Example tickets for the My tickets preview, for the first app (or "Your app"). */
+function exampleTickets(app: { name: string; repo_owner: string; repo_name: string } | undefined): MemberTicket[] {
+  const day = 86_400_000;
+  const now = Date.now();
+  const url = (n: number) => (app ? `https://github.com/${app.repo_owner}/${app.repo_name}/issues/${n}` : null);
+  const t = (n: number, title: string, daysAgo: number, status: MemberTicket['status'], more: Partial<MemberTicket> = {}): MemberTicket => ({
+    ref: `TR-EXAMPLE${n}`, app: app?.name ?? 'Your app', type: null, title, at: new Date(now - daysAgo * day), filedAt: new Date(now - daysAgo * day),
+    status, version: null, releaseAt: null, issue: { number: n, url: url(n) }, sameAs: null, pull: null, closedAt: null, done: status === 'released', ...more,
+  });
+  return [
+    t(128, 'Export crashes on large files', 2, 'working'),
+    t(131, 'Dark mode for the editor', 5, 'open'),
+    t(97, 'Login loop after the update', 23, 'released', { version: 'v1.4' }),
+  ];
 }
 
 export function registerPanelRoutes(app: FastifyInstance, web: Web): void {
@@ -89,12 +106,20 @@ export function registerPanelRoutes(app: FastifyInstance, web: Web): void {
     ]);
     const state = await checkPanel(deps, wid, { live: false });
     const guild = deps.discord && conn && conn.status === 'active' ? await inspectGuild(deps.discord, conn.guild_id) : null;
-    const { payload } = panelPayloadFor(ws, apps, types.length > 0);
-    const options = payload.components[0]!.components[0]!.options;
     const enabledApps = apps.filter((a) => a.enabled);
     const title = ws.panel_title?.trim() || DEFAULT_PANEL_TITLE;
-    const intro = ws.panel_intro?.trim() || DEFAULT_PANEL_INTRO;
-    const rest = payload.embeds[0]!.description.slice(intro.length).replace(/^\n+/, '');
+    const intro = ws.panel_intro?.trim() || defaultPanelIntro(ws.my_tickets);
+    // The preview has the menu and the buttons, so the My tickets switch can show either while it's changed.
+    const layout = (on: boolean) => {
+      const { payload } = panelPayloadFor({ ...ws, my_tickets: on }, apps, types.length > 0);
+      const own = ws.panel_intro?.trim() || defaultPanelIntro(on);
+      const first = payload.components[0]!.components[0]!;
+      return { rest: payload.embeds[0]!.description.slice(own.length).replace(/^\n+/, ''), options: 'options' in first ? first.options : [] };
+    };
+    const menu = layout(false);
+    const buttons = layout(true);
+    const shows = (on: boolean) => html`data-layout="${on ? 'buttons' : 'menu'}" ${ws.my_tickets === on ? '' : raw('hidden')}`;
+    const words = await statusWords(deps, wid);
     const messageLink = panel && conn && state.state === 'published' ? `https://discord.com/channels/${conn.guild_id}/${panel.channel_id}/${panel.message_id}` : null;
     const channelName = conn?.tickets_channel_name ?? null;
 
@@ -140,12 +165,17 @@ export function registerPanelRoutes(app: FastifyInstance, web: Web): void {
             ${setting('Channel', 'Where members open tickets. The bot needs to post there.', channelControl, { for: guild?.ok ? 'channel' : undefined, flat: true })}
           </div>
           <div class="section">
-            <div class="section-h"><div><h3>Content</h3><div class="desc">The heading and introduction members see above the menu.</div></div>
+            <div class="section-h"><div><h3>Content</h3><div class="desc">The heading and introduction at the top of the panel.</div></div>
               ${edit ? html`<button type="button" class="btn ghost sm" data-reset-fields="panel_title panel_intro"><span class="lead">${icon('undo-2', 14)}</span><span class="lbl">Reset to default</span></button>` : ''}</div>
             <div class="fields">
               ${textField({ id: 'panel_title', label: 'Heading', value: title, max: LIMITS.panel_title, placeholder: DEFAULT_PANEL_TITLE, preview: 'pv-title' })}
-              ${textField({ id: 'panel_intro', label: 'Introduction', value: intro, max: LIMITS.panel_intro, rows: 3, placeholder: DEFAULT_PANEL_INTRO, preview: 'pv-intro', md: true, hint: edit ? 'Discord formatting works, for example **bold**.' : undefined })}
+              ${textField({ id: 'panel_intro', label: 'Introduction', value: intro, max: LIMITS.panel_intro, rows: 3, placeholder: defaultPanelIntro(ws.my_tickets), preview: 'pv-intro', md: true, hint: edit ? 'Discord formatting works, for example **bold**.' : undefined, attrs: html`data-default-menu="${DEFAULT_PANEL_INTRO}" data-default-buttons="${DEFAULT_PANEL_INTRO_BUTTONS}"` })}
             </div>
+          </div>
+          <div class="section" id="my-tickets">
+            ${setting('My tickets', html`The panel shows two buttons instead of the app menu: <strong>Open a ticket</strong>, and <strong>My tickets</strong>, where members see the tickets they’ve sent here and what’s happening with each. Each member sees only their own. Publish the panel to show the change.`,
+              html`<input type="hidden" name="my_tickets_sent" value="1">${switchInput({ name: 'my_tickets', id: 'my_tickets', checked: ws.my_tickets, label: 'My tickets', attrs: raw('data-layout-switch') })}`,
+              { switchRow: true, flat: true, for: 'my_tickets' })}
           </div>
           <div class="section" id="notice">
             <div class="section-h"><div><h3>Privacy notice</h3><div class="desc">Shown when members choose a ticket type and at the top of the form, so they know who can read their report. Changes show right away, without publishing the panel.</div></div>
@@ -200,10 +230,20 @@ export function registerPanelRoutes(app: FastifyInstance, web: Web): void {
         <div class="panel-preview">
           ${previewCaption(channelName, messageLink)}
           ${botMessage(bot, html`
-            <div class="dp-embed"><h4 id="pv-title">${title}</h4><p><span id="pv-intro">${discordMd(intro)}</span><br><br>${discordMd(rest)}</p></div>
-            ${selectPreview('Choose an app…')}
-            ${options.length ? html`<div class="dp-options">${options.map((o) => html`<div class="dp-option"><strong>${o.label}</strong>${'description' in o && o.description ? html`<span>${o.description}</span>` : ''}${o.value === MORE_APPS_VALUE ? html`<span>Opens a private, page-by-page list</span>` : ''}</div>`)}</div>` : ''}`, 'Preview of the ticket panel in Discord')}
-          <p class="dp-note">${enabledApps.length ? `The menu lists your ${enabledApps.length} enabled app${enabledApps.length === 1 ? '' : 's'}.${types.length ? ' Members pick a ticket type next.' : ''}` : 'No enabled apps yet, so the menu is empty.'}</p>
+            <div class="dp-embed"><h4 id="pv-title">${title}</h4><p><span id="pv-intro">${discordMd(intro)}</span><br><br><span ${shows(false)}>${discordMd(menu.rest)}</span><span ${shows(true)}>${discordMd(buttons.rest)}</span></p></div>
+            <div ${shows(false)}>
+              ${selectPreview('Choose an app…')}
+              ${menu.options.length ? html`<div class="dp-options">${menu.options.map((o) => html`<div class="dp-option"><strong>${o.label}</strong>${'description' in o && o.description ? html`<span>${o.description}</span>` : ''}${o.value === MORE_APPS_VALUE ? html`<span>Opens a private, page-by-page list</span>` : ''}</div>`)}</div>` : ''}
+            </div>
+            <div class="dp-buttons" ${shows(true)}><span class="dp-button blurple">Open a ticket</span><span class="dp-button grey">My tickets</span></div>`, 'Preview of the ticket panel in Discord')}
+          <p class="dp-note" ${shows(false)}>${enabledApps.length ? `The menu lists your ${enabledApps.length} enabled app${enabledApps.length === 1 ? '' : 's'}.${types.length ? ' Members pick a ticket type next.' : ''}` : 'No enabled apps yet, so the menu is empty.'}</p>
+          <p class="dp-note" ${shows(true)}>${enabledApps.length > 1 ? `Open a ticket shows a private menu of your ${enabledApps.length} enabled apps.` : enabledApps.length ? 'Open a ticket goes straight on: there’s one enabled app.' : 'No enabled apps yet.'}${types.length ? ' Members pick a ticket type next.' : ''}</p>
+          <div ${shows(true)}>
+            ${previewCaption(null, null, 'My tickets · ')}
+            ${myTicketsPreview(bot, myTicketsPage(exampleTickets(sample), 0, words))}
+            <p class="dp-note">An example: each member sees only the tickets they sent here, open ones first, and can pick one to see what happened with it.
+              Statuses use the Known issues board’s words${can(m, 'known-issues.view') ? html`, which you can change on <a href="${b}/bot/known-issues">Known issues</a>` : ''}.</p>
+          </div>
           ${sample ? html`
             ${previewCaption(null, null, types.length ? 'Next steps · ' : 'Form · ')}
             ${types.length ? html`<div class="dp"><p class="dp-modal-title">What kind of ticket is this?</p>
@@ -231,10 +271,16 @@ export function registerPanelRoutes(app: FastifyInstance, web: Web): void {
       if (body.panel_title !== undefined || body.panel_intro !== undefined) {
         const text = {
           panelTitle: body.panel_title !== undefined ? cleanText(body.panel_title, LIMITS.panel_title, DEFAULT_PANEL_TITLE) : ws.panel_title,
-          panelIntro: body.panel_intro !== undefined ? cleanText(body.panel_intro, LIMITS.panel_intro, DEFAULT_PANEL_INTRO) : ws.panel_intro,
+          // Either default stays the default, so it follows the menu or the buttons.
+          panelIntro: body.panel_intro !== undefined ? cleanText(body.panel_intro, LIMITS.panel_intro, [DEFAULT_PANEL_INTRO, DEFAULT_PANEL_INTRO_BUTTONS]) : ws.panel_intro,
         };
         textChanged = text.panelTitle !== ws.panel_title || text.panelIntro !== ws.panel_intro;
         await updatePanelText(deps.db, wid, text);
+      }
+      // My tickets changes the panel itself (buttons instead of the menu), so it's published like the text.
+      if (body.my_tickets_sent !== undefined && (body.my_tickets === '1') !== ws.my_tickets) {
+        await setMyTickets(deps.db, wid, body.my_tickets === '1');
+        textChanged = true;
       }
       // The notice isn't part of the panel message: it's used from the next ticket on.
       let noticeChanged = false;

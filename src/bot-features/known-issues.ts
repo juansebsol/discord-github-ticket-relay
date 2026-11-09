@@ -10,11 +10,11 @@
 import type { Queryable } from '../db/database.js';
 import { DiscordApiError, DiscordErrorCode } from '../discord/client.js';
 import { ComponentType, escapeMarkdown, NO_MENTIONS, truncate } from '../discord/messages.js';
-import { repoReleases, releaseOf } from '../domain/pull-index.js';
+import { repoReleases, releaseOf, type Release } from '../domain/pull-index.js';
 import { getDiscordConnection, listApps } from '../domain/store.js';
 import { UserFacingError, type AppRow, type Deps, type DiscordConnectionRow } from '../domain/types.js';
 import { sha256 } from '../lib/crypto.js';
-import { fixesFor } from '../repo-status/pulls.js';
+import { fixesFor, type IssueFix } from '../repo-status/pulls.js';
 import { mostReported, periodOf, periodStart, type PeriodId } from '../repo-status/reports.js';
 
 /** The board is looked at this often, and edited when what it says changed. */
@@ -208,6 +208,29 @@ export interface Board {
   privateApps: string[];
 }
 
+/**
+ * What's happening with an open issue, or one closed as fixed, from the pull request about it and
+ * the releases (the board and My tickets say it the same way).
+ */
+export function issueStatus(
+  i: { number: number; state: 'open' | 'closed' | null; closedAt: Date | null },
+  fix: IssueFix | undefined,
+  releases: Release[] | null,
+): { status: IssueStatus; version: string | null } {
+  if (i.state === 'closed') {
+    if (fix?.status === 'waiting') return { status: 'coming', version: null };
+    if (fix?.status === 'merged') return fix.release ? { status: 'released', version: fix.release.tag } : { status: 'fixed', version: null };
+    // No merged pull request known: the first release after it was closed (none yet: coming).
+    const release = releases?.length && i.closedAt ? releaseOf(i.closedAt, releases) : undefined;
+    return release ? { status: 'released', version: release.tag } : { status: release === null ? 'coming' : 'fixed', version: null };
+  }
+  if (!fix) return { status: 'open', version: null };
+  // Open: a pull request that only mentions it is work on it; a merged one that closes it is a fix.
+  if (fix.status === 'open' || !fix.pull.closes.includes(i.number)) return { status: 'working', version: null };
+  if (fix.status === 'merged' && fix.release) return { status: 'released', version: fix.release.tag };
+  return { status: 'coming', version: null };
+}
+
 /** The apps the board covers, one per repository (the first in order). */
 export function boardApps(s: KnownIssuesSettings, apps: AppRow[]): { apps: AppRow[]; privateApps: string[] } {
   const chosen = [...apps].sort((a, b) => a.position - b.position).filter((a) => !s.appIds || s.appIds.includes(a.id));
@@ -260,24 +283,9 @@ export async function computeBoard(deps: Pick<Deps, 'db' | 'box'>, workspaceId: 
       const fix = fixes.get(c.number);
       // Closed as not planned or a duplicate: not a known issue.
       if (c.state === 'closed' && (c.reason ?? 'completed') !== 'completed') continue;
-      let status: IssueStatus = 'open';
-      let version: string | null = null;
-      if (c.state === 'closed') {
-        // Fixed ones stay a while, so members see it's fixed and update.
-        if (!o?.pinned && (!c.closedAt || now - c.closedAt.getTime() > s.fixedDays * 86_400_000)) continue;
-        if (fix?.status === 'waiting') status = 'coming';
-        else if (fix?.status === 'merged') [status, version] = fix.release ? ['released', fix.release.tag] : ['fixed', null];
-        else {
-          // No merged pull request known: the first release after it was closed (none yet: coming).
-          const release = releases?.length && c.closedAt ? releaseOf(c.closedAt, releases) : undefined;
-          [status, version] = release ? ['released', release.tag] : release === null ? ['coming', null] : ['fixed', null];
-        }
-      } else if (fix) {
-        // Open: a pull request that only mentions it is work on it; a merged one that closes it is a fix.
-        if (fix.status === 'open' || !fix.pull.closes.includes(c.number)) status = 'working';
-        else if (fix.status === 'merged' && fix.release) [status, version] = ['released', fix.release.tag];
-        else status = 'coming';
-      }
+      // Fixed ones stay a while, so members see it's fixed and update.
+      if (c.state === 'closed' && !o?.pinned && (!c.closedAt || now - c.closedAt.getTime() > s.fixedDays * 86_400_000)) continue;
+      const { status, version } = issueStatus(c, fix, releases);
       issues.push({
         repoId, repo: `${app.repo_owner}/${app.repo_name}`, appId: app.id, appName: app.name, number: c.number,
         title: o?.title?.trim() || c.title, githubTitle: c.title, url: app.repo_private ? null : c.url, githubUrl: c.url, private: app.repo_private,

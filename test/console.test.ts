@@ -26,7 +26,8 @@ describe('console pages', () => {
       const res = await env.server.inject({ method: 'GET', url: w() + p, ...get(ws.owner) });
       expect(res.statusCode, p).toBe(200);
       expect(res.body, p).toContain('<svg');
-      expect(res.body, p).not.toMatch(/[✓✗☰⚙◎★▾🐙💬🎫🏅👥✅⚠️ℹ️]/u);
+      // The console's own UI; Discord previews show what members see, emoji included.
+      expect(res.body.split('<div class="panel-preview">')[0], p).not.toMatch(/[✓✗☰⚙◎★▾🐙💬🎫🏅👥✅⚠️ℹ️]/u);
       expect(res.body, p).not.toMatch(/style="/); // CSP forbids inline styles
     }
   });

@@ -9,6 +9,7 @@ import { getWorkspace } from './workspaces.js';
 export function panelPayloadFor(workspace: WorkspaceRow, apps: AppRow[], hasTypes = false) {
   const payload = buildPanelMessage({
     hasTypes,
+    myTickets: workspace.my_tickets,
     title: workspace.panel_title,
     intro: workspace.panel_intro,
     apps: apps.filter((a) => a.enabled).map((a) => ({ publicId: a.public_id, name: a.name, description: a.description })),

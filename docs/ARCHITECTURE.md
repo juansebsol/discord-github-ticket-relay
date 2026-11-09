@@ -186,6 +186,14 @@ Discord endpoint, OAuth), one or more queue workers, and an optional triage work
   the settings as rows that open to edit. A row's form sends `section`, and the settings route
   changes only that part (switches of other parts keep their value); a form without it saves
   every field.
+- **My tickets** (`src/domain/my-tickets.ts`, `workspaces.my_tickets`, off by default): the panel
+  shows Open a ticket (`tr:open`: the app menu privately, or the next step when there's one app)
+  and My tickets (`tr:mine`) instead of the menu. My tickets reads the member's own tickets (by
+  their Discord id, newest 100) from the database alone: each one's issue, followed to the report
+  it was marked the same as, and its status from `issueStatus` (shared with the known-issues
+  board, in its words), plus a ticket's own: being sent, not filed, needs more information (the
+  needs-info label on its issue), closed. Replies are ephemeral; picking a ticket (`tr:mine:t:N`)
+  checks it's theirs before showing its story.
 - **No Discord gateway.** The bot is driven entirely by Discord's HTTP interactions endpoint and
   REST API. It needs no privileged intents and no slash-command registration.
 - **GitHub App auth.** Short-lived installation tokens are minted from the app's private key
@@ -280,7 +288,7 @@ stable user ID are recorded in the body.
 
 | Table | Purpose |
 |---|---|
-| `workspaces` | Tenant root, with rate-limit, duplicate-window, retention and panel-copy settings |
+| `workspaces` | Tenant root, with rate-limit, duplicate-window, retention and panel-copy settings, the privacy notices and My tickets |
 | `users`, `workspace_members`, `workspace_invites` | Admin identities (Discord), roles, one-time invites |
 | `sessions`, `oauth_states` | Hashed session tokens with CSRF token, and single-use OAuth state |
 | `github_connections` | Installation ID, account and status per workspace |

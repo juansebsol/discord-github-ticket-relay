@@ -20,7 +20,7 @@ and filed by a GitHub App. Reporters never need a GitHub account.
 
 **Discord tickets**
 
-- **Discord-native:** members open tickets from a panel in your server and get a private confirmation with the issue link. No GitHub account needed.
+- **Discord-native:** members open tickets from a panel in your server and get a private confirmation with the issue link. No GitHub account needed. With **My tickets** on (Discord tickets › Panel, off by default), the panel shows two buttons instead of the app menu: **Open a ticket**, and **My tickets**, where each member privately sees the tickets they sent and what's happening with each (in the known-issues board's words: looking into it, being worked on, fixed in v1.4…, plus needs more information and closed), and can pick one to see its story: filed, the same problem as an earlier report, a fix started or finished, released. Private repositories show no links.
 - **Ticket types and forms:** members pick a type (e.g. Bug report, Feature request); each adds its GitHub label and a `[Bug]` title prefix. Each type has its own Discord form with short-answer, paragraph and file-upload questions; answers appear as headings in the issue.
 - **Screenshots:** members attach PNG or JPG images (up to 10 MB per ticket). They're stored on your server with location data removed and embedded in the issue.
 - **Inbox:** every ticket with its status, triage and GitHub link; retry, link an existing issue or close, with search and filters.

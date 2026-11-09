@@ -34,6 +34,8 @@ export interface WorkspaceRow {
   /** Who can read a report and what to leave out, for public and private repositories (null = default). */
   notice_public: string | null;
   notice_private: string | null;
+  /** The panel shows Open a ticket and My tickets buttons instead of the app menu. */
+  my_tickets: boolean;
   created_at: Date;
 }
 

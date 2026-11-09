@@ -2,18 +2,31 @@
 import { escapeHtml, html, raw, type SafeHtml } from '../lib/html.js';
 import { formLead, truncate, visibilityNotice } from '../discord/messages.js';
 import type { FormSection } from '../domain/forms.js';
+import type { myTicketsPage } from '../domain/my-tickets.js';
 import type { Deps } from '../domain/types.js';
 import { icon } from './ui.js';
 
+/** A Discord timestamp (<t:…:R>) as members read it: "3 days ago". Mirrors relativeTime() in app.js. */
+export function relativeTime(seconds: number, now = Date.now()): string {
+  const diff = Math.round(now / 1000 - seconds);
+  const units: [number, string][] = [[31_536_000, 'year'], [2_592_000, 'month'], [86_400, 'day'], [3_600, 'hour'], [60, 'minute']];
+  for (const [size, name] of units) {
+    const n = Math.floor(Math.abs(diff) / size);
+    if (n >= 1) return diff >= 0 ? `${n} ${name}${n === 1 ? '' : 's'} ago` : `in ${n} ${name}${n === 1 ? '' : 's'}`;
+  }
+  return 'just now';
+}
+
 /**
  * Discord-markdown subset for previews: escapes everything first, then renders role mentions
- * (by role name, as Discord does), **bold**, [links](…), #-headings and - lists. Mirrors
- * discordHtml() in app.js.
+ * (by role name, as Discord does), timestamps, **bold**, [links](…), #-headings and - lists.
+ * Mirrors discordHtml() in app.js.
  */
 export function discordMd(text: string, roleNames: Map<string, string> = new Map()): SafeHtml {
   const parts = escapeHtml(text).split('\n').map((line) => {
     const out = line
       .replace(/&lt;@&amp;(\d+)&gt;/g, (_m, id: string) => `<span class="dp-mention">@${escapeHtml(roleNames.get(id) ?? 'unknown-role')}</span>`)
+      .replace(/&lt;t:(\d+)(?::[tTdDfFR])?&gt;/g, (_m, s: string) => `<span class="dp-ts">${relativeTime(Number(s))}</span>`)
       .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
       .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<span class="dp-a">$1</span>');
     const h = /^#{1,3} (.*)$/.exec(out);
@@ -61,6 +74,16 @@ export function previewCaption(channel: string | null, link: string | null, pref
 
 export function selectPreview(placeholder: string): SafeHtml {
   return html`<div class="dp-select"><span>${placeholder}</span>${icon('chevron-down', 16)}</div>`;
+}
+
+/** The My tickets reply as a member sees it, from the same payload the bot sends. */
+export function myTicketsPreview(bot: BotIdentity, payload: ReturnType<typeof myTicketsPage>): SafeHtml {
+  const e = payload.embeds[0]!;
+  const first = payload.components[0]?.components[0];
+  const menu = first && 'placeholder' in first ? first.placeholder : null;
+  return botMessage(bot, html`<div class="dp-embed"><h4>${e.title}</h4><p>${discordMd(e.description)}</p>${'footer' in e && e.footer ? html`<div class="dp-time">${e.footer.text}</div>` : ''}</div>
+    ${menu ? selectPreview(menu) : ''}
+    <div class="dp-ephemeral">${icon('eye', 14)}<span>Only you can see this</span></div>`, 'Preview of My tickets in Discord');
 }
 
 type PreviewApp = { name: string; repoPrivate: boolean; notice?: string };

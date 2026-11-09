@@ -110,6 +110,11 @@ export async function updatePanelText(q: Queryable, workspaceId: string, s: { pa
   await q.query('UPDATE workspaces SET panel_title = $2, panel_intro = $3, updated_at = now_ms() WHERE id = $1', [workspaceId, s.panelTitle, s.panelIntro]);
 }
 
+/** Turns the panel's Open a ticket and My tickets buttons on or off. */
+export async function setMyTickets(q: Queryable, workspaceId: string, on: boolean): Promise<void> {
+  await q.query('UPDATE workspaces SET my_tickets = $2, updated_at = now_ms() WHERE id = $1', [workspaceId, on ? 1 : 0]);
+}
+
 /** The notice of who can read a report, for public and private repositories (null = default text). */
 export async function updateNotices(q: Queryable, workspaceId: string, s: { public: string | null; private: string | null }): Promise<void> {
   await q.query('UPDATE workspaces SET notice_public = $2, notice_private = $3, updated_at = now_ms() WHERE id = $1', [workspaceId, s.public, s.private]);

@@ -701,7 +701,14 @@ dl.props dd .ic { color: var(--muted); }
 .dp-buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
 .dp-buttons .dp-button { margin-top: 0; }
 .dp-button.grey { background: var(--discord-grey-btn); gap: 6px; }
+.dp-button.blurple { background: var(--discord-blurple); }
 .dp-content[hidden], .dp-embed h4[hidden], .dp-buttons[hidden] { display: none; }
+
+/* Discord tickets › Panel: the menu or the buttons (My tickets), and the private My tickets reply. */
+.panel-preview [data-layout][hidden] { display: none; }
+.panel-preview [data-layout] > .dp-cap:first-child, .panel-preview [data-layout] + .dp-cap { margin-top: 16px; }
+.dp-ts { color: var(--discord-muted); }
+.dp-ephemeral { display: flex; align-items: center; gap: 4px; margin-top: 6px; color: var(--discord-muted); font-size: 12px; line-height: 16px; }
 
 /* ---- Page grids ---------------------------------------------------------------------------- */
 
