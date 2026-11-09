@@ -5,6 +5,7 @@
  */
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { refreshBoardSoon, setIssueOverride, getKnownIssuesSettings } from '../../bot-features/known-issues.js';
+import { memberReasonName } from '../../domain/member-actions.js';
 import { can } from '../../domain/permissions.js';
 import { listApps } from '../../domain/store.js';
 import { UserFacingError, type AppRow } from '../../domain/types.js';
@@ -95,7 +96,13 @@ function shortAgo(d: Date, now = Date.now()): string {
 const ASSOCIATION: Record<string, string> = { OWNER: 'Owner', MEMBER: 'Member', COLLABORATOR: 'Collaborator', CONTRIBUTOR: 'Contributor' };
 
 function reasonName(key: string | null): string {
-  return key && isReason(key) ? REASON_DEFAULTS[key].name : 'a reason';
+  return key && isReason(key) ? REASON_DEFAULTS[key].name : memberReasonName(key) ?? 'a reason';
+}
+
+/** Who did it: a console user, or the reporter from My tickets in Discord. */
+function actorName(a: { user_id: string | null; via?: string | null; detail?: ModActionRow['detail'] | null }, names: Map<string, string>): string {
+  if (a.via === 'member') return a.detail?.member || 'The reporter';
+  return a.user_id ? names.get(a.user_id) ?? 'Someone' : 'Someone';
 }
 
 // ---- The list ---------------------------------------------------------------------------------------
@@ -138,7 +145,7 @@ function issueRow(ctx: WorkspaceRequestContext, s: ListState, apps: AppRow[], r:
 
 function closedRow(ctx: WorkspaceRequestContext, s: ListState, apps: AppRow[], r: ClosedRow, names: Map<string, string>, open: boolean): SafeHtml {
   const key = keyOf({ repoId: r.repo_id, number: r.number });
-  const who = r.user_id ? names.get(r.user_id) ?? 'Someone' : 'Someone';
+  const who = actorName(r, names);
   return html`<li class="mod-row${open ? ' open' : ''}">
     <a class="mod-row-a" href="${listHref(ctx, s, { open: key })}" ${open ? raw('aria-current="true"') : ''} data-mod-row>
       <span class="mod-row-l1"><span class="mod-row-t">${r.title || `#${r.number}`}</span><span class="mod-row-age" title="${formatDate(r.at)}">${shortAgo(r.at)}</span></span>
@@ -233,11 +240,12 @@ function githubLine(e: TimelineEvent, labels: { added: string[]; removed: string
 
 /** Done by someone's coding agent (MCP) rather than in the console. */
 function viaTag(a: Pick<ModActionRow, 'via'>): SafeHtml | '' {
+  if (a.via === 'member') return tag('Reporter', { cls: 'subtle', title: 'The person who sent the ticket, from My tickets in Discord' });
   return a.via === 'mcp' ? tag('via MCP', { cls: 'subtle', title: 'Done by their coding agent through MCP' }) : '';
 }
 
 function modLine(a: ModActionRow, names: Map<string, string>): SafeHtml {
-  const who = html`<span class="actor">${a.user_id ? names.get(a.user_id) ?? 'Someone' : 'Someone'}</span>${a.via === 'mcp' ? ' (through MCP)' : ''}`;
+  const who = html`<span class="actor">${actorName(a, names)}</span>${a.via === 'mcp' ? ' (through MCP)' : a.via === 'member' ? ' (the reporter, from Discord)' : ''}`;
   const undone = a.undone_at ? html` <span class="muted">· undone${a.undone_by ? ` by ${names.get(a.undone_by) ?? 'someone'}` : ''}</span>` : '';
   const note = a.note ? html`<div class="extra">Note for the team: ${a.note}</div>` : '';
   switch (a.kind) {
@@ -896,7 +904,7 @@ export function registerModerationRoutes(app: FastifyInstance, web: Web): void {
             const key = keyOf({ repoId: a.repo_id, number: a.number });
             return html`<tr class="${a.undone_at ? 'off' : ''}">
               <td class="nowrap small">${ago(a.at)}</td>
-              <td>${a.user_id ? html`<span class="inline gap-6">${avatar(names.get(a.user_id) ?? '?', 20)}${names.get(a.user_id) ?? 'Someone'}${viaTag(a)}</span>` : html`<span class="muted">Someone</span>`}</td>
+              <td>${a.user_id || a.via === 'member' ? html`<span class="inline gap-6">${avatar(actorName(a, names), 20)}${actorName(a, names)}${viaTag(a)}</span>` : html`<span class="muted">Someone</span>`}</td>
               <td>${modWhat(a, names)}</td>
               <td><div>${manage ? html`<a class="cell-title" href="${areaHref(ctx, 'moderation')}?open=${key}">${a.title || `#${a.number}`}</a>` : html`<span class="cell-title">${a.title || `#${a.number}`}</span>`}</div>
                 <div class="sub"><span class="mono">${repoName(apps, a.repo_id)}#${String(a.number)}</span>${a.sub_ref ? html` · <span class="mono">${a.sub_ref}</span>` : ''}${a.html_url ? html` · <a href="${a.html_url}" target="_blank" rel="noopener noreferrer">GitHub</a>` : ''}</div></td>

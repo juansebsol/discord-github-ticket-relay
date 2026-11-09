@@ -675,6 +675,7 @@ dl.props dd .ic { color: var(--muted); }
 .dp-embed.amber { border-left-color: var(--discord-embed-amber); }
 .dp-embed h4 { color: var(--discord-head); font-size: 15px; line-height: 22px; margin: 0 0 4px; }
 .dp-embed p { margin: 0; font-size: 13px; line-height: 19px; }
+.dp-code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85em; background: var(--discord-select); border-radius: 3px; padding: 1px 4px; }
 .dp-h { display: block; color: var(--discord-head); font-weight: 600; font-size: 14px; margin-top: 6px; }
 .dp-mention { background: var(--discord-mention-bg); color: var(--discord-mention); border-radius: 3px; padding: 0 2px; font-weight: 500; }
 .dp-select { margin-top: 8px; background: var(--discord-select); color: var(--discord-muted); border-radius: 4px; height: 40px; padding: 0 12px; display: flex; align-items: center; justify-content: space-between; font-size: 14px; }
@@ -706,6 +707,13 @@ dl.props dd .ic { color: var(--muted); }
 
 /* Discord tickets › Panel: the menu or the buttons (My tickets), and the private My tickets reply. */
 .panel-preview [data-layout][hidden] { display: none; }
+/* Discord tickets › Panel › My tickets: what members can do on an open ticket, under the switch. */
+.member-actions { margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--border); }
+.member-actions .section-h h4 { font-size: 14px; line-height: 20px; }
+.member-action + .member-action { margin-top: 20px; }
+.member-action > .fields { margin-top: 12px; padding-left: 14px; border-left: 2px solid var(--border); }
+.member-action code { font-size: 12px; }
+@media (max-width: 640px) { .member-actions .section-h { flex-wrap: wrap; } .member-actions .section-h > div { flex: 1 1 100%; } }
 .panel-preview [data-layout] > .dp-cap:first-child, .panel-preview [data-layout] + .dp-cap { margin-top: 16px; }
 .dp-ts { color: var(--discord-muted); }
 .dp-ephemeral { display: flex; align-items: center; gap: 4px; margin-top: 6px; color: var(--discord-muted); font-size: 12px; line-height: 16px; }

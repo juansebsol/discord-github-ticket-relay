@@ -36,6 +36,10 @@ export const CustomId = {
   myTickets: 'tr:mine',
   myTicketsPage: (page: number) => `tr:mine:p:${page}`,
   myTicketsPick: (page: number) => `tr:mine:t:${page}`,
+  /** One of their tickets (v: its page; d: add details, f: add screenshots, c: close, cw/cn: closed because it works now / isn't needed). */
+  myTicket: (action: 'v' | 'd' | 'f' | 'c' | 'cw' | 'cn', ref: string, page: number) => `tr:mine:${action}:${ref}:${page}`,
+  detailsInput: 'details',
+  screenshotsInput: 'screenshots',
   titleInput: 'title',
   descriptionInput: 'description',
   // Contributor panel (separate prefix so it never collides with the ticket flow).

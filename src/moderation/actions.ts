@@ -50,13 +50,14 @@ export interface ModActionRow {
   duplicate_of: number | null;
   note: string | null;
   comment_id: number | null;
-  detail: { labels?: string[]; added?: string[]; removed?: string[]; reply?: string; closedAs?: CloseReason; commented?: boolean };
+  /** member: the reporter's Discord name, when they closed it themselves. */
+  detail: { labels?: string[]; added?: string[]; removed?: string[]; reply?: string; closedAs?: CloseReason; commented?: boolean; member?: string };
   job_id: string | null;
   user_id: string | null;
   at: Date;
   undone_at: Date | null;
   undone_by: string | null;
-  /** 'mcp': done by a coding agent for user_id. */
+  /** 'mcp': done by a coding agent for user_id. 'member': the reporter closed it from My tickets in Discord. */
   via: string | null;
 }
 
@@ -110,12 +111,12 @@ async function saveState(db: Queryable, t: ModTarget, o: { state: 'open' | 'clos
   }
 }
 
-async function record(db: Queryable, t: ModTarget, a: Partial<Omit<ModActionRow, 'id' | 'workspace_id' | 'repo_id' | 'number' | 'submission_id' | 'at' | 'via'>> & { kind: ModActionRow['kind']; title: string }): Promise<string> {
+async function record(db: Queryable, t: ModTarget, a: Partial<Omit<ModActionRow, 'id' | 'workspace_id' | 'repo_id' | 'number' | 'submission_id' | 'at'>> & { kind: ModActionRow['kind']; title: string }): Promise<string> {
   const id = randomUUID();
   await db.query(
     `INSERT INTO mod_actions (id, workspace_id, kind, repo_id, number, submission_id, title, reason, duplicate_of, note, comment_id, detail, job_id, user_id, via)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
-    [id, t.workspaceId, a.kind, t.repoId, t.number, t.ticket?.id ?? null, a.title.slice(0, 300), a.reason ?? null, a.duplicate_of ?? null, a.note ?? null, a.comment_id ?? null, a.detail ?? {}, a.job_id ?? null, a.user_id ?? null, actionVia.getStore() ?? null],
+    [id, t.workspaceId, a.kind, t.repoId, t.number, t.ticket?.id ?? null, a.title.slice(0, 300), a.reason ?? null, a.duplicate_of ?? null, a.note ?? null, a.comment_id ?? null, a.detail ?? {}, a.job_id ?? null, a.user_id ?? null, a.via ?? actionVia.getStore() ?? null],
   );
   return id;
 }
@@ -194,6 +195,30 @@ export async function closeOne(deps: Deps, t: ModTarget, settings: ModerationSet
     if (reason.key === 'spam') await cleanUpSpam(deps, t.ticket).catch((err) => deps.log.warn({ submission: t.ticket!.ref, err: (err as Error).message }, 'could not delete spam files'));
   }
   return { status: 'closed', closedAs, commented: Boolean(text), actionId };
+}
+
+/**
+ * The reporter closes their own ticket from My tickets in Discord: the admins' comment for their
+ * reason (when there is one), then closing it on GitHub. It's in the Mod log as theirs, and
+ * moderators can undo it like their own closes.
+ */
+export async function memberCloseOne(deps: Deps, t: ModTarget, o: { reason: string; github: CloseReason; comment: string; member: string }): Promise<CloseResult> {
+  const live = await liveIssue(deps, t);
+  if ('status' in live) return live;
+  if (live.state === 'closed') {
+    await saveState(deps.db, t, { state: 'closed', reason: live.stateReason, labels: live.labels });
+    return { status: 'skipped', note: 'It was already closed' };
+  }
+  const gh = deps.github!;
+  const commentId = o.comment ? await gh.createComment(t.installationId, t.owner, t.repo, t.number, o.comment) : null;
+  const closedAs = await gh.closeIssue(t.installationId, t.owner, t.repo, t.number, o.github);
+  await saveState(deps.db, t, { state: 'closed', reason: closedAs, labels: live.labels });
+  await clearSuggestions(deps.db, t);
+  const actionId = await record(deps.db, t, {
+    kind: 'close', title: live.title, reason: o.reason, comment_id: commentId,
+    detail: { closedAs, commented: Boolean(o.comment), member: o.member.slice(0, 100) }, via: 'member',
+  });
+  return { status: 'closed', closedAs, commented: Boolean(o.comment), actionId };
 }
 
 export async function getAction(db: Queryable, workspaceId: string, id: string): Promise<ModActionRow | null> {

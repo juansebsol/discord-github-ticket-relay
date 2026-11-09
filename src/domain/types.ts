@@ -36,6 +36,8 @@ export interface WorkspaceRow {
   notice_private: string | null;
   /** The panel shows Open a ticket and My tickets buttons instead of the app menu. */
   my_tickets: boolean;
+  /** What members can do on their own tickets in My tickets, and the comments posted for it (see member-actions.ts). */
+  member_actions: unknown;
   created_at: Date;
 }
 

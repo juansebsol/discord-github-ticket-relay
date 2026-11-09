@@ -115,6 +115,11 @@ export async function setMyTickets(q: Queryable, workspaceId: string, on: boolea
   await q.query('UPDATE workspaces SET my_tickets = $2, updated_at = now_ms() WHERE id = $1', [workspaceId, on ? 1 : 0]);
 }
 
+/** What members can do on their own tickets, and the comments posted for it (stored as given; read with member-actions.ts). */
+export async function setMemberActions(q: Queryable, workspaceId: string, value: unknown): Promise<void> {
+  await q.query('UPDATE workspaces SET member_actions = $2, updated_at = now_ms() WHERE id = $1', [workspaceId, JSON.stringify(value)]);
+}
+
 /** The notice of who can read a report, for public and private repositories (null = default text). */
 export async function updateNotices(q: Queryable, workspaceId: string, s: { public: string | null; private: string | null }): Promise<void> {
   await q.query('UPDATE workspaces SET notice_public = $2, notice_private = $3, updated_at = now_ms() WHERE id = $1', [workspaceId, s.public, s.private]);

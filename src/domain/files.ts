@@ -335,9 +335,12 @@ export async function fileCounts(q: Queryable, submissionId: string): Promise<{ 
   return { stored: files.filter((f) => f.status !== 'failed').length, failed: files.filter((f) => f.status === 'failed').length };
 }
 
-/** Records the files a member attached when the ticket is accepted (downloaded when it's filed). */
-export async function recordIncomingFiles(q: Queryable, box: SecretBox, sub: SubmissionRow, files: IncomingFile[]): Promise<void> {
-  let total = 0;
+/**
+ * Records the files a member attached when the ticket is accepted (downloaded when it's filed), or
+ * added later from My tickets (`used`: what the ticket's member files take already).
+ */
+export async function recordIncomingFiles(q: Queryable, box: SecretBox, sub: SubmissionRow, files: IncomingFile[], used = 0): Promise<void> {
+  let total = used;
   for (const f of files) {
     const type = (f.contentType ?? '').toLowerCase();
     const video = type.startsWith('video/');
@@ -397,7 +400,7 @@ async function saveResult(q: Queryable, id: string, r: StoreResult): Promise<voi
  * small). Runs first when a ticket is filed, before anything involving GitHub. Never throws:
  * failures are recorded per file.
  */
-export async function storePendingFiles(deps: Deps, sub: SubmissionRow): Promise<void> {
+export async function storePendingFiles(deps: Deps, sub: SubmissionRow, o: { event?: boolean } = {}): Promise<void> {
   const { rows } = await deps.db.query<TicketFile>(`SELECT * FROM ticket_files WHERE submission_id = $1 AND status = 'pending' ORDER BY created_at, rowid`, [sub.id]);
   if (!rows.length) return;
   let stored = 0;
@@ -426,7 +429,8 @@ export async function storePendingFiles(deps: Deps, sub: SubmissionRow): Promise
     await saveResult(deps.db, f.id, result);
     if (result.ok) stored++;
   }
-  await addEvent(deps.db, sub.id, 'files_stored', { stored, failed: rows.length - stored });
+  // Files a member adds later from My tickets get their own event (member-actions.ts).
+  if (o.event !== false) await addEvent(deps.db, sub.id, 'files_stored', { stored, failed: rows.length - stored });
 }
 
 /** Adds a file from the console (people with Edit on the Inbox). */

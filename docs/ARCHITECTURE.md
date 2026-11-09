@@ -194,6 +194,21 @@ Discord endpoint, OAuth), one or more queue workers, and an optional triage work
   board, in its words), plus a ticket's own: being sent, not filed, needs more information (the
   needs-info label on its issue), closed. Replies are ephemeral; picking a ticket (`tr:mine:t:N`)
   checks it's theirs before showing its story.
+- **Member actions** (`src/domain/member-actions.ts`, `src/discord/my-tickets.ts`,
+  `workspaces.member_actions` JSON, each off by default): on a ticket that's theirs and open on
+  GitHub, members can add details (`tr:mine:d:REF:PAGE`, a modal; posted as a comment through the
+  admins' template, which must keep `{details}`), add screenshots (`tr:mine:f:…`, a file-upload
+  modal; saved like the ones sent with the ticket, rewritten into the issue's Attachments section,
+  with an optional comment) or close it (`tr:mine:c:…`, then `cw` "It works now", closed as
+  completed, or `cn` "I don't need it anymore", not planned; an optional comment each; not offered
+  when other issues are marked the same as theirs, since those follow its status). A close is a
+  `mod_actions` row with `via = 'member'` and the reporter's name in `detail.member`, so the Mod log
+  shows it and moderators can undo it. Every action rechecks the ticket is theirs and still open,
+  answers at once ("Adding your details…") and edits the reply when GitHub has answered; details
+  and screenshots are limited to 5 an hour per member, and the same details twice post once. What
+  they did is a `member_*` submission event, which their ticket's story shows and the console's
+  ticket activity names them for. Everything posted on GitHub is admin-written text, and no new
+  GitHub permission is needed.
 - **No Discord gateway.** The bot is driven entirely by Discord's HTTP interactions endpoint and
   REST API. It needs no privileged intents and no slash-command registration.
 - **GitHub App auth.** Short-lived installation tokens are minted from the app's private key
@@ -288,7 +303,7 @@ stable user ID are recorded in the body.
 
 | Table | Purpose |
 |---|---|
-| `workspaces` | Tenant root, with rate-limit, duplicate-window, retention and panel-copy settings, the privacy notices and My tickets |
+| `workspaces` | Tenant root, with rate-limit, duplicate-window, retention and panel-copy settings, the privacy notices, My tickets and what members can do on their tickets |
 | `users`, `workspace_members`, `workspace_invites` | Admin identities (Discord), roles, one-time invites |
 | `sessions`, `oauth_states` | Hashed session tokens with CSRF token, and single-use OAuth state |
 | `github_connections` | Installation ID, account and status per workspace |

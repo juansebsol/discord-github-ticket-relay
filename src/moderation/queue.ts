@@ -262,6 +262,9 @@ export interface ClosedRow {
   reason: string | null;
   duplicate_of: number | null;
   user_id: string | null;
+  /** 'member': the reporter closed it from My tickets (detail.member is their name). */
+  via: string | null;
+  detail: { member?: string } | null;
   at: Date;
   sub_ref: string | null;
   html_url: string | null;
@@ -272,7 +275,7 @@ export async function closedRows(db: Queryable, scope: QueueScope, o: { limit: n
   const where = closedWhere(scope, params, now);
   params.push(o.limit, o.offset ?? 0);
   const { rows } = await db.query<ClosedRow>(
-    `SELECT m.id, m.repo_id, m.number, m.title, m.reason, m.duplicate_of, m.user_id, m.at, s.ref AS sub_ref, i.html_url
+    `SELECT m.id, m.repo_id, m.number, m.title, m.reason, m.duplicate_of, m.user_id, m.via, m.detail, m.at, s.ref AS sub_ref, i.html_url
      FROM mod_actions m LEFT JOIN submissions s ON s.id = m.submission_id LEFT JOIN issue_index i ON i.repo_id = m.repo_id AND i.number = m.number
      WHERE ${where} ORDER BY m.at DESC LIMIT $${params.length - 1} OFFSET $${params.length}`,
     params,

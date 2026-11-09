@@ -193,7 +193,8 @@ export async function loadDetail(
   if (ticket) history.push({ kind: 'filed', at: ticket.created_at, reporter: ticket.reporter_display_name, username: ticket.reporter_username, channel });
   else history.push({ kind: 'opened', at: issue?.createdAt ?? indexed?.created_at ?? new Date(0), author: issue?.author ?? indexed?.author ?? null });
   if (ticket) {
-    for (const e of await listEvents(db, ticket.id)) if (e.kind !== 'accepted' && !e.kind.startsWith('mod_')) history.push({ kind: 'event', at: e.at, event: e });
+    // A moderator's or the reporter's close shows as the action, and details they added as GitHub's comment.
+    for (const e of await listEvents(db, ticket.id)) if (e.kind !== 'accepted' && !e.kind.startsWith('mod_') && e.kind !== 'member_closed' && e.kind !== 'member_details') history.push({ kind: 'event', at: e.at, event: e });
   } else if (triageRow && 'id' in triageRow) {
     const { rows } = await db.query<{ at: Date; kind: string; detail: Record<string, unknown> }>('SELECT at, kind, detail FROM issue_triage_events WHERE triage_id = $1 ORDER BY id', [triageRow.id]);
     for (const e of rows) history.push({ kind: 'event', at: e.at, event: e });

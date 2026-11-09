@@ -5,10 +5,10 @@ import { enabledTicketTypes, getTicketTypeByPublicId, type TicketType } from '..
 import { getAppByPublicId, getDiscordConnectionByGuild, getGitHubConnection, listApps } from '../domain/store.js';
 import { answerMax, filesId, formFor, MAX_FILES_LIMIT, questionId } from '../domain/forms.js';
 import { acceptSubmission, type IncomingFile, type TicketAnswer } from '../domain/submissions.js';
-import { memberTickets, myTicketDetail, myTicketsPage, statusWords } from '../domain/my-tickets.js';
 import type { AppRow, Deps, WorkspaceRow } from '../domain/types.js';
 import { getWorkspace } from '../domain/workspaces.js';
 import * as m from './messages.js';
+import { handleMyTickets } from './my-tickets.js';
 
 export const InteractionType = { Ping: 1, ApplicationCommand: 2, MessageComponent: 3, Autocomplete: 4, ModalSubmit: 5 } as const;
 export const ResponseType = { Pong: 1, ChannelMessage: 4, DeferredChannelMessage: 5, DeferredUpdate: 6, UpdateMessage: 7, Modal: 9 } as const;
@@ -143,6 +143,9 @@ export async function handleInteraction(deps: Deps, processor: Processor, i: Int
     return notice('Out of date', 'This button is no longer active. Please use the current ticket panel.');
   }
 
+  // ---- My tickets: details or screenshots added to a ticket -----------------------------------
+  if (customId.startsWith('tr:mine:')) return handleMyTickets(deps, i, workspace, customId);
+
   // ---- Ticket form submitted ----------------------------------------------------------------
   const match = /^tr:form:([0-9A-Z]{10}):(\d+)(?::([0-9A-Z]{8}))?$/.exec(customId);
   if (!match) return notice('Out of date', 'This form is no longer active. Please use the current ticket panel.');
@@ -252,25 +255,6 @@ async function startTicket(deps: Deps, workspace: WorkspaceRow, app: AppRow, o: 
   if (!types.length) return { response: { type: ResponseType.Modal, data: m.buildTicketModal(ticketApp(app, workspace)) } };
   const { flags, ...picker } = m.buildTypePicker(ticketApp(app, workspace), types.map(toFormTypeOption));
   return { response: o.update ? { type: ResponseType.UpdateMessage, data: picker } : { type: ResponseType.ChannelMessage, data: { ...picker, flags } } };
-}
-
-/** My tickets: the member's own tickets here, a page at a time, and one ticket's story. */
-async function handleMyTickets(deps: Deps, i: Interaction, workspace: WorkspaceRow, customId: string): Promise<InteractionResult> {
-  if (!workspace.my_tickets) return notice('Not available', 'My tickets is turned off on this server. The panel may be out of date; please ask a server admin.');
-  const [tickets, words] = await Promise.all([memberTickets(deps, workspace.id, i.member!.user.id), statusWords(deps, workspace.id)]);
-  const update = (data: { flags?: number }) => {
-    const { flags: _flags, ...rest } = data;
-    return { response: { type: ResponseType.UpdateMessage, data: rest } };
-  };
-  const pageMatch = /^tr:mine:p:(\d+)$/.exec(customId);
-  if (pageMatch) return update(myTicketsPage(tickets, Number(pageMatch[1]), words));
-  const pickMatch = /^tr:mine:t:(\d+)$/.exec(customId);
-  if (pickMatch) {
-    // Only one of their own: anything else shows the list again.
-    const ticket = tickets.find((t) => t.ref === i.data?.values?.[0]);
-    return update(ticket ? myTicketDetail(ticket, Number(pickMatch[1]), words) : myTicketsPage(tickets, Number(pickMatch[1]), words));
-  }
-  return { response: { type: ResponseType.ChannelMessage, data: myTicketsPage(tickets, 0, words) } };
 }
 
 /** The app for the type picker and the form, with the workspace's notice for its repository. */

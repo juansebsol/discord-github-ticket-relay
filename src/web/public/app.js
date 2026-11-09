@@ -870,6 +870,20 @@
     });
   });
 
+  // Parts shown while a switch is on, anywhere on the page: data-follows names the switch's id
+  // (Discord tickets › Panel: what members can do on a ticket, its comments and its preview's buttons).
+  var followers = $$('[data-follows]');
+  if (followers.length) {
+    var syncFollowers = function () {
+      followers.forEach(function (el) {
+        var sw = document.getElementById(el.getAttribute('data-follows'));
+        if (sw) el.hidden = !sw.checked;
+      });
+    };
+    document.addEventListener('change', function (e) { if (e.target && e.target.type === 'checkbox') syncFollowers(); });
+    syncFollowers();
+  }
+
   // "Reset to default" puts each field's default (its placeholder) back.
   document.addEventListener('click', function (e) {
     var b = e.target.closest('[data-reset-fields]');

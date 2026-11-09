@@ -12,6 +12,7 @@ import { actionEffects, actionEffectsShort, actionTitle, priorityTag } from '../
 import { getTriageSettings, type Priority } from '../../triage/settings.js';
 import { listTicketTypes } from '../../domain/ticket-types.js';
 import { listTicketFiles } from '../../domain/files.js';
+import { memberReasonName } from '../../domain/member-actions.js';
 import { filesCard } from './files.js';
 import { UserFacingError, type SubmissionRow, type SubmissionStatus } from '../../domain/types.js';
 import { updateTicketLimits, userNames } from '../../domain/workspaces.js';
@@ -242,6 +243,12 @@ export function eventView(e: EventRow, s: EventSubject, names: Map<string, strin
     }
     case 'triage_dismissed':
       return { actor: by, text: html`<span class="actor">${by}</span> dismissed the triage suggestion: ${(d.actions as string[] | undefined)?.join(', ') ?? ''}` };
+    case 'member_details':
+      return { actor: s.reporter_display_name, text: html`<span class="actor">${s.reporter_display_name}</span> added details from My tickets in Discord` };
+    case 'member_files':
+      return { actor: s.reporter_display_name, text: html`<span class="actor">${s.reporter_display_name}</span> added ${plural(Number(d.count ?? 1), 'screenshot')} from My tickets in Discord` };
+    case 'member_closed':
+      return { actor: s.reporter_display_name, text: html`<span class="actor">${s.reporter_display_name}</span> closed it from My tickets in Discord: ${memberReasonName(`member:${String(d.why ?? 'works')}`) ?? 'closed'}` };
     case 'mod_closed':
       return { actor: by, text: html`<span class="actor">${by}</span> closed it on GitHub: ${typeof d.reason === 'string' ? d.reason : 'closed'}${typeof d.duplicate_of === 'number' ? ` of #${d.duplicate_of}` : ''}` };
     case 'mod_reopened':

@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { DEFAULT_NOTICE, DEFAULT_PANEL_INTRO, DEFAULT_PANEL_INTRO_BUTTONS, DEFAULT_PANEL_TITLE, defaultPanelIntro, MORE_APPS_VALUE, visibilityNotice } from '../../discord/messages.js';
-import { myTicketsPage, statusWords, type MemberTicket } from '../../domain/my-tickets.js';
+import { DEFAULT_MEMBER_TEXT, MAX_NEW_FILES, MEMBER_CLOSE, MEMBER_LIMITS, MEMBER_TEXT_KEYS, memberActions, memberActionsToStore, type MemberTextKey } from '../../domain/member-actions.js';
+import { myTicketDetail, myTicketsPage, statusWords, type MemberTicket } from '../../domain/my-tickets.js';
 import { formFor } from '../../domain/forms.js';
 import { inspectGuild } from '../../domain/discord-checks.js';
 import { checkPanel, panelPayloadFor, publishPanel, unpublishPanel } from '../../domain/panel.js';
@@ -10,9 +11,9 @@ import { acceptSubmission } from '../../domain/submissions.js';
 import { enabledTicketTypes, getTicketType } from '../../domain/ticket-types.js';
 import { UserFacingError } from '../../domain/types.js';
 import { validateWorkspace, type Check } from '../../domain/validation.js';
-import { setMyTickets, updateNotices, updatePanelText } from '../../domain/workspaces.js';
+import { setMemberActions, setMyTickets, updateNotices, updatePanelText } from '../../domain/workspaces.js';
 import { html, raw, type SafeHtml } from '../../lib/html.js';
-import { botIdentity, botMessage, discordMd, formPreview, myTicketsPreview, previewCaption, selectPreview } from '../discord-preview.js';
+import { botIdentity, botMessage, discordMd, formPreview, myTicketPreview, myTicketsPreview, previewCaption, selectPreview } from '../discord-preview.js';
 import { setFlash } from '../session.js';
 import type { Web } from '../server.js';
 import { csrfField, icon, linkBtn, pill, selectWrap, setting, submitBtn, switchInput, timeAgo, type IconName } from '../ui.js';
@@ -73,10 +74,11 @@ function exampleTickets(app: { name: string; repo_owner: string; repo_name: stri
   const url = (n: number) => (app ? `https://github.com/${app.repo_owner}/${app.repo_name}/issues/${n}` : null);
   const t = (n: number, title: string, daysAgo: number, status: MemberTicket['status'], more: Partial<MemberTicket> = {}): MemberTicket => ({
     ref: `TR-EXAMPLE${n}`, app: app?.name ?? 'Your app', type: null, title, at: new Date(now - daysAgo * day), filedAt: new Date(now - daysAgo * day),
-    status, version: null, releaseAt: null, issue: { number: n, url: url(n) }, sameAs: null, pull: null, closedAt: null, done: status === 'released', ...more,
+    status, version: null, releaseAt: null, issue: { number: n, url: url(n) }, sameAs: null, pull: null, closedAt: null, done: status === 'released',
+    repoPrivate: false, issueOpen: status !== 'released', shared: false, updates: [], ...more,
   });
   return [
-    t(128, 'Export crashes on large files', 2, 'working'),
+    t(128, 'Export crashes on large files', 2, 'working', { updates: [{ kind: 'details', at: new Date(now - day) }] }),
     t(131, 'Dark mode for the editor', 5, 'open'),
     t(97, 'Login loop after the update', 23, 'released', { version: 'v1.4' }),
   ];
@@ -160,6 +162,24 @@ export function registerPanelRoutes(app: FastifyInstance, web: Web): void {
     const sampleNotice = sample ? visibilityNotice(sample.repo_private, ws) : '';
     const noticePreview = (repoPrivate: boolean) => (sample?.repo_private === repoPrivate ? 'pv-notice pv-notice-form' : undefined);
 
+    // What members can do on an open ticket: a switch each, and the comments it posts when it's on.
+    const actions = memberActions(ws);
+    const commentField = (key: MemberTextKey, label: string, hint?: SafeHtml | string) => textField({
+      id: `member_text_${key}`, label, value: actions.text[key], max: MEMBER_LIMITS.comment, rows: key === 'details' ? 3 : 2,
+      placeholder: key === 'details' ? DEFAULT_MEMBER_TEXT.details : 'No comment', defaultValue: DEFAULT_MEMBER_TEXT[key], hint,
+    });
+    const memberAction = (key: 'details' | 'files' | 'close', label: string, desc: SafeHtml | string, on: boolean, fields: SafeHtml[]) => html`<div class="member-action">
+      ${setting(label, desc, switchInput({ name: `member_${key}`, id: `member_${key}`, checked: on, label }), { switchRow: true, flat: true, for: `member_${key}` })}
+      <div class="fields" data-follows="member_${key}" ${on ? '' : raw('hidden')}>${fields}</div>
+    </div>`;
+    // The example ticket's buttons follow their switches while they're changed.
+    const follows = (b: { custom_id?: string }) => {
+      const key = /^tr:mine:([dfc]):/.exec(b.custom_id ?? '')?.[1];
+      const name = key === 'd' ? 'details' : key === 'f' ? 'files' : key === 'c' ? 'close' : null;
+      return name ? html`data-follows="member_${name}" ${actions[name] ? '' : raw('hidden')}` : '';
+    };
+    const examples = exampleTickets(sample);
+
     const sections = html`
           <div class="section" id="channel">
             ${setting('Channel', 'Where members open tickets. The bot needs to post there.', channelControl, { for: guild?.ok ? 'channel' : undefined, flat: true })}
@@ -176,6 +196,17 @@ export function registerPanelRoutes(app: FastifyInstance, web: Web): void {
             ${setting('My tickets', html`The panel shows two buttons instead of the app menu: <strong>Open a ticket</strong>, and <strong>My tickets</strong>, where members see the tickets they’ve sent here and what’s happening with each. Each member sees only their own. Publish the panel to show the change.`,
               html`<input type="hidden" name="my_tickets_sent" value="1">${switchInput({ name: 'my_tickets', id: 'my_tickets', checked: ws.my_tickets, label: 'My tickets', attrs: raw('data-layout-switch') })}`,
               { switchRow: true, flat: true, for: 'my_tickets' })}
+            <div class="member-actions" data-follows="my_tickets" ${ws.my_tickets ? '' : raw('hidden')}>
+              <input type="hidden" name="member_actions_sent" value="1">
+              <div class="section-h"><div><h4>On each open ticket</h4><div class="desc">Buttons members can use on one of their tickets while it’s open on GitHub. Changes show right away, without publishing the panel.</div></div>
+                ${edit ? html`<button type="button" class="btn ghost sm" data-reset-fields="${MEMBER_TEXT_KEYS.map((k) => `member_text_${k}`).join(' ')}"><span class="lead">${icon('undo-2', 14)}</span><span class="lbl">Reset comments</span></button>` : ''}</div>
+              ${memberAction('details', 'Add details', html`Members write more about the problem. It’s posted on the issue as a comment, inside your text below.`, actions.details,
+                [commentField('details', 'Comment on GitHub', html`<code>{details}</code> is what they wrote and has to stay in. <code>{app}</code> is the app’s name.`)])}
+              ${memberAction('files', 'Add screenshots', `Up to ${MAX_NEW_FILES} PNG or JPG images at a time, added to the issue’s Attachments section. A ticket’s files stay within 10 MB.`, actions.files,
+                [commentField('files', 'Comment on GitHub', html`Lets the team know. <code>{screenshots}</code> is “2 screenshots”. Leave it empty to post no comment.`)])}
+              ${memberAction('close', 'Close their ticket', `Members choose “${MEMBER_CLOSE.works.label}” (closed as completed) or “${MEMBER_CLOSE.notNeeded.label}” (closed as not planned). It’s in the Mod log as theirs, where moderators can undo it for 15 minutes. A ticket other reports are marked the same as is left for the team to close.`, actions.close,
+                [commentField('works', `Comment for “${MEMBER_CLOSE.works.label}”`), commentField('notNeeded', `Comment for “${MEMBER_CLOSE.notNeeded.label}”`, 'Leave one empty to close without a comment.')])}
+            </div>
           </div>
           <div class="section" id="notice">
             <div class="section-h"><div><h3>Privacy notice</h3><div class="desc">Shown when members choose a ticket type and at the top of the form, so they know who can read their report. Changes show right away, without publishing the panel.</div></div>
@@ -240,9 +271,12 @@ export function registerPanelRoutes(app: FastifyInstance, web: Web): void {
           <p class="dp-note" ${shows(true)}>${enabledApps.length > 1 ? `Open a ticket shows a private menu of your ${enabledApps.length} enabled apps.` : enabledApps.length ? 'Open a ticket goes straight on: there’s one enabled app.' : 'No enabled apps yet.'}${types.length ? ' Members pick a ticket type next.' : ''}</p>
           <div ${shows(true)}>
             ${previewCaption(null, null, 'My tickets · ')}
-            ${myTicketsPreview(bot, myTicketsPage(exampleTickets(sample), 0, words))}
+            ${myTicketsPreview(bot, myTicketsPage(examples, 0, words))}
             <p class="dp-note">An example: each member sees only the tickets they sent here, open ones first, and can pick one to see what happened with it.
               Statuses use the Known issues board’s words${can(m, 'known-issues.view') ? html`, which you can change on <a href="${b}/bot/known-issues">Known issues</a>` : ''}.</p>
+            ${previewCaption(null, null, 'A ticket’s page · ')}
+            ${myTicketPreview(bot, myTicketDetail(examples[0]!, 0, words, { actions: { details: true, files: true, close: true } }), follows)}
+            <p class="dp-note">The buttons under it are the ones turned on above. They show while the ticket is open on GitHub.</p>
           </div>
           ${sample ? html`
             ${previewCaption(null, null, types.length ? 'Next steps · ' : 'Form · ')}
@@ -267,6 +301,14 @@ export function registerPanelRoutes(app: FastifyInstance, web: Web): void {
     const wid = ctx.workspace.id;
     const ws = ctx.workspace;
     try {
+      // Checked before anything is saved: the details comment has to keep {details}.
+      const current = memberActions(ws);
+      const nextActions = body.member_actions_sent !== undefined
+        ? memberActionsToStore({
+            details: body.member_details === '1', files: body.member_files === '1', close: body.member_close === '1',
+            text: Object.fromEntries(MEMBER_TEXT_KEYS.map((k) => [k, body[`member_text_${k}`]]).filter(([, v]) => v !== undefined)),
+          }, current)
+        : null;
       let textChanged = false;
       if (body.panel_title !== undefined || body.panel_intro !== undefined) {
         const text = {
@@ -292,6 +334,12 @@ export function registerPanelRoutes(app: FastifyInstance, web: Web): void {
         noticeChanged = notices.public !== ws.notice_public || notices.private !== ws.notice_private;
         if (noticeChanged) await updateNotices(deps.db, wid, notices);
       }
+      // Like the notice, what members can do on their tickets is live right away.
+      let actionsChanged = false;
+      if (nextActions) {
+        actionsChanged = JSON.stringify(nextActions) !== JSON.stringify(memberActionsToStore(current, current));
+        if (actionsChanged) await setMemberActions(deps.db, wid, nextActions);
+      }
       if (body.channel_id) {
         const conn = await getDiscordConnection(deps.db, wid);
         if (!deps.discord || !conn) throw new UserFacingError('Connect Discord first.');
@@ -315,11 +363,15 @@ export function registerPanelRoutes(app: FastifyInstance, web: Web): void {
           recreated: `The old panel was deleted, so a new one was posted${where}`,
           moved: `Panel moved${where}`,
         }[result]);
-      } else if (noticeChanged && !textChanged) {
-        setFlash(reply, 'success', 'Notice saved. Members see it the next time they open a ticket.');
+      } else if (!textChanged && (noticeChanged || actionsChanged)) {
+        setFlash(reply, 'success', !actionsChanged
+          ? 'Notice saved. Members see it the next time they open a ticket.'
+          : !noticeChanged
+            ? 'Saved. Members see it the next time they open one of their tickets.'
+            : 'Changes saved. They’re live in Discord now.');
       } else {
-        setFlash(reply, 'success', noticeChanged
-          ? 'Changes saved. The notice is live now; publish the panel to show the new heading and introduction.'
+        setFlash(reply, 'success', noticeChanged || actionsChanged
+          ? `Changes saved. ${noticeChanged && actionsChanged ? 'The notice and the ticket buttons are' : noticeChanged ? 'The notice is' : 'The ticket buttons are'} live now; publish the panel to show the rest.`
           : 'Changes saved. Publish the panel to show them in Discord.');
       }
     } catch (err) {

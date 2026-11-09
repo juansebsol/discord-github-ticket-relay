@@ -2,7 +2,7 @@
 import { escapeHtml, html, raw, type SafeHtml } from '../lib/html.js';
 import { formLead, truncate, visibilityNotice } from '../discord/messages.js';
 import type { FormSection } from '../domain/forms.js';
-import type { myTicketsPage } from '../domain/my-tickets.js';
+import type { myTicketDetail, myTicketsPage } from '../domain/my-tickets.js';
 import type { Deps } from '../domain/types.js';
 import { icon } from './ui.js';
 
@@ -27,6 +27,7 @@ export function discordMd(text: string, roleNames: Map<string, string> = new Map
     const out = line
       .replace(/&lt;@&amp;(\d+)&gt;/g, (_m, id: string) => `<span class="dp-mention">@${escapeHtml(roleNames.get(id) ?? 'unknown-role')}</span>`)
       .replace(/&lt;t:(\d+)(?::[tTdDfFR])?&gt;/g, (_m, s: string) => `<span class="dp-ts">${relativeTime(Number(s))}</span>`)
+      .replace(/`([^`]+)`/g, '<code class="dp-code">$1</code>')
       .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
       .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<span class="dp-a">$1</span>');
     const h = /^#{1,3} (.*)$/.exec(out);
@@ -84,6 +85,22 @@ export function myTicketsPreview(bot: BotIdentity, payload: ReturnType<typeof my
   return botMessage(bot, html`<div class="dp-embed"><h4>${e.title}</h4><p>${discordMd(e.description)}</p>${'footer' in e && e.footer ? html`<div class="dp-time">${e.footer.text}</div>` : ''}</div>
     ${menu ? selectPreview(menu) : ''}
     <div class="dp-ephemeral">${icon('eye', 14)}<span>Only you can see this</span></div>`, 'Preview of My tickets in Discord');
+}
+
+type PreviewButton = { style: number; label: string; custom_id?: string; url?: string };
+const EMBED_TONES: Record<number, string> = { 0xd99a1e: 'amber', 0x2e9e5b: 'green' };
+
+/**
+ * One ticket's page in My tickets, with its buttons. `attrs` adds attributes to a button (the
+ * Panel ties each action button to its switch).
+ */
+export function myTicketPreview(bot: BotIdentity, payload: ReturnType<typeof myTicketDetail>, attrs: (b: PreviewButton) => SafeHtml | '' = () => ''): SafeHtml {
+  const e = payload.embeds[0]!;
+  const rows = payload.components.map((r) => r.components as PreviewButton[]);
+  const cls = (b: PreviewButton) => (b.style === 1 ? 'blurple' : b.style === 3 ? '' : 'grey');
+  return botMessage(bot, html`<div class="dp-embed ${EMBED_TONES[e.color] ?? ''}"><h4>${e.title}</h4><p>${discordMd(e.description)}</p></div>
+    ${rows.map((r) => html`<div class="dp-buttons">${r.map((b) => html`<span class="dp-button ${cls(b)}" ${attrs(b)}>${b.label}${b.style === 5 ? icon('arrow-up-right', 14) : ''}</span>`)}</div>`)}
+    <div class="dp-ephemeral">${icon('eye', 14)}<span>Only you can see this</span></div>`, 'Preview of a ticket’s page in My tickets');
 }
 
 type PreviewApp = { name: string; repoPrivate: boolean; notice?: string };
