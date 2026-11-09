@@ -135,7 +135,8 @@ describe('My tickets: a member’s own tickets', () => {
     expect(list.data.flags).toBe(64);
     const embed = list.data.embeds[0];
     expect(embed.title).toBe('Your tickets');
-    expect(embed.footer.text).toBe('4 open · 2 done');
+    // One page: no footer (Discord says "Only you can see this" itself).
+    expect(embed.footer).toBeUndefined();
     // Open ones first, newest first; Sam's ticket isn't there.
     const options = list.data.components[0].components[0].options as { label: string; value: string; description: string }[];
     expect(options.map((o) => [o.label, o.description])).toEqual([
@@ -143,10 +144,16 @@ describe('My tickets: a member’s own tickets', () => {
       ['It broke', '❓ The team needs more information'],
       ['Brush is slow', '🛠️ Being worked on'],
       ['Export crashes the app', '🛠️ Being worked on'],
-      ['Add a dark splash screen', '⚪ Closed: not planned'],
+      ['Add a dark splash screen', '🚫 Closed: not planned'],
       ['Undo forgets the last step', '✅ Fixed in v1.2.0: update to get it'],
     ]);
     expect(embed.description).not.toContain('Brush lags on big canvases');
+    // Open under an Open heading, two lines each; closed under a Closed heading, one line each, titles not bold.
+    expect(embed.description.startsWith('**Open · 4**\n**Vector tool crashes**\n')).toBe(true);
+    expect(embed.description).toMatch(new RegExp(
+      `\\n\\n\\*\\*Closed · 2\\*\\*\\n🚫 Add a dark splash screen · Not planned · \\[#${splash.issue_number}\\]\\(https://github\\.com/[^)]+\\) · <t:\\d+:R>\\n`
+      + `✅ Undo forgets the last step · Fixed in v1\\.2\\.0: update to get it · \\[#${undo.issue_number}\\]\\(https://github\\.com/[^)]+\\) · <t:\\d+:R>$`,
+    ));
     expect(embed.description).toContain(`**Export crashes the app**\n🛠️ Being worked on · PhotoCraft · [#${crash.issue_number}](https://github.com/`);
     expect(embed.description).toContain(`↳ Same problem as [#${lag.issue_number}](https://github.com/`);
     // The private repository's ticket: no link.
@@ -185,7 +192,9 @@ describe('My tickets: a member’s own tickets', () => {
     for (let i = 0; i < 12; i++) await ticket(`Problem ${String(i).padStart(2, '0')}`, ALEX, { minutesAgo: 100 - i });
     const first = (await click('tr:mine')).json().data;
     expect(first.components[0].components[0].options).toHaveLength(10);
-    expect(first.embeds[0].footer.text).toBe('12 open · 0 done · Page 1 of 2');
+    expect(first.embeds[0].footer.text).toBe('Page 1 of 2');
+    // Every page counts all of them under its heading.
+    expect(first.embeds[0].description.startsWith('**Open · 12**\n')).toBe(true);
     const second = (await click('tr:mine:p:1')).json();
     expect(second.type).toBe(7);
     expect(second.data.components[0].components[0].options.map((o: { label: string }) => o.label)).toEqual(['Problem 01', 'Problem 00']);

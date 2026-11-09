@@ -24,11 +24,14 @@ export const TICKET_STATUS_TEXT = {
   sending: '⏳ Being sent to the team',
   failed: '⚠️ Not filed yet: the team has been told',
   info: '❓ The team needs more information',
-  closed: '⚪ Closed: not planned',
-  duplicate: '⚪ Closed: the same as another report',
-  removed: '⚪ No longer on GitHub',
+  closed: '🚫 Closed: not planned',
+  duplicate: '🔁 Closed: the same as another report',
+  removed: '🗑️ No longer on GitHub',
 } as const;
 export type TicketStatus = IssueStatus | keyof typeof TICKET_STATUS_TEXT;
+
+/** Shorter words for the Closed group's one-line entries. */
+const CLOSED_SHORT: Partial<Record<TicketStatus, string>> = { closed: 'Not planned', duplicate: 'Same as another report' };
 
 const DONE: TicketStatus[] = ['released', 'fixed', 'closed', 'duplicate', 'removed'];
 
@@ -201,20 +204,39 @@ function colorOf(s: TicketStatus): number {
   return s === 'failed' ? COLORS.failed : COLORS.brand;
 }
 
-/** Their tickets, a page at a time, with a menu to see one's story. */
+/** "✅ Fixed in v1.4" → "✅" and "Fixed in v1.4" (no icon when the words don't start with one). */
+function splitIcon(s: string): { icon: string; text: string } {
+  const m = /^(\p{Extended_Pictographic}(?:️|‍\p{Extended_Pictographic})*)\s*/u.exec(s);
+  return m ? { icon: m[1]!, text: s.slice(m[0].length) } : { icon: '', text: s };
+}
+
+/**
+ * Their tickets, a page at a time: open ones under an Open heading (title, then what's happening),
+ * closed ones under a Closed heading one line each, and a menu to see one's story.
+ */
 export function myTicketsPage(tickets: MemberTicket[], requestedPage: number, board: Pick<KnownIssuesSettings, 'statusText'>) {
   const pageCount = Math.max(1, Math.ceil(tickets.length / PAGE_SIZE));
   const page = Math.min(Math.max(0, requestedPage), pageCount - 1);
   const slice = tickets.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
-  const open = tickets.filter((t) => !t.done).length;
+  const link = (t: MemberTicket) => (t.issue ? [issueLink(t.issue.number, t.issue.url)] : []);
+  const openEntry = (t: MemberTicket) =>
+    `**${safe(truncate(t.title, 90))}**\n${[statusText(t, board), safe(t.app), ...link(t), ago(t.at)].join(' · ')}${t.sameAs ? `\n↳ Same problem as ${issueLink(t.sameAs.number, t.sameAs.url)}` : ''}`;
+  const closedEntry = (t: MemberTicket) => {
+    const { icon, text } = splitIcon(statusText(t, board));
+    return [`${icon ? `${icon} ` : ''}${safe(truncate(t.title, 90))}`, CLOSED_SHORT[t.status] ?? text, ...link(t), ago(t.at)].join(' · ');
+  };
+  // The headings count all of them, not only this page's.
+  const open = slice.filter((t) => !t.done);
+  const closed = slice.filter((t) => t.done);
+  const groups = [
+    ...(open.length ? [`**Open · ${tickets.filter((t) => !t.done).length}**\n${open.map(openEntry).join('\n\n')}`] : []),
+    ...(closed.length ? [`**Closed · ${tickets.filter((t) => t.done).length}**\n${closed.map(closedEntry).join('\n')}`] : []),
+  ];
   const description = tickets.length
-    ? slice.map((t) => {
-        const facts = [statusText(t, board), safe(t.app), ...(t.issue ? [issueLink(t.issue.number, t.issue.url)] : []), ago(t.at)];
-        return `**${safe(truncate(t.title, 90))}**\n${facts.join(' · ')}${t.sameAs ? `\n↳ Same problem as ${issueLink(t.sameAs.number, t.sameAs.url)}` : ''}`;
-      }).join('\n\n')
+    ? groups.join('\n\n')
     : 'You haven’t sent any tickets here yet. Press **Open a ticket** on the panel to tell the team about a problem.';
   // Discord says "Only you can see this" under the reply itself.
-  const footer = [tickets.length ? `${open} open · ${tickets.length - open} done` : '', pageCount > 1 ? `Page ${page + 1} of ${pageCount}` : ''].filter(Boolean).join(' · ');
+  const footer = pageCount > 1 ? `Page ${page + 1} of ${pageCount}` : '';
   return {
     content: '',
     embeds: [{ title: 'Your tickets', description: truncate(description, 4096), color: COLORS.brand, ...(footer ? { footer: { text: footer } } : {}) }],
