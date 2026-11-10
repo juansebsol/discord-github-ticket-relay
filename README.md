@@ -7,7 +7,7 @@
     and a GitHub App files it as an issue in the right repository.<br>
     Reporters don't need a GitHub account.
   </p>
-  <img src="docs/images/discord-panel.png" alt="Ticket panel in Discord with an app picker" width="620">
+  <img src="docs/images/analytics-dark.png" alt="Ticket Relay console: analytics with downloads, tickets, issues and stars">
 </div>
 
 ## Features
@@ -23,7 +23,10 @@
 
 Optional features stay off until an admin turns them on.
 
-![Admin console overview](docs/images/admin-overview.png)
+<p align="center">
+  <img src="docs/images/discord-panel.png" alt="Ticket panel in Discord with an app picker" width="620"><br>
+  <sub>What members see in Discord</sub>
+</p>
 
 ## Self-hosting
 
