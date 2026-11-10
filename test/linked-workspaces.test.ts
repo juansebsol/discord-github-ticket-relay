@@ -197,8 +197,11 @@ describe('Linked workspaces: tickets in Discord', () => {
     expect(posted.components[0].components.map((b: any) => [b.label, b.custom_id])).toEqual([[main.workspace.name, 'tr:grp:main'], ['Mailcraft', 'tr:grp:linked']]);
     expect(posted.embeds[0].description).toContain(`1. Press **${main.workspace.name.replace(/([\\*_~`|>#\[\]()-])/g, '\\$1')}** or **Mailcraft**, then choose your app.`);
 
-    // Its only app goes straight to the form.
-    const modal = (await click('tr:grp:linked')).json();
+    // Its button opens its list, even with one app; picking it opens the form.
+    const list = (await click('tr:grp:linked')).json().data;
+    expect(list.flags & 64).toBe(64);
+    expect(list.components[0].components[0].options.map((o: { label: string }) => o.label)).toEqual(['Mailcraft']);
+    const modal = (await click('tr:pickp', { values: [mailcraft.public_id] })).json();
     expect(modal.type).toBe(9);
     expect(modal.data.custom_id).toBe(`tr:form:${mailcraft.public_id}:${MAILCRAFT_REPO}`);
 
@@ -324,8 +327,10 @@ describe('Linked workspaces: a button for the main’s apps and one for theirs',
     const chooser = (await click('tr:open')).json().data;
     expect(chooser.content).toBe(`Press **${main.workspace.name.replace(/([\\*_~`|>#\[\]()-])/g, '\\$1')}** or **Community Apps**, then choose your app.`);
     expect(chooser.components[0].components.map((b: any) => b.custom_id)).toEqual(['tr:grpp:main', 'tr:grpp:linked']);
-    // The main's one app goes straight on, in place of the buttons.
-    expect((await click('tr:grpp:main')).json().type).toBe(9);
+    // The main's list has its one app, in place of the buttons.
+    const mainList = (await click('tr:grpp:main')).json();
+    expect(mainList.type).toBe(7);
+    expect(mainList.data.components[0].components[0].options.map((o: { label: string }) => o.label)).toEqual(['PhotoCraft']);
     const inPlace = (await click('tr:grpp:linked')).json();
     expect(inPlace.type).toBe(7);
     expect(inPlace.data.flags).toBeUndefined();

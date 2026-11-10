@@ -125,17 +125,13 @@ async function route(deps: Deps, processor: Processor, i: Interaction, { conn, m
       const { flags: _flags, ...data } = group ? m.buildGroupPage(group, page) : m.buildPickerPage(apps.map(toPanelApp), page);
       return { response: { type: ResponseType.UpdateMessage, data } };
     }
-    // A group's button (the main's apps, or the linked workspaces'): its menu, privately. One app goes straight on.
+    // A group's button (the main's apps, or the linked workspaces'): its menu, privately, even with one app.
     const groupMatch = /^tr:grp(p?):(main|linked)$/.exec(customId);
     if (groupMatch) {
       const inPrivate = groupMatch[1] === 'p';
       const { groups } = await panelGroups(deps.db, scope);
       const group = groups?.find((g) => g.key === groupMatch[2]);
       if (!group) return notice('Out of date', 'This button is no longer active. Please use the current ticket panel.');
-      if (group.apps.length === 1) {
-        const only = await serverApp(deps.db, main, group.apps[0]!.publicId);
-        if (only?.app.enabled) return startTicket(deps, only.workspace, only.app, { update: inPrivate });
-      }
       const data = m.buildGroupPage(group, 0);
       if (!inPrivate) return { response: { type: ResponseType.ChannelMessage, data } };
       const { flags: _flags, ...update } = data;

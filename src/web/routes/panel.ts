@@ -361,7 +361,7 @@ export function registerPanelRoutes(app: FastifyInstance, web: Web): void {
                 : html`${selectPreview('Choose an app…')}${optionList(menu.selects[0] ?? [])}`}
             </div>
             <div class="dp-buttons" ${shows(true)}><span class="dp-button blurple">Open a ticket</span><span class="dp-button grey">My tickets</span></div>`, 'Preview of the ticket panel in Discord')}
-          <p class="dp-note" ${shows(false)}>${enabledApps.length ? `${groups ? `Each button opens its list privately: ${perGroup}. A list with one app goes straight to its form.` : `The menu lists ${appCount}.`}${content.hasTypes ? ' Members pick a ticket type next.' : ''}` : 'No enabled apps yet, so the menu is empty.'}</p>
+          <p class="dp-note" ${shows(false)}>${enabledApps.length ? `${groups ? `Each button opens its list privately: ${perGroup}.` : `The menu lists ${appCount}.`}${content.hasTypes ? ' Members pick a ticket type next.' : ''}` : 'No enabled apps yet, so the menu is empty.'}</p>
           <p class="dp-note" ${shows(true)}>${enabledApps.length > 1 ? (groups ? `Open a ticket shows the two buttons privately, then the list: ${perGroup}.` : `Open a ticket shows a private menu of ${appCount}.`) : enabledApps.length ? 'Open a ticket goes straight on: there’s one enabled app.' : 'No enabled apps yet.'}${content.hasTypes ? ' Members pick a ticket type next.' : ''}</p>
           <div ${shows(true)}>
             ${previewCaption(null, null, 'My tickets · ')}

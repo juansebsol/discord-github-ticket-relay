@@ -246,8 +246,7 @@ Discord endpoint, OAuth), one or more queue workers, and an optional triage work
   ticket message while My tickets is on): the main's apps (`panel_section_title`, default its name)
   and every linked workspace's together (`panel_linked_title`, default the one linked workspace's
   name or "Other apps"). A button opens its list privately, page by page (`tr:grp:<main|linked>`,
-  `tr:grpp:…` from Open a ticket, `tr:page:<n>:<main|linked>`); a list with one app goes straight to
-  its form. A panel with one workspace's apps keeps its single menu, unchanged. Discord interactions arrive
+  `tr:grpp:…` from Open a ticket, `tr:page:<n>:<main|linked>`), even when it has one app. A panel with one workspace's apps keeps its single menu, unchanged. Discord interactions arrive
   for the main; a linked workspace's own panel tags its ticket custom_ids `~<workspace id>`
   (`withScope()`, applied to every reply and edit) so its menus and My tickets stay with it. An
   app is found by its public ID among the server's workspaces (`serverApp()`) and filed in its
