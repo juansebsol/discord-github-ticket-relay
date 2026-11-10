@@ -20,6 +20,8 @@ supported by SQLite.
 
 ## Install
 
+### Host install (PM2)
+
 ```bash
 git clone <repo> ticket-relay && cd ticket-relay
 npm ci
@@ -30,6 +32,27 @@ pm2 start ecosystem.config.cjs
 pm2 save
 pm2 startup                   # run the printed command to start on boot
 ```
+
+### Container install (Docker / Kubernetes)
+
+Images are published to `ghcr.io/storytold/discord-github-ticket-relay` and `docker.io/storytold/discord-github-ticket-relay` using Docker Hardened Images (`dhi.io/node:24`) for minimal surface and non-root execution (UID 1000).
+
+Persistent state (SQLite database and ticket file attachments) lives in `/app/data`. Mount a persistent volume to `/app/data`.
+
+```bash
+docker run -d \
+  --name ticket-relay \
+  -p 3000:3000 \
+  -v ticket-relay-data:/app/data \
+  --env-file .env \
+  ghcr.io/storytold/discord-github-ticket-relay:latest
+```
+
+In Kubernetes or clustered setups, you can run all-in-one or scale workers independently:
+- **Web (Admin + Discord + OAuth):** `ENTRYPOINT ["node"] CMD ["dist/index.js"]` (set `RUN_WORKER=false` and `RUN_TRIAGE=false` if scaling workers in separate pods).
+- **Queue Workers:** `args: ["dist/worker.js"]`
+- **Triage Worker:** `args: ["dist/triage-worker.js"]`
+
 
 ### Reverse proxy
 

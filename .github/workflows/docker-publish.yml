@@ -1,0 +1,33 @@
+name: Docker publish
+
+# Publishes the ticket relay container image using the shared build pipeline
+# in craft-common-actions. Builds multi-arch images (linux/amd64 and linux/arm64)
+# using Docker Hardened Images (DHI) for zero-CVE minimal production runtime,
+# pushing to GHCR and Docker Hub.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: docker-publish-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    uses: storytold/craft-common-actions/.github/workflows/docker-build.yml@main
+    secrets: inherit
+    with:
+      images: |
+        ghcr.io/storytold/discord-github-ticket-relay
+        docker.io/storytold/discord-github-ticket-relay
+      # The base image is a Docker Hardened Image, which authenticates via dhi.io
+      dhi-login: true
+      cache-from: type=gha
+      cache-to: type=gha,mode=max
+      timeout-minutes: 45

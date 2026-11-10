@@ -1,0 +1,12 @@
+node_modules
+dist
+data
+backups
+secrets/*.pem
+.env
+.env.*
+!.env.example
+.git
+.github
+coverage
+*.log
