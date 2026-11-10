@@ -27,8 +27,12 @@ export const ComponentType = {
 
 export const CustomId = {
   panelSelect: 'tr:pick',
+  /** One workspace's menu on a panel with a menu for each (tr:pick:0, tr:pick:1…). */
+  panelSection: (index: number) => `tr:pick:${index}`,
   pickerSelect: 'tr:pickp',
-  pickerPage: (page: number) => `tr:page:${page}`,
+  pickerSection: (index: number) => `tr:pickp:${index}`,
+  /** A page of the private app menu: all the panel's apps, or one workspace's (its ID). */
+  pickerPage: (page: number, section?: string) => `tr:page:${page}${section ? `:${section}` : ''}`,
   form: (appPublicId: string, repoId: number, typePublicId?: string) => `tr:form:${appPublicId}:${repoId}${typePublicId ? `:${typePublicId}` : ''}`,
   typeSelect: (appPublicId: string, repoId: number) => `tr:type:${appPublicId}:${repoId}`,
   // Panel buttons (My tickets on): open a ticket privately, and the member's own tickets.
@@ -51,7 +55,14 @@ export const CustomId = {
 };
 
 export const MORE_APPS_VALUE = '__more';
+/** "More apps…" in one workspace's menu: that workspace's apps, page by page. */
+export function moreAppsValue(section?: string): string {
+  return section ? `${MORE_APPS_VALUE}:${section}` : MORE_APPS_VALUE;
+}
 export const SELECT_MAX = 25;
+/** A message holds 5 rows, so a panel has a menu for each workspace while there are at most 5. */
+export const SECTIONS_MAX = 5;
+export const SECTION_TITLE_MAX = 80;
 export const TITLE_MAX = 200;
 export const DESCRIPTION_MAX = 4000;
 
@@ -72,10 +83,19 @@ export interface PanelApp {
   description: string | null;
 }
 
+/** One workspace's apps on a panel with apps from several, under its name (Discord menus have no headings). */
+export interface PanelSection {
+  id: string;
+  title: string;
+  apps: PanelApp[];
+}
+
 export interface PanelOptions {
   title: string | null;
   intro: string | null;
   apps: PanelApp[];
+  /** The apps by workspace: a menu each when there are 2 to 5 of them. */
+  sections?: PanelSection[];
   /** When the workspace has ticket types, the steps mention choosing one. */
   hasTypes?: boolean;
   /** Open a ticket and My tickets buttons instead of the app menu. */
@@ -85,12 +105,24 @@ export interface PanelOptions {
 export const DEFAULT_PANEL_TITLE = 'Need help? Open a ticket';
 export const DEFAULT_PANEL_INTRO =
   'Pick the app you need help with from the menu below. A short form will open where you can describe the problem.';
+export const DEFAULT_PANEL_INTRO_MENUS =
+  'Pick the app you need help with from one of the menus below. A short form will open where you can describe the problem.';
 export const DEFAULT_PANEL_INTRO_BUTTONS =
   'Press **Open a ticket** to tell us about a problem. A short form will open where you can describe it.';
 
-/** The introduction used when the workspace hasn't written its own, for the menu or the buttons. */
-export function defaultPanelIntro(myTickets: boolean): string {
-  return myTickets ? DEFAULT_PANEL_INTRO_BUTTONS : DEFAULT_PANEL_INTRO;
+/** The introduction used when the workspace hasn't written its own, for the menu (or a menu per workspace) or the buttons. */
+export function defaultPanelIntro(myTickets: boolean, menus = false): string {
+  return myTickets ? DEFAULT_PANEL_INTRO_BUTTONS : menus ? DEFAULT_PANEL_INTRO_MENUS : DEFAULT_PANEL_INTRO;
+}
+
+/** The sections that get a menu each: 2 to 5 workspaces with apps. Otherwise all apps share one menu. */
+export function menuSections(sections: PanelSection[] | undefined): PanelSection[] | null {
+  return sections && sections.length > 1 && sections.length <= SECTIONS_MAX ? sections : null;
+}
+
+/** A section's menu says whose apps are in it. */
+export function sectionPlaceholder(title: string): string {
+  return truncate(`${title}: choose an app…`, 150);
 }
 
 function appOption(app: PanelApp) {
@@ -101,21 +133,33 @@ function appOption(app: PanelApp) {
   };
 }
 
+/** A menu's options: up to 25 apps, or 24 and "More apps…" (a private list, page by page). */
+function menuOptions(apps: PanelApp[], more: string, browse: string) {
+  const overflow = apps.length > SELECT_MAX;
+  const options = (overflow ? apps.slice(0, SELECT_MAX - 1) : apps).map(appOption);
+  if (overflow) options.push({ label: 'More apps…', value: more, description: truncate(browse, 100) });
+  return options;
+}
+
+/** One workspace's menu. Its options are app IDs, like the single menu's, so a pick works the same. */
+function sectionMenu(section: PanelSection, customId: string) {
+  return {
+    type: ComponentType.StringSelect,
+    custom_id: customId,
+    placeholder: sectionPlaceholder(section.title),
+    min_values: 1,
+    max_values: 1,
+    options: menuOptions(section.apps, moreAppsValue(section.id), `Browse all ${section.apps.length} in ${section.title}`),
+  };
+}
+
 export function buildPanelMessage(opts: PanelOptions) {
-  const overflow = opts.apps.length > SELECT_MAX;
-  const shown = overflow ? opts.apps.slice(0, SELECT_MAX - 1) : opts.apps;
-  const options = shown.map(appOption);
-  if (overflow) {
-    options.push({
-      label: 'More apps…',
-      value: MORE_APPS_VALUE,
-      description: `Browse all ${opts.apps.length} apps`,
-    });
-  }
+  const options = menuOptions(opts.apps, MORE_APPS_VALUE, `Browse all ${opts.apps.length} apps`);
   const buttons = Boolean(opts.myTickets);
-  const first = buttons ? `1. Press **Open a ticket**${opts.apps.length > 1 ? ' and choose your app' : ''}.` : '1. Choose your app from the menu.';
+  const menus = buttons ? null : menuSections(opts.sections);
+  const first = buttons ? `1. Press **Open a ticket**${opts.apps.length > 1 ? ' and choose your app' : ''}.` : menus ? '1. Choose your app from its menu.' : '1. Choose your app from the menu.';
   const description = [
-    opts.intro?.trim() || defaultPanelIntro(buttons),
+    opts.intro?.trim() || defaultPanelIntro(buttons, Boolean(menus)),
     '',
     '**How it works**',
     ...(opts.hasTypes
@@ -143,26 +187,28 @@ export function buildPanelMessage(opts: PanelOptions) {
         color: COLORS.brand,
       },
     ],
-    components: [
-      {
-        type: ComponentType.ActionRow,
-        components: buttons
-          ? [
-              { type: ComponentType.Button, style: 1, label: 'Open a ticket', custom_id: CustomId.openTicket },
-              { type: ComponentType.Button, style: 2, label: 'My tickets', custom_id: CustomId.myTickets },
-            ]
-          : [
-              {
-                type: ComponentType.StringSelect,
-                custom_id: CustomId.panelSelect,
-                placeholder: 'Choose an app…',
-                min_values: 1,
-                max_values: 1,
-                options,
-              },
-            ],
-      },
-    ],
+    components: menus
+      ? menus.map((section, i) => ({ type: ComponentType.ActionRow, components: [sectionMenu(section, CustomId.panelSection(i))] }))
+      : [
+          {
+            type: ComponentType.ActionRow,
+            components: buttons
+              ? [
+                  { type: ComponentType.Button, style: 1, label: 'Open a ticket', custom_id: CustomId.openTicket },
+                  { type: ComponentType.Button, style: 2, label: 'My tickets', custom_id: CustomId.myTickets },
+                ]
+              : [
+                  {
+                    type: ComponentType.StringSelect,
+                    custom_id: CustomId.panelSelect,
+                    placeholder: 'Choose an app…',
+                    min_values: 1,
+                    max_values: 1,
+                    options,
+                  },
+                ],
+          },
+        ],
     allowed_mentions: NO_MENTIONS,
   };
 }
@@ -177,12 +223,13 @@ const TICKET_PICKER: PickerIds = { select: CustomId.pickerSelect, page: CustomId
 export const CONTRIBUTOR_PICKER: PickerIds = { select: CustomId.contributorPickerSelect, page: CustomId.contributorPage };
 
 /** The private app menu (Open a ticket, or "More apps…"); Previous and Next only when it has pages. */
-export function buildPickerPage(apps: PanelApp[], requestedPage: number, ids: PickerIds = TICKET_PICKER) {
+export function buildPickerPage(apps: PanelApp[], requestedPage: number, ids: PickerIds = TICKET_PICKER, section?: string) {
   const pageCount = Math.max(1, Math.ceil(apps.length / SELECT_MAX));
   const page = Math.min(Math.max(0, requestedPage), pageCount - 1);
   const slice = apps.slice(page * SELECT_MAX, (page + 1) * SELECT_MAX);
+  const ask = `Choose the app you need help with${section ? ` in ${section}` : ''}`;
   return {
-    content: pageCount > 1 ? `Choose the app you need help with (page ${page + 1} of ${pageCount}).` : 'Choose the app you need help with.',
+    content: pageCount > 1 ? `${ask} (page ${page + 1} of ${pageCount}).` : `${ask}.`,
     embeds: [],
     flags: EPHEMERAL,
     components: [
@@ -207,6 +254,24 @@ export function buildPickerPage(apps: PanelApp[], requestedPage: number, ids: Pi
           }]
         : []),
     ],
+    allowed_mentions: NO_MENTIONS,
+  };
+}
+
+/** One workspace's apps in the private menu, page by page ("More apps…" in its menu). */
+export function buildSectionPage(section: PanelSection, requestedPage: number) {
+  return buildPickerPage(section.apps, requestedPage, { select: CustomId.pickerSelect, page: (p) => CustomId.pickerPage(p, section.id) }, section.title);
+}
+
+/** The private menu for Open a ticket: a menu for each workspace when the panel has 2 to 5, else one, page by page. */
+export function buildAppPicker(apps: PanelApp[], sections?: PanelSection[]) {
+  const menus = menuSections(sections);
+  if (!menus) return buildPickerPage(apps, 0);
+  return {
+    content: 'Choose the app you need help with.',
+    embeds: [],
+    flags: EPHEMERAL,
+    components: menus.map((section, i) => ({ type: ComponentType.ActionRow, components: [sectionMenu(section, CustomId.pickerSection(i))] })),
     allowed_mentions: NO_MENTIONS,
   };
 }

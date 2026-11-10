@@ -241,7 +241,11 @@ Discord endpoint, OAuth), one or more queue workers, and an optional triage work
   off or removing them from the main ends their claims and revokes their MCP tokens in linked
   workspaces where they have no role of their own.
 - **Panels across workspaces:** a linked workspace's apps are on its main's panel
-  (`on_main_panel`, after the main's apps) or on a panel of its own. Discord interactions arrive
+  (`on_main_panel`, after the main's apps) or on a panel of its own. A panel with apps from 2 to 5
+  workspaces has a menu for each (Discord menus have no headings), named by `panel_section_title`
+  or the workspace's name, in the panel message and in the private Open a ticket menu
+  (`tr:pick:<n>`, `tr:pickp:<n>`; a workspace's "More apps…" pages are `tr:page:<n>:<workspace id>`).
+  A panel with one workspace's apps keeps its single menu, unchanged. Discord interactions arrive
   for the main; a linked workspace's own panel tags its ticket custom_ids `~<workspace id>`
   (`withScope()`, applied to every reply and edit) so its menus and My tickets stay with it. An
   app is found by its public ID among the server's workspaces (`serverApp()`) and filed in its

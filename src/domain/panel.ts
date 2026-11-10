@@ -1,5 +1,6 @@
 import { DiscordApiError, DiscordErrorCode } from '../discord/client.js';
-import { buildPanelMessage } from '../discord/messages.js';
+import { buildPanelMessage, type PanelApp, type PanelSection } from '../discord/messages.js';
+import type { Queryable } from '../db/database.js';
 import { sha256 } from '../lib/crypto.js';
 import { panelApps, panelWorkspaces, withScope } from './linked.js';
 import { deletePanel, getDiscordConnection, getPanel, markPanel, savePanel } from './store.js';
@@ -7,26 +8,51 @@ import { UserFacingError, type AppRow, type Deps, type WorkspaceRow } from './ty
 import { enabledTicketTypes } from './ticket-types.js';
 import { getWorkspace } from './workspaces.js';
 
+export function panelApp(a: Pick<AppRow, 'public_id' | 'name' | 'description'>): PanelApp {
+  return { publicId: a.public_id, name: a.name, description: a.description };
+}
+
+/** A workspace's menu name on a panel with apps from several: its own (Discord tickets › Panel), or its name. */
+export function sectionTitle(ws: Pick<WorkspaceRow, 'name' | 'panel_section_title'>): string {
+  return ws.panel_section_title?.trim() || ws.name;
+}
+
+/** The panel's enabled apps by workspace, in panel order, leaving out workspaces with none. */
+export function panelSectionsOf(family: WorkspaceRow[], apps: AppRow[]): PanelSection[] {
+  return family
+    .map((w) => ({ id: w.id, title: sectionTitle(w), apps: apps.filter((a) => a.enabled && a.workspace_id === w.id).map(panelApp) }))
+    .filter((s) => s.apps.length > 0);
+}
+
+/** For the private menu (Open a ticket, "More apps…"): the panel's enabled apps, and by workspace. */
+export async function panelSections(q: Queryable, workspace: WorkspaceRow): Promise<{ apps: AppRow[]; sections: PanelSection[] }> {
+  const [apps, family] = await Promise.all([panelApps(q, workspace), panelWorkspaces(q, workspace)]);
+  const enabled = apps.filter((a) => a.enabled);
+  return { apps: enabled, sections: panelSectionsOf(family, enabled) };
+}
+
 /**
- * The panel message for these apps (a main's include its linked workspaces' on it). A linked
- * workspace's own panel tags its custom_ids with its ID, so its clicks come back to it.
+ * The panel message for these apps (a main's include its linked workspaces' on it, in a menu for
+ * each workspace). A linked workspace's own panel tags its custom_ids with its ID, so its clicks
+ * come back to it.
  */
-export function panelPayloadFor(workspace: WorkspaceRow, apps: AppRow[], hasTypes = false) {
+export function panelPayloadFor(workspace: WorkspaceRow, apps: AppRow[], hasTypes = false, family: WorkspaceRow[] = [workspace]) {
   const payload = withScope(buildPanelMessage({
     hasTypes,
     myTickets: workspace.my_tickets,
     title: workspace.panel_title,
     intro: workspace.panel_intro,
-    apps: apps.filter((a) => a.enabled).map((a) => ({ publicId: a.public_id, name: a.name, description: a.description })),
+    apps: apps.filter((a) => a.enabled).map(panelApp),
+    sections: panelSectionsOf(family, apps),
   }), workspace.parent_id ? workspace.id : null);
   return { payload, hash: sha256(JSON.stringify(payload)) };
 }
 
-/** The panel's apps, and whether any of their workspaces has ticket types (the steps mention choosing one). */
-export async function panelContent(deps: Pick<Deps, 'db'>, workspace: WorkspaceRow): Promise<{ apps: AppRow[]; hasTypes: boolean }> {
+/** The panel's apps and workspaces, and whether any of them has ticket types (the steps mention choosing one). */
+export async function panelContent(deps: Pick<Deps, 'db'>, workspace: WorkspaceRow): Promise<{ apps: AppRow[]; hasTypes: boolean; family: WorkspaceRow[] }> {
   const [apps, family] = await Promise.all([panelApps(deps.db, workspace), panelWorkspaces(deps.db, workspace)]);
   const types = await Promise.all(family.map((w) => enabledTicketTypes(deps.db, w.id)));
-  return { apps, hasTypes: types.some((t) => t.length > 0) };
+  return { apps, hasTypes: types.some((t) => t.length > 0), family };
 }
 
 export type PanelState =
@@ -42,7 +68,7 @@ export async function checkPanel(deps: Deps, workspaceId: string, opts: { live: 
   const workspace = (await getWorkspace(deps.db, workspaceId))!;
   const conn = await getDiscordConnection(deps.db, workspaceId);
   const content = await panelContent(deps, workspace);
-  const { hash } = panelPayloadFor(workspace, content.apps, content.hasTypes);
+  const { hash } = panelPayloadFor(workspace, content.apps, content.hasTypes, content.family);
   const channelChanged = conn?.tickets_channel_id !== panel.channel_id;
 
   if (opts.live && deps.discord) {
@@ -87,9 +113,9 @@ export async function publishPanel(deps: Deps, workspaceId: string, userId: stri
   if (!conn?.tickets_channel_id) throw new UserFacingError('Choose a tickets channel first.');
   const workspace = (await getWorkspace(deps.db, workspaceId))!;
   if (workspace.parent_id && workspace.on_main_panel) throw new UserFacingError('This workspace’s apps are on its main workspace’s panel. Choose “Its own panel” first.');
-  const { apps, hasTypes } = await panelContent(deps, workspace);
+  const { apps, hasTypes, family } = await panelContent(deps, workspace);
   if (!apps.some((a) => a.enabled)) throw new UserFacingError('Add at least one enabled app before publishing the panel.');
-  const { payload, hash } = panelPayloadFor(workspace, apps, hasTypes);
+  const { payload, hash } = panelPayloadFor(workspace, apps, hasTypes, family);
   const existing = await getPanel(deps.db, workspaceId);
 
   if (existing && existing.channel_id === conn.tickets_channel_id) {

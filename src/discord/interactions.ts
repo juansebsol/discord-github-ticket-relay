@@ -2,7 +2,8 @@ import { handlePingComponent, PING_PREFIX } from '../announcements/pings.js';
 import { handleContributorComponent } from '../domain/contributors.js';
 import type { Processor } from '../domain/processor.js';
 import { enabledTicketTypes, getTicketTypeByPublicId, type TicketType } from '../domain/ticket-types.js';
-import { panelApps, panelScope, serverApp, splitScope, withScope } from '../domain/linked.js';
+import { panelScope, serverApp, splitScope, withScope } from '../domain/linked.js';
+import { panelSections } from '../domain/panel.js';
 import { getDiscordConnectionByGuild, getGitHubConnection } from '../domain/store.js';
 import { answerMax, filesId, formFor, MAX_FILES_LIMIT, questionId } from '../domain/forms.js';
 import { acceptSubmission, type IncomingFile, type TicketAnswer } from '../domain/submissions.js';
@@ -114,28 +115,43 @@ async function route(deps: Deps, processor: Processor, i: Interaction, { conn, m
     if (customId.startsWith('cv:')) return handleContributorComponent(deps, i, main);
     // Release announcements: a member turns update pings on or off.
     if (customId.startsWith(PING_PREFIX)) return handlePingComponent(deps, i, main);
-    if (customId.startsWith('tr:page:')) {
-      const apps = (await panelApps(deps.db, scope)).filter((a) => a.enabled);
-      const page = Number(customId.slice('tr:page:'.length)) || 0;
-      const { flags: _flags, ...data } = m.buildPickerPage(apps.map(toPanelApp), page);
+    // A page of the private menu: all the panel's apps, or one workspace's ("More apps…" in its menu).
+    const pageMatch = /^tr:page:(-?\d+)(?::([0-9a-f-]{36}))?$/.exec(customId);
+    if (pageMatch) {
+      const { apps, sections } = await panelSections(deps.db, scope);
+      const page = Number(pageMatch[1]) || 0;
+      const section = pageMatch[2] ? sections.find((s) => s.id === pageMatch[2]) : undefined;
+      if (pageMatch[2] && !section) return notice('Out of date', 'This menu is no longer active. Please use the current ticket panel.');
+      const { flags: _flags, ...data } = section ? m.buildSectionPage(section, page) : m.buildPickerPage(apps.map(toPanelApp), page);
       return { response: { type: ResponseType.UpdateMessage, data } };
     }
     // Panel buttons: Open a ticket (the app menu, privately; one app goes straight on) and My tickets.
     if (customId === m.CustomId.openTicket) {
-      const apps = (await panelApps(deps.db, scope)).filter((a) => a.enabled);
+      const { apps, sections } = await panelSections(deps.db, scope);
       if (!apps.length) return notice('No apps yet', 'No app is taking tickets here right now. Please ask a server admin.');
       if (apps.length === 1) {
         const only = await serverApp(deps.db, main, apps[0]!.public_id);
         if (only) return startTicket(deps, only.workspace, only.app, { update: false });
       }
-      return { response: { type: ResponseType.ChannelMessage, data: m.buildPickerPage(apps.map(toPanelApp), 0) } };
+      return { response: { type: ResponseType.ChannelMessage, data: m.buildAppPicker(apps.map(toPanelApp), sections) } };
     }
     if (customId === m.CustomId.myTickets || customId.startsWith('tr:mine:')) return handleMyTickets(deps, i, scope, customId);
-    if (customId === m.CustomId.panelSelect || customId === m.CustomId.pickerSelect) {
+    // An app menu: the panel's (one, or one per workspace) or the private one's.
+    const fromPicker = customId === m.CustomId.pickerSelect || customId.startsWith(`${m.CustomId.pickerSelect}:`);
+    if (fromPicker || customId === m.CustomId.panelSelect || customId.startsWith(`${m.CustomId.panelSelect}:`)) {
       const value = i.data?.values?.[0] ?? '';
-      if (value === m.MORE_APPS_VALUE) {
-        const apps = (await panelApps(deps.db, scope)).filter((a) => a.enabled);
-        return { response: { type: ResponseType.ChannelMessage, data: m.buildPickerPage(apps.map(toPanelApp), 0) } };
+      if (value === m.MORE_APPS_VALUE || value.startsWith(`${m.MORE_APPS_VALUE}:`)) {
+        const { apps, sections } = await panelSections(deps.db, scope);
+        const id = value.slice(m.MORE_APPS_VALUE.length + 1);
+        const section = id ? sections.find((s) => s.id === id) : undefined;
+        if (id && !section) return notice('Out of date', 'This menu is no longer active. Please use the current ticket panel.');
+        const data = section ? m.buildSectionPage(section, 0) : m.buildPickerPage(apps.map(toPanelApp), 0);
+        // From the private menu, the list replaces it; from the panel, it's a new private message.
+        if (fromPicker) {
+          const { flags: _flags, ...update } = data;
+          return { response: { type: ResponseType.UpdateMessage, data: update } };
+        }
+        return { response: { type: ResponseType.ChannelMessage, data } };
       }
       // The app files in its own workspace (a linked workspace's app on the main's panel too).
       const picked = await serverApp(deps.db, main, value);
@@ -143,7 +159,7 @@ async function route(deps: Deps, processor: Processor, i: Interaction, { conn, m
         return notice('App unavailable', 'That app is no longer accepting tickets here. The menu may be out of date; please pick another app or ask a server admin.');
       }
       // From the private menu, the next step replaces it rather than stacking under it.
-      return startTicket(deps, picked.workspace, picked.app, { update: customId === m.CustomId.pickerSelect });
+      return startTicket(deps, picked.workspace, picked.app, { update: fromPicker });
     }
     const typeMatch = /^tr:type:([0-9A-Z]{10}):(\d+)$/.exec(customId);
     if (typeMatch) {

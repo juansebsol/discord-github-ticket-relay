@@ -45,6 +45,11 @@ export async function setOnMainPanel(q: Queryable, workspaceId: string, on: bool
   await q.query('UPDATE workspaces SET on_main_panel = $2, updated_at = now_ms() WHERE id = $1 AND parent_id IS NOT NULL', [workspaceId, on]);
 }
 
+/** A workspace's menu name on a panel with apps from several workspaces (null: its name). */
+export async function setSectionTitle(q: Queryable, workspaceId: string, title: string | null): Promise<void> {
+  await q.query('UPDATE workspaces SET panel_section_title = $2, updated_at = now_ms() WHERE id = $1', [workspaceId, title]);
+}
+
 /** A linked workspace's own panel channel (in its main's server). */
 export async function setLinkedPanelChannel(q: Queryable, workspaceId: string, channel: { id: string; name: string }): Promise<void> {
   await q.query('UPDATE workspaces SET panel_channel_id = $2, panel_channel_name = $3, updated_at = now_ms() WHERE id = $1', [workspaceId, channel.id, channel.name]);

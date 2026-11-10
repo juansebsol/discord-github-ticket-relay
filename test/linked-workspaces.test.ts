@@ -1,6 +1,6 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { createLinkedWorkspace, listLinked } from '../src/domain/linked.js';
-import { publishPanel } from '../src/domain/panel.js';
+import { checkPanel, publishPanel } from '../src/domain/panel.js';
 import { createApp, getDiscordConnection, getGitHubConnection, getPanel, saveGitHubConnection } from '../src/domain/store.js';
 import type { AppRow, WorkspaceRow } from '../src/domain/types.js';
 import { acceptInvite, createInvite, getMembership, getWorkspace, listMemberships, setMemberActions, setMyTickets } from '../src/domain/workspaces.js';
@@ -192,9 +192,12 @@ describe('Linked workspaces: tickets in Discord', () => {
   it('lists its apps on the main’s panel and files them in its own workspace and repository', async () => {
     await publishPanel(env.deps, main.workspace.id, null);
     const posted = [...env.discord.messages.values()].at(-1)!.payload as any;
-    expect(posted.components[0].components[0].options.map((o: { label: string }) => o.label)).toEqual(['PhotoCraft', 'Mailcraft']);
+    // A menu for each workspace, under its name.
+    expect(posted.components.map((r: any) => r.components[0].placeholder)).toEqual([`${main.workspace.name}: choose an app…`, 'Mailcraft: choose an app…']);
+    expect(posted.components.map((r: any) => r.components[0].options.map((o: { label: string }) => o.label))).toEqual([['PhotoCraft'], ['Mailcraft']]);
+    expect(posted.embeds[0].description).toContain('1. Choose your app from its menu.');
 
-    const modal = (await click('tr:pick', { values: [mailcraft.public_id] })).json();
+    const modal = (await click('tr:pick:1', { values: [mailcraft.public_id] })).json();
     expect(modal.type).toBe(9);
     expect(modal.data.custom_id).toBe(`tr:form:${mailcraft.public_id}:${MAILCRAFT_REPO}`);
 
@@ -254,8 +257,9 @@ describe('Linked workspaces: tickets in Discord', () => {
     expect(page.body).toContain(`On ${main.workspace.name}’s panel`);
     expect(page.body).not.toContain('value="publish"');
     const mainPage = await env.server.inject({ method: 'GET', url: `/w/${main.workspace.id}/tickets/panel`, ...get(main.owner) });
-    expect(mainPage.body).toContain('Also on this panel');
+    expect(mainPage.body).toContain('<h3>Menus</h3>');
     expect(mainPage.body).toContain('1 app: Mailcraft');
+    expect(mainPage.body).toContain(`id="section_title_${linked.id}"`);
 
     const res = await env.server.inject({ method: 'POST', url: `/w/${linked.id}/tickets/panel`, ...form(main.owner, { panel_home_sent: '1', panel_home: 'own' }) });
     expect(res.headers.location).toBe(`/w/${linked.id}/tickets/panel`);
@@ -266,6 +270,72 @@ describe('Linked workspaces: tickets in Discord', () => {
     expect(await getPanel(env.db, linked.id)).not.toBeNull();
     await env.server.inject({ method: 'POST', url: `/w/${linked.id}/tickets/panel`, ...form(main.owner, { panel_home_sent: '1', panel_home: 'main' }) });
     expect(await getPanel(env.db, linked.id)).toBeNull();
+  });
+});
+
+describe('Linked workspaces: a menu for each workspace', () => {
+  const placeholders = (payload: any) => payload.components.map((r: any) => r.components[0].placeholder);
+
+  it('names each menu after its workspace, or what the main’s or the linked workspace’s admins call it', async () => {
+    const save = (ws: string, fields: Record<string, string>) => env.server.inject({ method: 'POST', url: `/w/${ws}/tickets/panel`, ...form(main.owner, fields) });
+    await save(main.workspace.id, { [`section_title_${main.workspace.id}`]: 'ArtCraft apps', [`section_title_${linked.id}`]: '  Community   Apps ' });
+    await fresh();
+    expect(main.workspace.panel_section_title).toBe('ArtCraft apps');
+    expect(linked.panel_section_title).toBe('Community Apps');
+    // The published panel is out of date until it's published again.
+    await publishPanel(env.deps, main.workspace.id, null);
+    expect(placeholders([...env.discord.messages.values()].at(-1)!.payload)).toEqual(['ArtCraft apps: choose an app…', 'Community Apps: choose an app…']);
+
+    // The linked workspace's page names its own; its name again means "its name".
+    const page = (await env.server.inject({ method: 'GET', url: `/w/${linked.id}/tickets/panel`, ...get(main.owner) })).body;
+    expect(page).toContain(`Menu name on ${main.workspace.name}’s panel`);
+    const res = await save(linked.id, { section_title: 'Mailcraft' });
+    await fresh();
+    expect(linked.panel_section_title).toBeNull();
+    // The main's panel shows the old name until its admins publish it again.
+    expect(await checkPanel(env.deps, main.workspace.id, { live: false })).toMatchObject({ state: 'published', outdated: true });
+    expect(res.headers.location).toBe(`/w/${linked.id}/tickets/panel`);
+    // A workspace that isn't one of the main's can't be named from its page.
+    const other = await makeWorkspace(env);
+    await save(main.workspace.id, { [`section_title_${other.workspace.id}`]: 'Hijacked' });
+    expect((await getWorkspace(env.db, other.workspace.id))!.panel_section_title).toBeNull();
+  });
+
+  it('shows the menus privately for Open a ticket, and one workspace’s apps page by page from More apps', async () => {
+    await setMyTickets(env.db, main.workspace.id, true);
+    await env.db.query('UPDATE workspaces SET panel_section_title = $2 WHERE id = $1', [linked.id, 'Community Apps']);
+    for (let n = 0; n < 26; n++) {
+      await createApp(env.db, linked.id, { name: `Tool ${String(n).padStart(2, '0')}`, description: null, repo: { id: MAILCRAFT_REPO, owner: 'mailcraft-org', name: 'mailcraft', private: false }, labels: [], enabled: true });
+    }
+    const picker = (await click('tr:open')).json().data;
+    expect(picker.flags & 64).toBe(64);
+    expect(placeholders(picker)).toEqual([`${main.workspace.name}: choose an app…`, 'Community Apps: choose an app…']);
+    const community = picker.components[1].components[0];
+    expect(community.custom_id).toBe('tr:pickp:1');
+    expect(community.options).toHaveLength(25);
+    expect(community.options.at(-1)).toMatchObject({ label: 'More apps…', value: `__more:${linked.id}`, description: 'Browse all 27 in Community Apps' });
+
+    // More apps: Community Apps' 27, page by page, in place of the menus.
+    const more = (await click('tr:pickp:1', { values: [`__more:${linked.id}`] })).json();
+    expect(more.type).toBe(7);
+    expect(more.data.content).toBe('Choose the app you need help with in Community Apps (page 1 of 2).');
+    expect(more.data.components[1].components.map((b: any) => b.custom_id)).toEqual([`tr:page:-1:${linked.id}`, `tr:page:1:${linked.id}`]);
+    const next = (await click(`tr:page:1:${linked.id}`)).json().data;
+    expect(next.components[0].components[0].options.map((o: any) => o.label)).toEqual(['Tool 24', 'Tool 25']);
+    // A pick from it files in the linked workspace.
+    const modal = (await click('tr:pickp', { values: [mailcraft.public_id] })).json();
+    expect(modal.type).toBe(9);
+    // Another workspace's ID isn't a menu here.
+    const other = await makeWorkspace(env);
+    expect((await click(`tr:page:0:${other.workspace.id}`)).json().data.embeds[0].title).toBe('Out of date');
+  });
+
+  it('keeps one menu when only one workspace has apps on the panel', async () => {
+    await env.db.query('UPDATE apps SET enabled = 0 WHERE workspace_id = $1', [linked.id]);
+    await publishPanel(env.deps, main.workspace.id, null);
+    const posted = [...env.discord.messages.values()].at(-1)!.payload as any;
+    expect(posted.components).toHaveLength(1);
+    expect(posted.components[0].components[0]).toMatchObject({ custom_id: 'tr:pick', placeholder: 'Choose an app…' });
   });
 });
 
