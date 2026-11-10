@@ -607,7 +607,7 @@ export function registerWorkspaceRoutes(app: FastifyInstance, web: Web): void {
           ${latestCard(feed, false)}
           ${accessCard(m)}
         </div>`;
-      return web.render(reply, ctx, 'Overview', 'overview', body);
+      return web.render(reply, ctx, 'Overview', 'overview', body, { width: 'full' });
     }
 
     const steps: { state: StepState; icon: IconName; name: string; detail: string; href: string; cta: string }[] = [
@@ -648,7 +648,7 @@ export function registerWorkspaceRoutes(app: FastifyInstance, web: Web): void {
       ${setupDone ? html`<details class="card setup-done">
           <summary>${icon('circle-check', 16, 'ok')}<span>Setup complete</span><span class="small muted truncate">GitHub · Discord · ${plural(enabledApps.length, 'app')}</span>${icon('chevron-down', 16, 'chev')}</summary>
           <div>${steps.map(stepRow)}</div></details>` : ''}`;
-    return web.render(reply, ctx, 'Overview', 'overview', body);
+    return web.render(reply, ctx, 'Overview', 'overview', body, { width: 'full' });
   });
 
   // ---- Workspace settings -----------------------------------------------------------------------

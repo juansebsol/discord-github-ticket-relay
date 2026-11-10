@@ -125,14 +125,14 @@ describe('Discord payloads respect platform limits', () => {
   const apps = Array.from({ length: 60 }, (_, i) => ({ publicId: `APP${String(i).padStart(7, '0')}`, name: `App ${i} ${'x'.repeat(120)}`, description: 'd'.repeat(150) }));
   it('fits up to 25 apps in the panel menu directly', () => {
     const panel = m.buildPanelMessage({ title: null, intro: null, apps: apps.slice(0, 25) });
-    const select = panel.components[0]!.components[0]!;
+    const select = panel.components[0]!.components[0] as { options: { label: string; description?: string }[] };
     expect(select.options).toHaveLength(25);
     expect(select.options.every((o) => o.label.length <= 100 && (o.description?.length ?? 0) <= 100)).toBe(true);
     expect(panel.allowed_mentions).toEqual({ parse: [] });
   });
   it('adds a "More apps" entry and paginates when there are more than 25', () => {
     const panel = m.buildPanelMessage({ title: null, intro: null, apps });
-    const options = panel.components[0]!.components[0]!.options;
+    const options = (panel.components[0]!.components[0] as { options: { value: string }[] }).options;
     expect(options).toHaveLength(25);
     expect(options[24]!.value).toBe(m.MORE_APPS_VALUE);
     const pages = [0, 1, 2].map((p) => m.buildPickerPage(apps, p));

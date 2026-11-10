@@ -83,8 +83,8 @@ describe('console pages', () => {
   });
 
   it('uses the whole window for tables and lists, and a readable width for settings and forms', async () => {
-    const full = ['/tickets', '/issues', '/issues/github', '/issues/sync', '/tickets/types', '/tickets/files', '/triage', '/triage/activity', '/apps', '/members', '/contributors'];
-    const readable = ['', '/triage/actions', '/triage/prompt', '/triage/runs', '/tickets/panel', '/tickets/settings', '/apps/new', '/settings', '/setup/github'];
+    const full = ['', '/tickets', '/issues', '/issues/github', '/issues/sync', '/tickets/types', '/tickets/files', '/triage', '/triage/activity', '/apps', '/members', '/contributors'];
+    const readable = ['/triage/actions', '/triage/prompt', '/triage/runs', '/tickets/panel', '/tickets/settings', '/apps/new', '/settings', '/setup/github'];
     for (const p of full) expect((await env.server.inject({ method: 'GET', url: w() + p, ...get(ws.owner) })).body, p).toContain('<div class="page full">');
     for (const p of readable) expect((await env.server.inject({ method: 'GET', url: w() + p, ...get(ws.owner) })).body, p).toContain('<div class="page">');
     // The main column of a table takes the extra room.
