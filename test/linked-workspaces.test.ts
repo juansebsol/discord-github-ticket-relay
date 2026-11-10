@@ -41,8 +41,9 @@ afterAll(async () => {
 });
 
 describe('Linked workspaces: who is in them', () => {
-  it('has the main’s owner and admins as admins and its global moderators as moderators, with their pages', async () => {
-    const admin = await join('admin');
+  it('has the main’s owner and global admins as admins and its global moderators as moderators, with their pages', async () => {
+    const admin = await join('admin', { global: true });
+    const mainAdmin = await join('admin');
     const globalMod = await join('moderator', { global: true });
     const mod = await join('moderator');
     await grant(env, main.workspace.id, globalMod.user.id, { moderation: 'edit' });
@@ -51,6 +52,7 @@ describe('Linked workspaces: who is in them', () => {
     expect(await getMembership(env.db, admin.user.id, linked.id)).toMatchObject({ role: 'admin', via: main.workspace.name });
     expect(await getMembership(env.db, globalMod.user.id, linked.id)).toMatchObject({ role: 'moderator', global: true, access: { moderation: 'edit' } });
     expect(await getMembership(env.db, mod.user.id, linked.id)).toBeNull();
+    expect(await getMembership(env.db, mainAdmin.user.id, linked.id)).toBeNull();
 
     // A linked workspace sits right after its main.
     expect((await listMemberships(env.db, admin.user.id)).map((m) => m.workspace.name)).toEqual([main.workspace.name, 'Mailcraft']);
@@ -58,26 +60,76 @@ describe('Linked workspaces: who is in them', () => {
     expect((await env.server.inject({ method: 'GET', url: `/w/${linked.id}`, ...get(mod) })).statusCode).toBe(404);
   });
 
-  it('invites moderators of its own, who don’t see the main', async () => {
-    const res = await env.server.inject({ method: 'POST', url: `/w/${linked.id}/members/invites`, ...form(main.owner, { role: 'admin' }) });
+  it('invites admins and moderators of its own, who don’t see the main or the server’s pages', async () => {
+    const res = await env.server.inject({ method: 'POST', url: `/w/${linked.id}/members/invites`, ...form(main.owner, { role: 'admin', global: '1' }) });
     const token = /\/invite\/([A-Za-z0-9_-]+)/.exec(res.body)![1]!;
-    expect(res.body).toContain('Moderator invite link');
+    expect(res.body).toContain('Admin invite link');
     const sam = await makeAdmin(env);
     await acceptInvite(env.db, token, sam.user.id);
-    expect(await getMembership(env.db, sam.user.id, linked.id)).toMatchObject({ role: 'moderator', global: false });
+    expect(await getMembership(env.db, sam.user.id, linked.id)).toMatchObject({ role: 'admin', global: false, local: true });
     expect(await getMembership(env.db, sam.user.id, main.workspace.id)).toBeNull();
-    await expect(createInvite(env.db, linked.id, main.owner.user.id, 'admin')).rejects.toThrow('only has moderators of its own');
+
+    // Sam runs Mailcraft, but the whole server's pages stay with the main's team.
+    const at = (path: string) => env.server.inject({ method: 'GET', url: `/w/${linked.id}${path}`, ...get(sam) });
+    expect((await at('/setup/github')).statusCode).toBe(200);
+    const overview = await at('');
+    expect(overview.body).not.toContain(`href="/w/${linked.id}/deployment"`);
+    expect(overview.body).not.toContain('Server health');
+    for (const path of ['/deployment', '/health']) {
+      const page = await at(path);
+      expect(page.statusCode).toBe(403);
+      expect(page.body).toContain('cover the whole server');
+    }
+
+    // Sam invites moderators of Mailcraft (never admins), and removes them; roles stay with the owner.
+    const invite = await env.server.inject({ method: 'POST', url: `/w/${linked.id}/members/invites`, ...form(sam, { role: 'admin' }) });
+    expect(invite.body).toContain('Moderator invite link');
+    const lee = await makeAdmin(env);
+    await acceptInvite(env.db, /\/invite\/([A-Za-z0-9_-]+)/.exec(invite.body)![1]!, lee.user.id);
+    expect(await getMembership(env.db, lee.user.id, linked.id)).toMatchObject({ role: 'moderator', local: true });
+    expect((await env.server.inject({ method: 'POST', url: `/w/${linked.id}/members/${lee.user.id}/role`, ...form(sam, { role: 'admin' }) })).statusCode).toBe(403);
+    // Lee can't be given Server health from here either.
+    await grant(env, linked.id, lee.user.id, { health: 'view' });
+    expect((await env.server.inject({ method: 'GET', url: `/w/${linked.id}/health`, ...get(lee) })).statusCode).toBe(403);
+    await env.server.inject({ method: 'POST', url: `/w/${linked.id}/members/${lee.user.id}/remove`, ...form(sam) });
+    expect(await getMembership(env.db, lee.user.id, linked.id)).toBeNull();
+    // Not someone the owner made admin.
+    const kit = await join('admin', { workspace: linked.id });
+    await env.server.inject({ method: 'POST', url: `/w/${linked.id}/members/${kit.user.id}/remove`, ...form(sam) });
+    expect(await getMembership(env.db, kit.user.id, linked.id)).toMatchObject({ role: 'admin' });
 
     const page = await env.server.inject({ method: 'GET', url: `/w/${linked.id}/members`, ...get(main.owner) });
     expect(page.body).toContain(`From ${main.workspace.name}`);
-    expect(page.body).toContain('Only in Mailcraft');
-    expect(page.body).not.toContain('Change role…');
+    expect(page.body).toContain('Added in Mailcraft');
   });
 
-  it('makes global moderators from the invite switch or a role change, and taking it away takes the linked workspaces away', async () => {
+  it('makes a global moderator an admin of a linked workspace alone, and back', async () => {
+    const benz = await join('moderator', { global: true });
+    await grant(env, main.workspace.id, benz.user.id, { moderation: 'edit' });
+    const members = await env.server.inject({ method: 'GET', url: `/w/${linked.id}/members`, ...get(main.owner) });
+    expect(members.body).toContain(`id="role-${benz.user.id}"`);
+    expect(members.body).toContain('Admin of Mailcraft');
+
+    await env.server.inject({ method: 'POST', url: `/w/${linked.id}/members/${benz.user.id}/role`, ...form(main.owner, { role: 'admin' }) });
+    expect(await getMembership(env.db, benz.user.id, linked.id)).toMatchObject({ role: 'admin', local: true });
+    expect(await getMembership(env.db, benz.user.id, main.workspace.id)).toMatchObject({ role: 'moderator', global: true });
+    expect((await env.server.inject({ method: 'GET', url: `/w/${linked.id}/setup/github`, ...get(benz) })).statusCode).toBe(200);
+    expect((await listMemberships(env.db, benz.user.id)).map((m) => [m.workspace.name, m.role])).toEqual([[main.workspace.name, 'moderator'], ['Mailcraft', 'admin']]);
+    const after = await env.server.inject({ method: 'GET', url: `/w/${linked.id}/members`, ...get(main.owner) });
+    expect(after.body).toContain(`global moderator in ${main.workspace.name}`);
+
+    // Back to moderator: through the main again, with the main's pages.
+    await env.server.inject({ method: 'POST', url: `/w/${linked.id}/members/${benz.user.id}/role`, ...form(main.owner, { role: 'moderator' }) });
+    expect(await getMembership(env.db, benz.user.id, linked.id)).toMatchObject({ role: 'moderator', via: main.workspace.name, access: { moderation: 'edit' } });
+    expect((await env.db.query('SELECT count(*) AS n FROM workspace_members WHERE workspace_id = $1 AND user_id = $2', [linked.id, benz.user.id])).rows[0].n).toBe(0);
+  });
+
+  it('makes global admins and moderators from the invite switch or a role change, and taking it away takes the linked workspaces away', async () => {
     const page = await env.server.inject({ method: 'GET', url: `/w/${main.workspace.id}/members?invite=1`, ...get(main.owner) });
-    expect(page.body).toContain('data-follows="invite-role-moderator"');
-    expect(page.body).toContain('Also a moderator in Mailcraft, with the same pages.');
+    expect(page.body).toContain('Also an admin or moderator in Mailcraft, the same as here.');
+    expect(page.body).not.toMatch(/name="global"[^>]*checked/);
+    const admin = await env.server.inject({ method: 'POST', url: `/w/${main.workspace.id}/members/invites`, ...form(main.owner, { role: 'admin', global: '1' }) });
+    expect(admin.body).toContain('Global admin invite link');
     const res = await env.server.inject({ method: 'POST', url: `/w/${main.workspace.id}/members/invites`, ...form(main.owner, { role: 'moderator', global: '1' }) });
     expect(res.body).toContain('Global moderator invite link');
     const token = /\/invite\/([A-Za-z0-9_-]+)/.exec(res.body)![1]!;
@@ -90,10 +142,15 @@ describe('Linked workspaces: who is in them', () => {
     await env.server.inject({ method: 'POST', url: `/w/${main.workspace.id}/members/${kim.user.id}/role`, ...form(main.owner, { role: 'moderator' }) });
     expect(await getMembership(env.db, kim.user.id, linked.id)).toBeNull();
     expect((await env.db.query(`SELECT end_reason FROM ticket_claims WHERE id = 'c1'`)).rows[0]).toEqual({ end_reason: 'left' });
-    await env.server.inject({ method: 'POST', url: `/w/${main.workspace.id}/members/${kim.user.id}/role`, ...form(main.owner, { role: 'global' }) });
+    await env.server.inject({ method: 'POST', url: `/w/${main.workspace.id}/members/${kim.user.id}/role`, ...form(main.owner, { role: 'moderator', global: '1' }) });
     expect(await getMembership(env.db, kim.user.id, linked.id)).toMatchObject({ role: 'moderator', global: true });
+    await env.server.inject({ method: 'POST', url: `/w/${main.workspace.id}/members/${kim.user.id}/role`, ...form(main.owner, { role: 'admin', global: '1' }) });
+    expect(await getMembership(env.db, kim.user.id, linked.id)).toMatchObject({ role: 'admin', via: main.workspace.name });
     const members = await env.server.inject({ method: 'GET', url: `/w/${main.workspace.id}/members`, ...get(main.owner) });
-    expect(members.body).toContain('Global moderator');
+    expect(members.body).toContain('Global admin');
+    // An admin of the main only: not in Mailcraft.
+    await env.server.inject({ method: 'POST', url: `/w/${main.workspace.id}/members/${kim.user.id}/role`, ...form(main.owner, { role: 'admin' }) });
+    expect(await getMembership(env.db, kim.user.id, linked.id)).toBeNull();
   });
 
   it('is made from the main’s Settings, and not from a linked workspace', async () => {
@@ -110,6 +167,9 @@ describe('Linked workspaces: who is in them', () => {
     }
     const globalMod = await join('moderator', { global: true });
     expect((await env.server.inject({ method: 'GET', url: `/w/${made.id}`, ...get(globalMod) })).body).not.toContain('New linked workspace…');
+    // An admin of the linked workspace alone can't add workspaces to the main.
+    const own = await join('admin', { workspace: made.id });
+    expect((await env.server.inject({ method: 'GET', url: `/w/${made.id}`, ...get(own) })).body).not.toContain('New linked workspace…');
     const settings = await env.server.inject({ method: 'GET', url: `/w/${main.workspace.id}/settings`, ...get(main.owner) });
     expect(settings.body).toContain('Linked workspaces');
     expect(settings.body).toContain('GitHub: mailcraft-org');

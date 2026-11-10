@@ -240,7 +240,11 @@ export async function buildServer(deps: Deps, processor: Processor, opts: { logg
         // A page admins can open to moderators: say which one, and what access it needs.
         const grant = permissions.map((p) => /^(.+)\.(view|edit)$/.exec(p)).find((x) => x && isArea(x[1]!));
         const area = grant && isArea(grant[1]!) ? grant[1] : null;
-        const text = area
+        // Someone only in a linked workspace: the whole server's pages stay with the main's team.
+        const serverWide = membership.local && permissions.some((p) => p === 'server' || p === 'health.view' || p === 'health.edit');
+        const text = serverWide
+          ? 'Deployment and Server health cover the whole server, so they’re for the main workspace’s team.'
+          : area
           ? grant![2] === 'edit' && can(membership, `${area}.view`) ? `You can see ${areaLabel(area)}, but not change it. Ask an admin if you need Edit.` : `You don’t have access to ${areaLabel(area)}. Ask an admin if you need it.`
           : permissions.every((p) => p === 'members')
             ? 'Only the owner can do this. Ask the owner if you need it.'

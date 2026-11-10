@@ -231,11 +231,15 @@ Discord endpoint, OAuth), one or more queue workers, and an optional triage work
   its main's Discord server: `getDiscordConnection()` returns the main's row with the linked
   workspace's ID and its own panel channel (`workspaces.panel_channel_*`). Contributor roles,
   announcements and bot features stay with the main (`isMainOnlyPath()` turns those routes
-  away). People: the main's owner and admins are its admins, and the main's **global
-  moderators** (`workspace_members.global_mod`) its moderators with their main access map,
-  computed in `getMembership()`/`listMemberships()` (they win over a membership of their own);
-  it can invite moderators of its own, never admins. Turning someone's global off or removing
-  them from the main ends their claims and revokes their MCP tokens in linked workspaces.
+  away). People: the main's owner and **global admins** are its admins, and the main's **global
+  moderators** its moderators with their main access map (`workspace_members.global_mod` is the
+  Global switch for both roles), computed in `getMembership()`/`listMemberships()`. It can also
+  have admins and moderators of its own; someone in it both ways gets the higher role (the same
+  role: the main's). The owner makes admins; a linked workspace's admins invite, revoke and
+  remove moderators of it. Someone only in a linked workspace is `local`: never the whole
+  server's pages (Deployment, Server health; the `server` permission). Turning someone's global
+  off or removing them from the main ends their claims and revokes their MCP tokens in linked
+  workspaces where they have no role of their own.
 - **Panels across workspaces:** a linked workspace's apps are on its main's panel
   (`on_main_panel`, after the main's apps) or on a panel of its own. Discord interactions arrive
   for the main; a linked workspace's own panel tags its ticket custom_ids `~<workspace id>`

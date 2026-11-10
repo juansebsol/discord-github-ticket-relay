@@ -160,7 +160,7 @@ export function registerAuthRoutes(app: FastifyInstance, web: Web): void {
         ? html`<div class="ws-list">${memberships.map((m) => {
             // A linked workspace sits under its main (when they can open it), indented.
             const main = m.workspace.parent_id ? memberships.find((x) => x.workspace.id === m.workspace.parent_id) : undefined;
-            const role = m.role === 'moderator' && m.global ? 'Global moderator' : ROLE_LABELS[m.role];
+            const role = m.role !== 'owner' && m.global && !m.workspace.parent_id ? `Global ${ROLE_LABELS[m.role].toLowerCase()}` : ROLE_LABELS[m.role];
             return html`<a href="/w/${m.workspace.id}" ${main ? raw('class="linked"') : ''}><span class="ws-tile" aria-hidden="true">${initials(m.workspace.name, 2)}</span><span class="grow"><span class="name">${m.workspace.name}</span><span class="sub">${role}${main ? ` · Linked to ${main.workspace.name}` : ''}</span></span>${icon('chevron-right')}</a>`;
           })}</div>`
         : html`<p class="muted small">You’re not a member of any workspace yet.</p>`}
@@ -196,7 +196,7 @@ export function registerAuthRoutes(app: FastifyInstance, web: Web): void {
       ? html`<div><h1>Join ${invite.workspace_name}</h1>
           <p class="muted small">You were invited as ${invite.role === 'moderator'
             ? invite.global_mod ? 'a global moderator. You’ll see the tickets inbox here and in its linked workspaces; an admin decides what else you can do.' : 'a moderator. You’ll see the tickets inbox; an admin decides what else you can do.'
-            : 'an admin. You’ll be able to manage the whole integration.'}</p></div>
+            : invite.global_mod ? 'a global admin. You’ll be able to manage the whole integration, here and in its linked workspaces.' : 'an admin. You’ll be able to manage the whole integration.'}</p></div>
           <form method="post" action="/invite/${token}">${csrfField(ctx.csrf)}${submitBtn('Accept invitation', { variant: 'primary', block: true })}</form>`
       : html`<div><h1>Invitation unavailable</h1><p class="muted small">This invitation link is invalid, expired or has already been used. Ask the workspace owner for a new one.</p></div>${linkBtn('/', 'Back to the console', { block: true })}`;
     return reply.type('text/html').send(simplePage('Invitation', body));

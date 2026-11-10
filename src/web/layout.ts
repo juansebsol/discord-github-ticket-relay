@@ -91,8 +91,9 @@ function stepMark(state: StepState): SafeHtml {
   return html`${icon('circle-dashed', 14, 'faint')}<span class="sr-only"> (not done)</span>`;
 }
 
-export function roleLabel(access: MemberAccess & { global?: boolean }): string {
-  const name = access.role === 'moderator' && access.global ? 'Global moderator' : ROLE_LABELS[access.role];
+export function roleLabel(access: MemberAccess & { global?: boolean; workspace?: WorkspaceRow }): string {
+  // "Global": a main workspace's admin or moderator who is one in its linked workspaces too.
+  const name = access.role !== 'owner' && access.global && !access.workspace?.parent_id ? `Global ${ROLE_LABELS[access.role].toLowerCase()}` : ROLE_LABELS[access.role];
   // View only: a moderator who can't change anything anywhere.
   if (access.role === 'moderator' && !AREA_KEYS.some((a) => can(access, `${a}.edit`))) return `${name} · View only`;
   return name;
@@ -142,8 +143,10 @@ export function layout(ctx: PageContext, opts: { title: string; active: string; 
         <div class="nav-label">Workspace</div>
         ${manage ? navItem(`${base}/members`, 'Members & permissions', 'users', a === 'members') : lockedNavItem('Members & permissions', 'users')}
         ${manage ? navItem(`${base}/settings`, 'Settings', 'settings', a === 'settings') : lockedNavItem('Settings', 'settings')}
-        ${manage ? navItem(`${base}/deployment`, 'Deployment', 'server', a === 'deployment') : lockedNavItem('Deployment', 'server')}
+        ${access.local ? '' : html`
+        ${can(access, 'server') ? navItem(`${base}/deployment`, 'Deployment', 'server', a === 'deployment') : lockedNavItem('Deployment', 'server')}
         ${can(access, 'health.view') ? navItem(`${base}/health`, 'Server health', 'activity', a === 'health', html`<span class="nav-tag" data-dev-tag title="Dev mode is on: restarts aren’t counted" ${p?.devMode ? '' : raw('hidden')}>Dev mode</span>`) : lockedNavItem('Server health', 'activity', { grantable: true })}
+        `}
       </nav>`
     : html``;
 
@@ -215,7 +218,7 @@ function newLinkedDialog(main: WorkspaceRow, csrf: string): SafeHtml {
     csrf,
     body: html`<div class="field"><label for="new-linked-name">Name</label>
       <input id="new-linked-name" type="text" class="full" name="name" required maxlength="80" placeholder="For example, the app or team">
-      <div class="hint">For apps whose repositories are in another GitHub organization. It gets its own GitHub connection, apps, tickets, AI triage and analytics, and uses ${main.name}’s Discord server. ${main.name}’s admins and global moderators are in it automatically.</div></div>`,
+      <div class="hint">For apps whose repositories are in another GitHub organization. It gets its own GitHub connection, apps, tickets, AI triage and analytics, and uses ${main.name}’s Discord server. ${main.name}’s owner, global admins and global moderators are in it automatically, and you can invite people just for it.</div></div>`,
     submit: submitBtn('Create', { variant: 'primary', icon: 'plus', loading: 'Creating…' }),
   });
 }

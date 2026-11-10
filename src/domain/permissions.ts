@@ -97,10 +97,13 @@ export type Permission =
   | 'view' // overview
   | 'manage' // setup, panels, ticket types, contributor roles, settings, moderator access
   | 'members' // invite people, change roles, remove people
+  | 'server' // Deployment and Server health: the whole server's, not just this workspace's
   | `${Area}.${'view' | 'edit'}`; // a page: see it, or change it
 
 export interface MemberAccess {
   role: Role;
+  /** Only in a linked workspace (an outside team's): never the whole server's pages (Deployment, Server health). */
+  local?: boolean;
   /** Moderators: per page, view or edit (pages left out: no access); and the MCP tools switched on. */
   access: Partial<Record<Area, 'view' | 'edit'>> & { mcp?: string[] };
 }
@@ -165,6 +168,7 @@ export function canUseMcp(m: MemberAccess): boolean {
 }
 
 export function can(m: MemberAccess, p: Permission): boolean {
+  if (m.local && (p === 'server' || p === 'health.view' || p === 'health.edit')) return false;
   if (m.role === 'owner') return true;
   if (m.role === 'admin') return p !== 'members';
   if (p === 'view') return true;

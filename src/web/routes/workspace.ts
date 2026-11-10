@@ -687,7 +687,7 @@ export function registerWorkspaceRoutes(app: FastifyInstance, web: Web): void {
       return html`<div class="card">
         <div class="card-h"><div><h2>Linked workspace</h2><div class="desc">${ws.name} is linked to ${canOpenMain ? html`<a href="/w/${main.id}">${main.name}</a>` : main.name}.</div></div></div>
         ${setting('Its own', null, html`<span class="value">GitHub organization, apps, ticket types, tickets, AI triage, moderation and analytics</span>`, { stacked: true })}
-        ${setting(`From ${main.name}`, null, html`<span class="value">The Discord server; contributor roles, announcements and bot features; its owner and admins, who are admins here; and its global moderators, who are moderators here</span>`, { stacked: true })}
+        ${setting(`From ${main.name}`, null, html`<span class="value">The Discord server; contributor roles, announcements and bot features; its owner and global admins, who are admins here; and its global moderators, who are moderators here</span>`, { stacked: true })}
       </div>`;
     }
     const linked = await listLinked(deps.db, ws.id);
@@ -698,7 +698,7 @@ export function registerWorkspaceRoutes(app: FastifyInstance, web: Web): void {
       return html`<a class="line setup-row" href="/w/${l.id}">${icon('corner-down-right', 16, 'muted')}<span class="grow"><span class="name">${l.name}</span><span class="small muted"> · ${gh ? `GitHub: ${gh.account_login}` : 'GitHub not connected'} · ${where}</span></span>${icon('chevron-right', 16, 'muted')}</a>`;
     });
     return html`<div class="card" id="linked">
-      <div class="card-h"><div><h2>Linked workspaces</h2><div class="desc">For apps whose repositories are in another GitHub organization. Each one has its own GitHub connection, apps, tickets, AI triage and analytics, and uses this workspace’s Discord server. Its apps go on this panel or a panel of their own. This workspace’s owner and admins are its admins, and global moderators are its moderators.</div></div></div>
+      <div class="card-h"><div><h2>Linked workspaces</h2><div class="desc">For apps whose repositories are in another GitHub organization. Each one has its own GitHub connection, apps, tickets, AI triage and analytics, and uses this workspace’s Discord server. Its apps go on this panel or a panel of their own. This workspace’s owner and global admins are its admins, and global moderators its moderators; each can also have people of its own.</div></div></div>
       ${rows.length ? html`<div>${rows}</div>` : ''}
       <form method="post" action="${ctx.base}/settings/linked" class="card-f linked-new">${csrfField(ctx.csrf)}
         <label class="sr-only" for="linked-name">Name of the linked workspace</label>
@@ -750,7 +750,8 @@ export function registerWorkspaceRoutes(app: FastifyInstance, web: Web): void {
   app.get('/w/:wid/provider-setup', async (req, reply) => reply.redirect(`/w/${(req.params as { wid: string }).wid}/deployment`));
 
   app.get('/w/:wid/deployment', async (req, reply) => {
-    const ctx = await web.requireWorkspace(req, reply);
+    // The whole server's setup: not for someone who's only in a linked workspace.
+    const ctx = await web.requireWorkspace(req, reply, { permission: 'server' });
     if (!ctx) return reply;
     const c = deps.config;
     const [discordCheck, githubCheck, claude] = await Promise.all([
