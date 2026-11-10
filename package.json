@@ -18,7 +18,7 @@
     "type": "git",
     "url": "git+https://github.com/juansebsol/discord-github-ticket-relay.git"
   },
-  "license": "UNLICENSED",
+  "license": "MIT",
   "type": "module",
   "bugs": {
     "url": "https://github.com/juansebsol/discord-github-ticket-relay/issues"

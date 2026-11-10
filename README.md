@@ -138,3 +138,7 @@ in the console.
 ## Scope
 
 Not included: GitHub ↔ Discord comment sync, status updates to members after filing (the console shows each issue's live state), private ticket channels.
+
+## License
+
+[MIT](LICENSE). Icons are from [Lucide](https://lucide.dev) (ISC).
