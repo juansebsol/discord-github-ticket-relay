@@ -1,5 +1,5 @@
 import { DiscordApiError, DiscordErrorCode } from '../discord/client.js';
-import { buildPanelMessage, type PanelApp, type PanelSection } from '../discord/messages.js';
+import { buildPanelMessage, type PanelApp, type PanelGroup } from '../discord/messages.js';
 import type { Queryable } from '../db/database.js';
 import { sha256 } from '../lib/crypto.js';
 import { panelApps, panelWorkspaces, withScope } from './linked.js';
@@ -12,28 +12,45 @@ export function panelApp(a: Pick<AppRow, 'public_id' | 'name' | 'description'>):
   return { publicId: a.public_id, name: a.name, description: a.description };
 }
 
-/** A workspace's menu name on a panel with apps from several: its own (Discord tickets › Panel), or its name. */
-export function sectionTitle(ws: Pick<WorkspaceRow, 'name' | 'panel_section_title'>): string {
-  return ws.panel_section_title?.trim() || ws.name;
+export const OTHER_APPS = 'Other apps';
+
+/** The main's button name on a panel with groups: its own (Discord tickets › Panel), or its name. */
+export function mainGroupTitle(main: Pick<WorkspaceRow, 'name' | 'panel_section_title'>): string {
+  return main.panel_section_title?.trim() || main.name;
 }
 
-/** The panel's enabled apps by workspace, in panel order, leaving out workspaces with none. */
-export function panelSectionsOf(family: WorkspaceRow[], apps: AppRow[]): PanelSection[] {
-  return family
-    .map((w) => ({ id: w.id, title: sectionTitle(w), apps: apps.filter((a) => a.enabled && a.workspace_id === w.id).map(panelApp) }))
-    .filter((s) => s.apps.length > 0);
-}
-
-/** For the private menu (Open a ticket, "More apps…"): the panel's enabled apps, and by workspace. */
-export async function panelSections(q: Queryable, workspace: WorkspaceRow): Promise<{ apps: AppRow[]; sections: PanelSection[] }> {
-  const [apps, family] = await Promise.all([panelApps(q, workspace), panelWorkspaces(q, workspace)]);
-  const enabled = apps.filter((a) => a.enabled);
-  return { apps: enabled, sections: panelSectionsOf(family, enabled) };
+/** The linked workspaces' button name: the main's own, or the one linked workspace's name, or "Other apps". */
+export function linkedGroupTitle(main: Pick<WorkspaceRow, 'panel_linked_title'>, linked: Pick<WorkspaceRow, 'name'>[]): string {
+  return main.panel_linked_title?.trim() || (linked.length === 1 ? linked[0]!.name : OTHER_APPS);
 }
 
 /**
- * The panel message for these apps (a main's include its linked workspaces' on it, in a menu for
- * each workspace). A linked workspace's own panel tags its custom_ids with its ID, so its clicks
+ * A main's panel with apps of its own and from linked workspaces: a button for each group (the
+ * main's, then every linked workspace's together, oldest first). Null otherwise: one menu, as before.
+ */
+export function panelGroupsOf(family: WorkspaceRow[], apps: AppRow[]): [PanelGroup, PanelGroup] | null {
+  const [main, ...linked] = family;
+  if (!main || main.parent_id || !linked.length) return null;
+  const enabled = apps.filter((a) => a.enabled);
+  const mine = enabled.filter((a) => a.workspace_id === main.id);
+  const withApps = linked.filter((l) => enabled.some((a) => a.workspace_id === l.id));
+  const theirs = withApps.flatMap((l) => enabled.filter((a) => a.workspace_id === l.id));
+  if (!mine.length || !theirs.length) return null;
+  return [
+    { key: 'main', title: mainGroupTitle(main), apps: mine.map(panelApp) },
+    { key: 'linked', title: linkedGroupTitle(main, withApps), apps: theirs.map(panelApp) },
+  ];
+}
+
+/** For the private menus (Open a ticket, a group's button, pages): the panel's enabled apps, and its groups. */
+export async function panelGroups(q: Queryable, workspace: WorkspaceRow): Promise<{ apps: AppRow[]; groups: [PanelGroup, PanelGroup] | null }> {
+  const [apps, family] = await Promise.all([panelApps(q, workspace), panelWorkspaces(q, workspace)]);
+  return { apps: apps.filter((a) => a.enabled), groups: panelGroupsOf(family, apps) };
+}
+
+/**
+ * The panel message for these apps (a main's include its linked workspaces' on it, behind a button
+ * for each group). A linked workspace's own panel tags its custom_ids with its ID, so its clicks
  * come back to it.
  */
 export function panelPayloadFor(workspace: WorkspaceRow, apps: AppRow[], hasTypes = false, family: WorkspaceRow[] = [workspace]) {
@@ -43,7 +60,7 @@ export function panelPayloadFor(workspace: WorkspaceRow, apps: AppRow[], hasType
     title: workspace.panel_title,
     intro: workspace.panel_intro,
     apps: apps.filter((a) => a.enabled).map(panelApp),
-    sections: panelSectionsOf(family, apps),
+    groups: panelGroupsOf(family, apps),
   }), workspace.parent_id ? workspace.id : null);
   return { payload, hash: sha256(JSON.stringify(payload)) };
 }

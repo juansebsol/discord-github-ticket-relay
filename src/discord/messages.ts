@@ -27,12 +27,12 @@ export const ComponentType = {
 
 export const CustomId = {
   panelSelect: 'tr:pick',
-  /** One workspace's menu on a panel with a menu for each (tr:pick:0, tr:pick:1…). */
-  panelSection: (index: number) => `tr:pick:${index}`,
   pickerSelect: 'tr:pickp',
-  pickerSection: (index: number) => `tr:pickp:${index}`,
-  /** A page of the private app menu: all the panel's apps, or one workspace's (its ID). */
-  pickerPage: (page: number, section?: string) => `tr:page:${page}${section ? `:${section}` : ''}`,
+  /** A page of the private app menu: all the panel's apps, or one group's. */
+  pickerPage: (page: number, group?: PanelGroupKey) => `tr:page:${page}${group ? `:${group}` : ''}`,
+  /** A group's button (the main's apps, or the linked workspaces'): on the panel, or in the private Open a ticket message. */
+  group: (key: PanelGroupKey) => `tr:grp:${key}`,
+  groupPrivate: (key: PanelGroupKey) => `tr:grpp:${key}`,
   form: (appPublicId: string, repoId: number, typePublicId?: string) => `tr:form:${appPublicId}:${repoId}${typePublicId ? `:${typePublicId}` : ''}`,
   typeSelect: (appPublicId: string, repoId: number) => `tr:type:${appPublicId}:${repoId}`,
   // Panel buttons (My tickets on): open a ticket privately, and the member's own tickets.
@@ -55,14 +55,9 @@ export const CustomId = {
 };
 
 export const MORE_APPS_VALUE = '__more';
-/** "More apps…" in one workspace's menu: that workspace's apps, page by page. */
-export function moreAppsValue(section?: string): string {
-  return section ? `${MORE_APPS_VALUE}:${section}` : MORE_APPS_VALUE;
-}
 export const SELECT_MAX = 25;
-/** A message holds 5 rows, so a panel has a menu for each workspace while there are at most 5. */
-export const SECTIONS_MAX = 5;
-export const SECTION_TITLE_MAX = 80;
+/** A button label's limit in Discord. */
+export const GROUP_TITLE_MAX = 80;
 export const TITLE_MAX = 200;
 export const DESCRIPTION_MAX = 4000;
 
@@ -83,9 +78,14 @@ export interface PanelApp {
   description: string | null;
 }
 
-/** One workspace's apps on a panel with apps from several, under its name (Discord menus have no headings). */
-export interface PanelSection {
-  id: string;
+export type PanelGroupKey = 'main' | 'linked';
+
+/**
+ * A panel with apps from its workspace and from linked workspaces has a button for each group: the
+ * main's apps, and every linked workspace's together. A button opens that group's menu, privately.
+ */
+export interface PanelGroup {
+  key: PanelGroupKey;
   title: string;
   apps: PanelApp[];
 }
@@ -94,8 +94,8 @@ export interface PanelOptions {
   title: string | null;
   intro: string | null;
   apps: PanelApp[];
-  /** The apps by workspace: a menu each when there are 2 to 5 of them. */
-  sections?: PanelSection[];
+  /** The main's apps and the linked workspaces': a button each instead of the menu. */
+  groups?: [PanelGroup, PanelGroup] | null;
   /** When the workspace has ticket types, the steps mention choosing one. */
   hasTypes?: boolean;
   /** Open a ticket and My tickets buttons instead of the app menu. */
@@ -105,24 +105,27 @@ export interface PanelOptions {
 export const DEFAULT_PANEL_TITLE = 'Need help? Open a ticket';
 export const DEFAULT_PANEL_INTRO =
   'Pick the app you need help with from the menu below. A short form will open where you can describe the problem.';
-export const DEFAULT_PANEL_INTRO_MENUS =
-  'Pick the app you need help with from one of the menus below. A short form will open where you can describe the problem.';
+export const DEFAULT_PANEL_INTRO_GROUPS =
+  'Press the button for your app below, then pick it from the list. A short form will open where you can describe the problem.';
 export const DEFAULT_PANEL_INTRO_BUTTONS =
   'Press **Open a ticket** to tell us about a problem. A short form will open where you can describe it.';
 
-/** The introduction used when the workspace hasn't written its own, for the menu (or a menu per workspace) or the buttons. */
-export function defaultPanelIntro(myTickets: boolean, menus = false): string {
-  return myTickets ? DEFAULT_PANEL_INTRO_BUTTONS : menus ? DEFAULT_PANEL_INTRO_MENUS : DEFAULT_PANEL_INTRO;
+/** The introduction used when the workspace hasn't written its own, for the menu (or the group buttons) or Open a ticket. */
+export function defaultPanelIntro(myTickets: boolean, groups = false): string {
+  return myTickets ? DEFAULT_PANEL_INTRO_BUTTONS : groups ? DEFAULT_PANEL_INTRO_GROUPS : DEFAULT_PANEL_INTRO;
 }
 
-/** The sections that get a menu each: 2 to 5 workspaces with apps. Otherwise all apps share one menu. */
-export function menuSections(sections: PanelSection[] | undefined): PanelSection[] | null {
-  return sections && sections.length > 1 && sections.length <= SECTIONS_MAX ? sections : null;
+/** The two group buttons. Opening one shows its menu privately. */
+function groupButtons(groups: [PanelGroup, PanelGroup], id: (key: PanelGroupKey) => string) {
+  return {
+    type: ComponentType.ActionRow,
+    components: groups.map((g) => ({ type: ComponentType.Button, style: 1, label: truncate(g.title, GROUP_TITLE_MAX), custom_id: id(g.key) })),
+  };
 }
 
-/** A section's menu says whose apps are in it. */
-export function sectionPlaceholder(title: string): string {
-  return truncate(`${title}: choose an app…`, 150);
+/** "**ArtCraft** or **Community Apps**" for the steps. */
+function groupNames(groups: [PanelGroup, PanelGroup]): string {
+  return groups.map((g) => `**${escapeMarkdown(g.title)}**`).join(' or ');
 }
 
 function appOption(app: PanelApp) {
@@ -141,25 +144,15 @@ function menuOptions(apps: PanelApp[], more: string, browse: string) {
   return options;
 }
 
-/** One workspace's menu. Its options are app IDs, like the single menu's, so a pick works the same. */
-function sectionMenu(section: PanelSection, customId: string) {
-  return {
-    type: ComponentType.StringSelect,
-    custom_id: customId,
-    placeholder: sectionPlaceholder(section.title),
-    min_values: 1,
-    max_values: 1,
-    options: menuOptions(section.apps, moreAppsValue(section.id), `Browse all ${section.apps.length} in ${section.title}`),
-  };
-}
-
 export function buildPanelMessage(opts: PanelOptions) {
   const options = menuOptions(opts.apps, MORE_APPS_VALUE, `Browse all ${opts.apps.length} apps`);
   const buttons = Boolean(opts.myTickets);
-  const menus = buttons ? null : menuSections(opts.sections);
-  const first = buttons ? `1. Press **Open a ticket**${opts.apps.length > 1 ? ' and choose your app' : ''}.` : menus ? '1. Choose your app from its menu.' : '1. Choose your app from the menu.';
+  const groups = buttons ? null : opts.groups ?? null;
+  const first = buttons
+    ? `1. Press **Open a ticket**${opts.apps.length > 1 ? ' and choose your app' : ''}.`
+    : groups ? `1. Press ${groupNames(groups)}, then choose your app.` : '1. Choose your app from the menu.';
   const description = [
-    opts.intro?.trim() || defaultPanelIntro(buttons, Boolean(menus)),
+    opts.intro?.trim() || defaultPanelIntro(buttons, Boolean(groups)),
     '',
     '**How it works**',
     ...(opts.hasTypes
@@ -187,8 +180,8 @@ export function buildPanelMessage(opts: PanelOptions) {
         color: COLORS.brand,
       },
     ],
-    components: menus
-      ? menus.map((section, i) => ({ type: ComponentType.ActionRow, components: [sectionMenu(section, CustomId.panelSection(i))] }))
+    components: groups
+      ? [groupButtons(groups, CustomId.group)]
       : [
           {
             type: ComponentType.ActionRow,
@@ -223,11 +216,11 @@ const TICKET_PICKER: PickerIds = { select: CustomId.pickerSelect, page: CustomId
 export const CONTRIBUTOR_PICKER: PickerIds = { select: CustomId.contributorPickerSelect, page: CustomId.contributorPage };
 
 /** The private app menu (Open a ticket, or "More apps…"); Previous and Next only when it has pages. */
-export function buildPickerPage(apps: PanelApp[], requestedPage: number, ids: PickerIds = TICKET_PICKER, section?: string) {
+export function buildPickerPage(apps: PanelApp[], requestedPage: number, ids: PickerIds = TICKET_PICKER, group?: string) {
   const pageCount = Math.max(1, Math.ceil(apps.length / SELECT_MAX));
   const page = Math.min(Math.max(0, requestedPage), pageCount - 1);
   const slice = apps.slice(page * SELECT_MAX, (page + 1) * SELECT_MAX);
-  const ask = `Choose the app you need help with${section ? ` in ${section}` : ''}`;
+  const ask = `Choose the app you need help with${group ? ` in ${group}` : ''}`;
   return {
     content: pageCount > 1 ? `${ask} (page ${page + 1} of ${pageCount}).` : `${ask}.`,
     embeds: [],
@@ -258,20 +251,18 @@ export function buildPickerPage(apps: PanelApp[], requestedPage: number, ids: Pi
   };
 }
 
-/** One workspace's apps in the private menu, page by page ("More apps…" in its menu). */
-export function buildSectionPage(section: PanelSection, requestedPage: number) {
-  return buildPickerPage(section.apps, requestedPage, { select: CustomId.pickerSelect, page: (p) => CustomId.pickerPage(p, section.id) }, section.title);
+/** A group's apps in the private menu, page by page. */
+export function buildGroupPage(group: PanelGroup, requestedPage: number) {
+  return buildPickerPage(group.apps, requestedPage, { select: CustomId.pickerSelect, page: (p) => CustomId.pickerPage(p, group.key) }, group.title);
 }
 
-/** The private menu for Open a ticket: a menu for each workspace when the panel has 2 to 5, else one, page by page. */
-export function buildAppPicker(apps: PanelApp[], sections?: PanelSection[]) {
-  const menus = menuSections(sections);
-  if (!menus) return buildPickerPage(apps, 0);
+/** Open a ticket on a panel with groups: their two buttons, privately. */
+export function buildGroupChooser(groups: [PanelGroup, PanelGroup]) {
   return {
-    content: 'Choose the app you need help with.',
+    content: `Press ${groupNames(groups)}, then choose your app.`,
     embeds: [],
     flags: EPHEMERAL,
-    components: menus.map((section, i) => ({ type: ComponentType.ActionRow, components: [sectionMenu(section, CustomId.pickerSection(i))] })),
+    components: [groupButtons(groups, CustomId.groupPrivate)],
     allowed_mentions: NO_MENTIONS,
   };
 }

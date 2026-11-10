@@ -3,7 +3,7 @@ import { handleContributorComponent } from '../domain/contributors.js';
 import type { Processor } from '../domain/processor.js';
 import { enabledTicketTypes, getTicketTypeByPublicId, type TicketType } from '../domain/ticket-types.js';
 import { panelScope, serverApp, splitScope, withScope } from '../domain/linked.js';
-import { panelSections } from '../domain/panel.js';
+import { panelGroups } from '../domain/panel.js';
 import { getDiscordConnectionByGuild, getGitHubConnection } from '../domain/store.js';
 import { answerMax, filesId, formFor, MAX_FILES_LIMIT, questionId } from '../domain/forms.js';
 import { acceptSubmission, type IncomingFile, type TicketAnswer } from '../domain/submissions.js';
@@ -115,38 +115,51 @@ async function route(deps: Deps, processor: Processor, i: Interaction, { conn, m
     if (customId.startsWith('cv:')) return handleContributorComponent(deps, i, main);
     // Release announcements: a member turns update pings on or off.
     if (customId.startsWith(PING_PREFIX)) return handlePingComponent(deps, i, main);
-    // A page of the private menu: all the panel's apps, or one workspace's ("More apps…" in its menu).
-    const pageMatch = /^tr:page:(-?\d+)(?::([0-9a-f-]{36}))?$/.exec(customId);
+    // A page of the private menu: all the panel's apps, or one group's.
+    const pageMatch = /^tr:page:(-?\d+)(?::(main|linked))?$/.exec(customId);
     if (pageMatch) {
-      const { apps, sections } = await panelSections(deps.db, scope);
+      const { apps, groups } = await panelGroups(deps.db, scope);
+      const group = pageMatch[2] ? groups?.find((g) => g.key === pageMatch[2]) : undefined;
+      if (pageMatch[2] && !group) return notice('Out of date', 'This menu is no longer active. Please use the current ticket panel.');
       const page = Number(pageMatch[1]) || 0;
-      const section = pageMatch[2] ? sections.find((s) => s.id === pageMatch[2]) : undefined;
-      if (pageMatch[2] && !section) return notice('Out of date', 'This menu is no longer active. Please use the current ticket panel.');
-      const { flags: _flags, ...data } = section ? m.buildSectionPage(section, page) : m.buildPickerPage(apps.map(toPanelApp), page);
+      const { flags: _flags, ...data } = group ? m.buildGroupPage(group, page) : m.buildPickerPage(apps.map(toPanelApp), page);
       return { response: { type: ResponseType.UpdateMessage, data } };
     }
-    // Panel buttons: Open a ticket (the app menu, privately; one app goes straight on) and My tickets.
+    // A group's button (the main's apps, or the linked workspaces'): its menu, privately. One app goes straight on.
+    const groupMatch = /^tr:grp(p?):(main|linked)$/.exec(customId);
+    if (groupMatch) {
+      const inPrivate = groupMatch[1] === 'p';
+      const { groups } = await panelGroups(deps.db, scope);
+      const group = groups?.find((g) => g.key === groupMatch[2]);
+      if (!group) return notice('Out of date', 'This button is no longer active. Please use the current ticket panel.');
+      if (group.apps.length === 1) {
+        const only = await serverApp(deps.db, main, group.apps[0]!.publicId);
+        if (only?.app.enabled) return startTicket(deps, only.workspace, only.app, { update: inPrivate });
+      }
+      const data = m.buildGroupPage(group, 0);
+      if (!inPrivate) return { response: { type: ResponseType.ChannelMessage, data } };
+      const { flags: _flags, ...update } = data;
+      return { response: { type: ResponseType.UpdateMessage, data: update } };
+    }
+    // Panel buttons: Open a ticket (the app menu, or the group buttons, privately; one app goes straight on) and My tickets.
     if (customId === m.CustomId.openTicket) {
-      const { apps, sections } = await panelSections(deps.db, scope);
+      const { apps, groups } = await panelGroups(deps.db, scope);
       if (!apps.length) return notice('No apps yet', 'No app is taking tickets here right now. Please ask a server admin.');
       if (apps.length === 1) {
         const only = await serverApp(deps.db, main, apps[0]!.public_id);
         if (only) return startTicket(deps, only.workspace, only.app, { update: false });
       }
-      return { response: { type: ResponseType.ChannelMessage, data: m.buildAppPicker(apps.map(toPanelApp), sections) } };
+      return { response: { type: ResponseType.ChannelMessage, data: groups ? m.buildGroupChooser(groups) : m.buildPickerPage(apps.map(toPanelApp), 0) } };
     }
     if (customId === m.CustomId.myTickets || customId.startsWith('tr:mine:')) return handleMyTickets(deps, i, scope, customId);
-    // An app menu: the panel's (one, or one per workspace) or the private one's.
+    // An app menu: the panel's, or a private one (tr:pick:n and "__more:…" are from panels posted before the group buttons).
     const fromPicker = customId === m.CustomId.pickerSelect || customId.startsWith(`${m.CustomId.pickerSelect}:`);
     if (fromPicker || customId === m.CustomId.panelSelect || customId.startsWith(`${m.CustomId.panelSelect}:`)) {
       const value = i.data?.values?.[0] ?? '';
       if (value === m.MORE_APPS_VALUE || value.startsWith(`${m.MORE_APPS_VALUE}:`)) {
-        const { apps, sections } = await panelSections(deps.db, scope);
-        const id = value.slice(m.MORE_APPS_VALUE.length + 1);
-        const section = id ? sections.find((s) => s.id === id) : undefined;
-        if (id && !section) return notice('Out of date', 'This menu is no longer active. Please use the current ticket panel.');
-        const data = section ? m.buildSectionPage(section, 0) : m.buildPickerPage(apps.map(toPanelApp), 0);
-        // From the private menu, the list replaces it; from the panel, it's a new private message.
+        const { apps } = await panelGroups(deps.db, scope);
+        const data = m.buildPickerPage(apps.map(toPanelApp), 0);
+        // From a private menu, the list replaces it; from the panel, it's a new private message.
         if (fromPicker) {
           const { flags: _flags, ...update } = data;
           return { response: { type: ResponseType.UpdateMessage, data: update } };

@@ -42,8 +42,10 @@ export interface WorkspaceRow {
   parent_id: string | null;
   /** A linked workspace's apps are on its main's panel (else on a panel of its own). */
   on_main_panel: boolean;
-  /** Its menu's name on a panel with apps from more than one workspace (null = the workspace's name). */
+  /** A main's panel with linked workspaces' apps: its own apps' button (null = its name)… */
   panel_section_title: string | null;
+  /** …and the linked workspaces' button (null = the one linked workspace's name, or "Other apps"). */
+  panel_linked_title: string | null;
   /** A linked workspace's own panel channel, in its main's Discord server. */
   panel_channel_id: string | null;
   panel_channel_name: string | null;
