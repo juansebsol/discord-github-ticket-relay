@@ -724,7 +724,7 @@ export function registerModerationRoutes(app: FastifyInstance, web: Web): void {
   };
   const backWith = (ctx: WorkspaceRequestContext, body: Record<string, string | string[] | undefined>, k: IssueKey) => {
     const back = workspacePath(ctx, body.back, ['/moderation']) ?? areaHref(ctx, 'moderation');
-    const url = new URL(back, 'http://relay.invalid');
+    const url = new URL(back, 'https://relay.invalid');
     url.searchParams.set('open', keyOf(k));
     return `${url.pathname}${url.search}`;
   };

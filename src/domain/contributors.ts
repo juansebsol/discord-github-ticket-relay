@@ -321,11 +321,11 @@ export type ContributorPanelState =
   | { state: 'published'; outdated: boolean; channelChanged: boolean; link: string | null };
 
 /** Compares the posted panel with the current settings. `live: false` skips asking Discord whether it still exists. */
-export async function checkContributorPanel(deps: Deps, workspaceId: string, conn: DiscordConnectionRow | null, opts: { live: boolean } = { live: true }): Promise<ContributorPanelState> {
+export async function checkContributorPanel(deps: Deps, workspaceId: string, conn: DiscordConnectionRow | null, { live = true }: { live?: boolean } = {}): Promise<ContributorPanelState> {
   const panel = await getContributorPanel(deps.db, workspaceId);
   if (!panel) return { state: 'not_published' };
-  if (!opts.live && panel.status === 'missing') return { state: 'missing' };
-  if (deps.discord && opts.live) {
+  if (!live && panel.status === 'missing') return { state: 'missing' };
+  if (deps.discord && live) {
     try {
       await deps.discord.getMessage(panel.channel_id, panel.message_id);
     } catch (err) {

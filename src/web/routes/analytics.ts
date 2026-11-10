@@ -94,9 +94,9 @@ export function registerAnalyticsRoutes(app: FastifyInstance, web: Web): void {
   }
 
   /** Each app's star total (GitHub's count) and how much it changed in the period. */
-  function starList(rows: AnalyticsData['starsByApp'], o: { gained?: boolean } = { gained: true }): SafeHtml {
+  function starList(rows: AnalyticsData['starsByApp'], { gained = true }: { gained?: boolean } = {}): SafeHtml {
     if (!rows.some((r) => r.total !== null || r.gained)) return html`<p class="small muted an-none">Star totals show up after the first read.</p>`;
-    return hbars(rows.map((r) => ({ label: r.label, value: r.total ?? 0, note: o.gained ? signed(r.gained) : null, noteUp: r.gained > 0 })), { empty: 'No stars yet.', share: false, max: 30 });
+    return hbars(rows.map((r) => ({ label: r.label, value: r.total ?? 0, note: gained ? signed(r.gained) : null, noteUp: r.gained > 0 })), { empty: 'No stars yet.', share: false, max: 30 });
   }
 
   function tile(label: string, value: string, d: SafeHtml, title?: string, sub?: SafeHtml | string): SafeHtml {

@@ -47,7 +47,7 @@ export interface AppChange {
 
 /** "Fixes #12, closes #3" → [12, 3]. */
 export function closedIssues(text: string): number[] {
-  return [...new Set([...text.matchAll(/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+#(\d+)/gi)].map((m) => Number(m[1])))];
+  return [...new Set([...text.matchAll(/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)(?:\s*:)?\s+#(\d+)/gi)].map((m) => Number(m[1])))];
 }
 
 /** Why a change isn't worth Claude's time ("Bot", "Chore"), or null. */
@@ -64,7 +64,7 @@ function cleanBody(text: string): string {
     .replace(/<!--[\s\S]*?-->/g, '')
     .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
     .replace(/<img[^>]*>/gi, '')
-    .replace(/^\s*- \[[ x]\] .*$/gim, '')
+    .replace(/^[ \t]*- \[[ x]\] .*$/gim, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim()
     .slice(0, BODY_CHARS);

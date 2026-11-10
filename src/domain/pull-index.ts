@@ -63,7 +63,7 @@ function excerptOf(body: string): string {
     .replace(/<!--[\s\S]*?-->/g, '')
     .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
     .replace(/<img[^>]*>/gi, '')
-    .replace(/^\s*- \[[ x]\] .*$/gim, '')
+    .replace(/^[ \t]*- \[[ x]\] .*$/gim, '')
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, EXCERPT_CHARS);
@@ -106,7 +106,7 @@ export async function prunePulls(q: Queryable, repoId: number, now = Date.now())
 /** The first release published at or after a merge: the one the fix shipped in (null: not released yet). */
 export function releaseOf(mergedAt: Date, releases: Release[]): Release | null {
   const after = releases.filter((r) => new Date(r.at).getTime() >= mergedAt.getTime());
-  return after.length ? after.reduce((a, b) => (new Date(a.at) < new Date(b.at) ? a : b)) : null;
+  return after.length ? after.reduce((a, b) => (new Date(a.at) < new Date(b.at) ? a : b), after[0]!) : null;
 }
 
 /** A repository's recent releases, as the issue sync last read them (null: never read, or not readable). */

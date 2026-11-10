@@ -610,7 +610,7 @@ type Decisions = { auto: TriageAction[]; suggested: TriageAction[] };
 
 /** The decisions in a result, ignoring wording: what is done automatically and what is suggested. */
 function decisionKey(d: Decisions): string {
-  return [...d.auto.map((a) => `auto:${describeAction(a)}`), ...d.suggested.map((a) => `suggest:${describeAction(a)}`)].sort().join('|');
+  return [...d.auto.map((a) => `auto:${describeAction(a)}`), ...d.suggested.map((a) => `suggest:${describeAction(a)}`)].sort((a, b) => Number(a > b) - Number(a < b)).join('|');
 }
 
 /** A ticket's triage before a run, as decisions (null when it had no result). */

@@ -79,7 +79,7 @@ export type PanelState =
   | { state: 'unknown'; channelId: string; messageId: string; error: string };
 
 /** Checks the stored panel against Discord (detects deleted panels) and the current config. */
-export async function checkPanel(deps: Deps, workspaceId: string, opts: { live: boolean } = { live: true }): Promise<PanelState> {
+export async function checkPanel(deps: Deps, workspaceId: string, { live = true }: { live?: boolean } = {}): Promise<PanelState> {
   const panel = await getPanel(deps.db, workspaceId);
   if (!panel) return { state: 'not_published' };
   const workspace = (await getWorkspace(deps.db, workspaceId))!;
@@ -88,7 +88,7 @@ export async function checkPanel(deps: Deps, workspaceId: string, opts: { live: 
   const { hash } = panelPayloadFor(workspace, content.apps, content.hasTypes, content.family);
   const channelChanged = conn?.tickets_channel_id !== panel.channel_id;
 
-  if (opts.live && deps.discord) {
+  if (live && deps.discord) {
     try {
       await deps.discord.getMessage(panel.channel_id, panel.message_id);
       if (panel.status !== 'published' || panel.last_error) await markPanel(deps.db, workspaceId, 'published', null);

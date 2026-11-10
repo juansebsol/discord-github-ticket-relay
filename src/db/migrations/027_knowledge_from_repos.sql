@@ -4,7 +4,7 @@
 
 -- When the team's notes were last saved (updated_at also moves when Claude writes).
 ALTER TABLE app_knowledge ADD COLUMN notes_at INTEGER;
-UPDATE app_knowledge SET notes_at = updated_at WHERE body <> '';
+UPDATE app_knowledge SET notes_at = updated_at WHERE length(body) > 0;
 
 -- What Claude wrote, and the job that writes it (one per app, run by the triage worker).
 ALTER TABLE app_knowledge ADD COLUMN auto_body TEXT NOT NULL DEFAULT '';

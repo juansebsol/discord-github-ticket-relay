@@ -80,7 +80,8 @@ export function excerptOf(body: string): string {
 /** The app of a ticket this app filed: the last [bracket] before the title, e.g. "[Bug] [PhotoCraft] …". */
 export function appOf(title: string, body: string): string | null {
   if (!body.includes(MARKER_PREFIX)) return null;
-  const groups = /^(\s*\[[^\]]*\])+/.exec(title)?.[0].match(/\[([^\]]*)\]/g) ?? [];
+  const groups: string[] = [];
+  for (let rest = title, m; (m = /^\s*(\[[^\]]*\])/.exec(rest)); rest = rest.slice(m[0].length)) groups.push(m[1]!);
   const last = groups.at(-1);
   return last ? last.slice(1, -1).trim() || null : null;
 }
@@ -144,7 +145,7 @@ export function ftsQuery(title: string, description = '', maxTerms = 16): string
 
 export interface SearchHit extends IndexedIssue {
   score: number;
-  /** The description around the matching words, wrapped in \u0001 … \u0002 (escape, then turn into <mark>). */
+  /** The description around the matching words, wrapped in \uE000 … \uE001 (escape, then turn into <mark>). */
   snippet: string | null;
 }
 
@@ -165,7 +166,7 @@ export async function searchIndex(
   }
   params.push(o.limit);
   const { rows } = await q.query<SearchHit>(
-    `SELECT i.*, bm25(issue_index_fts, 4.0, 1.0) AS score, snippet(issue_index_fts, 1, char(1), char(2), '…', 24) AS snippet
+    `SELECT i.*, bm25(issue_index_fts, 4.0, 1.0) AS score, snippet(issue_index_fts, 1, char(57344), char(57345), '…', 24) AS snippet
      FROM issue_index_fts JOIN issue_index i ON i.rowid = issue_index_fts.rowid
      WHERE ${where.join(' AND ')} ORDER BY score LIMIT $${params.length}`,
     params,
@@ -348,7 +349,7 @@ export class IssueIndexer {
    * Brings one repository up to date within a page budget (100 issues per page). A first load
    * continues where it stopped on the next call. Returns quietly if another process is syncing it.
    */
-  async sync(repoId: number, o: { pages: number; /** true: now; false: never (quick refresh before triage); default: weekly */ fullCheck?: boolean } = { pages: 5 }): Promise<IndexRepo | null> {
+  async sync(repoId: number, { pages = 5, fullCheck }: { pages?: number; /** true: now; false: never (quick refresh before triage); default: weekly */ fullCheck?: boolean } = {}): Promise<IndexRepo | null> {
     const { db, github } = this.deps;
     if (!github) return null;
     const claimed = await db.query<IndexRepo>(
@@ -359,7 +360,7 @@ export class IssueIndexer {
     if (!repo) return getIndexRepo(db, repoId);
     let pauseUntil: number | null = null;
     try {
-      let budget = o.pages;
+      let budget = pages;
       if (repo.status === 'loading' || repo.synced_until === null) {
         // First load, oldest issues first. Changes made meanwhile are picked up afterwards.
         if (repo.next_page === 1) {
@@ -396,7 +397,7 @@ export class IssueIndexer {
       }
 
       // Weekly: anything no longer listed was deleted or moved to another repository.
-      const fullDue = o.fullCheck ?? (!repo.full_check_at || repo.full_check_at.getTime() < Date.now() - FULL_CHECK_EVERY_MS);
+      const fullDue = fullCheck ?? (!repo.full_check_at || repo.full_check_at.getTime() < Date.now() - FULL_CHECK_EVERY_MS);
       if (fullDue) {
         const seen: number[] = [];
         for (let p = 1; p <= 1000; p++) {

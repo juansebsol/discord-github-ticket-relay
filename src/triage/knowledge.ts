@@ -190,7 +190,7 @@ export function wordCount(text: string): number {
 
 /** The section headings in a TRIAGE.md ("## Known issues"), for the overview. */
 export function sectionsOf(body: string): string[] {
-  return [...body.matchAll(/^#{1,3}\s+(.+?)\s*$/gm)].map((m) => m[1]!).slice(0, 8);
+  return body.split('\n').flatMap((l) => /^#{1,3}[ \t](.*)$/.exec(l)?.[1]?.trim() || []).slice(0, 8);
 }
 
 // ---- Claude's questions ------------------------------------------------------------------------

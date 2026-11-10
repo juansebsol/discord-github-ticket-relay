@@ -324,7 +324,7 @@ export function boardText(s: KnownIssuesSettings, shown: BoardIssue[]): string {
     const parts = [`${withApp ? `**${safe(i.appName)}**: ` : ''}${title}`];
     if (s.showCounts && i.reports) parts.push(`${i.reports} report${i.reports === 1 ? '' : 's'}`);
     parts.push(statusLine(s, i));
-    return `- ${parts.join(' · ')}${i.note?.trim() ? `\n  ↳ ${i.note.trim().replace(/\s*\n\s*/g, ' ')}` : ''}`;
+    return `- ${parts.join(' · ')}${i.note?.trim() ? `\n  ↳ ${i.note.trim().split('\n').map((l) => l.trim()).filter(Boolean).join(' ')}` : ''}`;
   };
   if (!s.groupByApp) return shown.map((i) => line(i, true)).join('\n');
   const apps = [...new Set(shown.map((i) => i.appId))];
@@ -440,11 +440,11 @@ export type BoardState =
   | { state: 'published'; channelChanged: boolean; link: string | null; changedAt: Date; checkedAt: Date | null; error: string | null };
 
 /** The posted board. `live: false` skips asking Discord whether it still exists. */
-export async function checkBoard(deps: Deps, workspaceId: string, conn: DiscordConnectionRow | null, o: { live: boolean } = { live: true }): Promise<BoardState> {
+export async function checkBoard(deps: Deps, workspaceId: string, conn: DiscordConnectionRow | null, { live = true }: { live?: boolean } = {}): Promise<BoardState> {
   const row = await getBoardRow(deps.db, workspaceId);
   if (!row) return { state: 'not_published' };
   if (row.status === 'missing') return { state: 'missing' };
-  if (deps.discord && o.live) {
+  if (deps.discord && live) {
     try {
       await deps.discord.getMessage(row.channel_id, row.message_id);
     } catch (err) {

@@ -54,4 +54,4 @@ CREATE TABLE repo_change_sync (
 -- rewrite and the questions follow the last full one.
 ALTER TABLE app_knowledge ADD COLUMN auto_mode TEXT;
 ALTER TABLE app_knowledge ADD COLUMN auto_full_at INTEGER;
-UPDATE app_knowledge SET auto_full_at = auto_at;
+UPDATE app_knowledge SET auto_full_at = auto_at WHERE auto_at IS NOT NULL OR auto_full_at IS NOT NULL;

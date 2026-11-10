@@ -7,7 +7,8 @@ UPDATE workspace_members SET access = json_set(access, '$."release-settings"', j
   WHERE json_extract(access, '$."announcement-settings"') IS NOT NULL;
 UPDATE workspace_members SET access = json_set(access, '$."release-pings"', json_extract(access, '$."announcement-pings"'))
   WHERE json_extract(access, '$."announcement-pings"') IS NOT NULL;
-UPDATE workspace_members SET access = json_remove(access, '$.announcements', '$."announcement-settings"', '$."announcement-pings"');
+UPDATE workspace_members SET access = json_remove(access, '$.announcements', '$."announcement-settings"', '$."announcement-pings"')
+  WHERE access IS NOT NULL;
 
 -- An announcement: the message, an optional card (embed) and buttons, the role it pings, and the
 -- channels it's posted in. A draft until it's posted; deleting it from Discord makes it one again.

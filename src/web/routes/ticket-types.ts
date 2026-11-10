@@ -118,7 +118,7 @@ function sectionEditor(s: FormSection, edit = true): SafeHtml {
 
 function blank(kind: SectionKind): FormSection {
   const label = kind === 'files' ? 'Screenshots' : '';
-  return { key: kind === 'intro' ? 'intro' : '__KEY__', kind, label, hint: kind === 'files' ? FILES_HINT : '', placeholder: '', text: kind === 'intro' ? '' : '', required: false, maxFiles: 5 };
+  return { key: kind === 'intro' ? 'intro' : '__KEY__', kind, label, hint: kind === 'files' ? FILES_HINT : '', placeholder: '', text: '', required: false, maxFiles: 5 };
 }
 
 /** Reads the builder's fields back into sections, in the order they were on the page. */

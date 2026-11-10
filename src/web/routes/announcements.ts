@@ -52,7 +52,7 @@ function roleNamesJson(names: Map<string, string>): SafeHtml {
 
 /** What the list shows for it: the message's first line, or else the card's title. */
 function headline(p: Pick<PostRow, 'content' | 'card_title' | 'card_text'>): string {
-  const first = (t: string | null | undefined) => (t ?? '').split('\n').map((l) => l.replace(/^#+\s*|[*_`~>]/g, '').trim()).find(Boolean) ?? '';
+  const first = (t: string | null | undefined) => (t ?? '').split('\n').map((l) => l.replace(/(?:^#+\s*)|[*_`~>]/g, '').trim()).find(Boolean) ?? '';
   return first(p.content) || first(p.card_title) || first(p.card_text) || 'Empty announcement';
 }
 

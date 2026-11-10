@@ -226,6 +226,6 @@ export async function loadDetail(
 
 /** What the page shows from GitHub at the top (title, state, labels), to tell when a fresher read changed it. */
 export function detailSig(d: Pick<Detail, 'title' | 'state' | 'stateReason' | 'labels' | 'liveError'>): string {
-  const text = [d.title, d.state, d.stateReason ?? '', [...d.labels].sort().join('\n'), d.liveError === 'missing' ? 'missing' : ''].join('\u0000');
+  const text = [d.title, d.state, d.stateReason ?? '', [...d.labels].sort((a, b) => Number(a > b) - Number(a < b)).join('\n'), d.liveError === 'missing' ? 'missing' : ''].join('\u0000');
   return createHash('sha256').update(text).digest('base64url').slice(0, 12);
 }

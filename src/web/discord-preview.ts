@@ -29,7 +29,7 @@ export function discordMd(text: string, roleNames: Map<string, string> = new Map
       .replace(/&lt;t:(\d+)(?::[tTdDfFR])?&gt;/g, (_m, s: string) => `<span class="dp-ts">${relativeTime(Number(s))}</span>`)
       .replace(/`([^`]+)`/g, '<code class="dp-code">$1</code>')
       .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-      .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<span class="dp-a">$1</span>');
+      .replace(/\[([^\][]+)\]\((https?:[^)\s]+)\)/g, '<span class="dp-a">$1</span>');
     const h = /^#{1,3} (.*)$/.exec(out);
     if (h) return { html: `<span class="dp-h">${h[1]}</span>`, block: true };
     const li = /^\s*[-*] (.*)$/.exec(out);

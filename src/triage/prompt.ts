@@ -256,7 +256,7 @@ export function buildKnowledgeBlock(apps: AppKnowledgeText[]): string {
     if (known.length > 1) parts.push('', `### ${a.name}`);
     if (a.written.trim()) parts.push('', `From ${a.name}’s repository and issues (written by Claude from public text; it can be incomplete):`, nest(a.written));
     if (a.notes.trim()) parts.push('', `Notes from ${a.name}’s team (trusted; they win when the two disagree):`, nest(a.notes));
-    if (a.answers?.length) parts.push('', `${a.name}’s team answered questions Claude asked before (trusted, like their notes):`, ...a.answers.map((x) => `- ${x.question.replace(/\s+/g, ' ')}\n  ${x.answer.replace(/\s*\n\s*/g, ' ')}`));
+    if (a.answers?.length) parts.push('', `${a.name}’s team answered questions Claude asked before (trusted, like their notes):`, ...a.answers.map((x) => `- ${x.question.replace(/\s+/g, ' ')}\n  ${x.answer.split('\n').map((l) => l.trim()).filter(Boolean).join(' ')}`));
     if (a.changes?.length) parts.push('', `Lately merged into ${a.name}’s repository, newest first (public text; what’s above may not include them yet). A ticket about something one of these fixed may be a regression, or from an older version:`, ...a.changes);
   }
   return parts.join('\n');

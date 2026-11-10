@@ -2,8 +2,10 @@
 -- apart from "nothing to do". Filled in from the activity recorded so far.
 ALTER TABLE triage_results ADD COLUMN dismissed_count INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE issue_triage ADD COLUMN dismissed_count INTEGER NOT NULL DEFAULT 0;
-UPDATE triage_results SET dismissed_count = (SELECT count(*) FROM submission_events e WHERE e.submission_id = triage_results.submission_id AND e.kind = 'triage_dismissed');
-UPDATE issue_triage SET dismissed_count = (SELECT count(*) FROM issue_triage_events e WHERE e.triage_id = issue_triage.id AND e.kind = 'triage_dismissed');
+UPDATE triage_results SET dismissed_count = (SELECT count(*) FROM submission_events e WHERE e.submission_id = triage_results.submission_id AND e.kind = 'triage_dismissed')
+  WHERE submission_id IN (SELECT submission_id FROM submission_events WHERE kind = 'triage_dismissed');
+UPDATE issue_triage SET dismissed_count = (SELECT count(*) FROM issue_triage_events e WHERE e.triage_id = issue_triage.id AND e.kind = 'triage_dismissed')
+  WHERE id IN (SELECT triage_id FROM issue_triage_events WHERE kind = 'triage_dismissed');
 
 -- Everything triage does, in one place (Triage › Activity): what it triaged, applied, suggested,
 -- skipped or couldn't do, and why. Kept 90 days. No ticket text is stored, only references.

@@ -35,11 +35,11 @@ export function workspacePath(ctx: Pick<WorkspaceRequestContext, 'base'>, back: 
   let url: URL;
   try {
     // Resolved the way a browser would: "//host", "/\\host", "/.." and "%2e%2e" can't slip out.
-    url = new URL(back, 'http://relay.invalid');
+    url = new URL(back, 'https://relay.invalid');
   } catch {
     return null;
   }
-  if (url.origin !== 'http://relay.invalid') return null;
+  if (url.origin !== 'https://relay.invalid') return null;
   const inside = prefixes.some((p) => url.pathname === `${ctx.base}${p}` || url.pathname.startsWith(`${ctx.base}${p}/`));
   return inside ? `${url.pathname}${url.search}` : null;
 }

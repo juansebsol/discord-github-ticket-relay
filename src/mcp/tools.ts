@@ -353,7 +353,7 @@ export const TOOLS: ToolDef[] = [
           repoReleases(db, a.repo_id),
           getKnowledge(db, ctx.workspaceId, a.id),
         ]);
-        const latest = releases?.length ? releases.reduce((x, y) => (new Date(x.at) > new Date(y.at) ? x : y)) : null;
+        const latest = releases?.length ? releases.reduce((x, y) => (new Date(x.at) > new Date(y.at) ? x : y), releases[0]!) : null;
         apps.push({
           name: a.name,
           repository: `${a.repo_owner}/${a.repo_name}`,

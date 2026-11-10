@@ -21,7 +21,7 @@
     var year = new Date().getFullYear();
     $$('time[data-local]', ctx).forEach(function (t) {
       var d = new Date(t.getAttribute('datetime'));
-      if (isNaN(d.getTime())) return;
+      if (Number.isNaN(d.getTime())) return;
       var date = d.toLocaleDateString(undefined, d.getFullYear() === year ? { month: 'short', day: 'numeric' } : { month: 'short', day: 'numeric', year: 'numeric' });
       t.textContent = date + ' at ' + d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
       t.title = d.toLocaleString(undefined, { dateStyle: 'full', timeStyle: 'short' });
@@ -33,7 +33,7 @@
   function knFeed(ctx) {
     $$('time[data-local-time]', ctx).forEach(function (t) {
       var d = new Date(t.getAttribute('datetime'));
-      if (!isNaN(d.getTime())) t.textContent = d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+      if (!Number.isNaN(d.getTime())) t.textContent = d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
     });
     var now = new Date();
     var today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
@@ -129,7 +129,7 @@
     if (removing) data.set('remove', '1');
     var buttons = $$('button', form);
     buttons.forEach(function (b) { b.disabled = true; });
-    fetch(form.action, { method: 'POST', body: data, credentials: 'same-origin', headers: { accept: 'application/json' } })
+    void fetch(form.action, { method: 'POST', body: data, credentials: 'same-origin', headers: { accept: 'application/json' } })
       .then(function (res) {
         return res.json().catch(function () { return {}; }).then(function (body) {
           if (!res.ok || !body.ok) throw { shown: body.error || (res.status === 403 ? 'You don’t have permission to change this.' : 'Not saved. Reload the page and try again.') };
@@ -379,7 +379,7 @@
       // Set from elsewhere (Members: a tool's select), focus stays where it is.
       var hadFocus = document.activeElement === input;
       input.disabled = true;
-      fetch(form.action, { method: 'POST', body: data, credentials: 'same-origin', headers: { accept: 'application/json' } })
+      void fetch(form.action, { method: 'POST', body: data, credentials: 'same-origin', headers: { accept: 'application/json' } })
         .then(function (res) {
           return res.json().catch(function () { return {}; }).then(function (body) {
             if (!res.ok || !body.ok) throw { shown: body.error || (res.status === 403 ? 'You don’t have permission to change this.' : 'Not saved. Reload the page and try again.') };
@@ -505,7 +505,7 @@
         .replace(/&lt;@&amp;(\d+)&gt;/g, function (_m, id) { return '<span class="dp-mention">@' + escapeHtml(roles[id] || 'unknown-role') + '</span>'; })
         .replace(/&lt;t:(\d+)(?::[tTdDfFR])?&gt;/g, function (_m, s) { return '<span class="dp-ts">' + relativeTime(Number(s)) + '</span>'; })
         .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-        .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<span class="dp-a">$1</span>');
+        .replace(/\[([^\][]+)\]\((https?:[^)\s]+)\)/g, '<span class="dp-a">$1</span>');
       var h = /^#{1,3} (.*)$/.exec(out);
       if (h) return { html: '<span class="dp-h">' + h[1] + '</span>', block: true };
       var li = /^\s*[-*] (.*)$/.exec(out);
@@ -829,7 +829,7 @@
     n.max = String(max);
     var v = Math.round(Number(n.value));
     if (clamp) {
-      v = !n.value || !isFinite(v) ? min : Math.min(max, Math.max(min, v));
+      v = !n.value || !Number.isFinite(v) ? min : Math.min(max, Math.max(min, v));
       n.value = String(v);
     }
     $$('option', unit).forEach(function (o) { o.textContent = v === 1 ? o.value.slice(0, -1) : o.value; });
@@ -1689,7 +1689,7 @@
     function refresh() {
       if (document.hidden || busy || !src) return;
       busy = true;
-      fetch(src, { credentials: 'same-origin', headers: { accept: 'text/html' } })
+      void fetch(src, { credentials: 'same-origin', headers: { accept: 'text/html' } })
         .then(function (res) {
           // A signed-out session redirects to the sign-in page: never paste that in.
           if (!res.ok || (res.headers.get('x-health-partial') !== '1' && res.headers.get('x-live-partial') !== '1')) throw new Error('not live');
@@ -1782,7 +1782,7 @@
       if (busy) return;
       if (document.hidden) return schedule();
       busy = true;
-      fetch(src + (selected ? '?app=' + encodeURIComponent(selected) : ''), { credentials: 'same-origin', headers: { accept: 'application/json' } })
+      void fetch(src + (selected ? '?app=' + encodeURIComponent(selected) : ''), { credentials: 'same-origin', headers: { accept: 'application/json' } })
         .then(function (res) { if (!res.ok) throw new Error('live'); return res.json(); })
         .then(render)
         .catch(function () { /* keep what's shown, try again */ })
@@ -1991,7 +1991,7 @@
       var body = new URLSearchParams();
       body.set('_csrf', csrf);
       if (app) body.set('app', app);
-      fetch(stopUrl, { method: 'POST', body: body, credentials: 'same-origin', headers: { accept: 'application/json' } })
+      void fetch(stopUrl, { method: 'POST', body: body, credentials: 'same-origin', headers: { accept: 'application/json' } })
         .then(function (res) {
           return res.json().catch(function () { return {}; }).then(function (b) {
             if (!res.ok || !b.ok) throw { shown: b.error || 'Couldn’t stop it. Try again.' };
@@ -2206,7 +2206,7 @@
         if (label && button.dataset.loadingText) label.textContent = button.dataset.loadingText;
       }
       var card = form.closest('[data-alert-id]');
-      fetch(form.action, { method: 'POST', body: new URLSearchParams(new FormData(form)), credentials: 'same-origin', headers: { accept: 'application/json' } })
+      void fetch(form.action, { method: 'POST', body: new URLSearchParams(new FormData(form)), credentials: 'same-origin', headers: { accept: 'application/json' } })
         .then(function (res) {
           return res.json().catch(function () { return {}; }).then(function (body) {
             if (res.ok && body.ok) {
@@ -2618,7 +2618,7 @@
           var base = it.label;
           while (base.length > 2) {
             base = base.slice(0, -1);
-            lab.textContent = base.replace(/\s+$/, '') + '…';
+            lab.textContent = base.trimEnd() + '…';
             if (lab.getComputedTextLength() <= room) break;
           }
         }

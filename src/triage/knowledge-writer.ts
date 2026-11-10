@@ -142,7 +142,7 @@ export function cleanDoc(text: string, max: number): string {
     .replace(/\[\s*\]\([^)]*\)/g, '')
     .replace(/<img[^>]*>/gi, '')
     .replace(/<\/?(p|div|span|a|br|picture|source|img|h\d|center|details|summary|sup|sub|b|i)\b[^>]*>/gi, '')
-    .replace(/[ \t]+\n/g, '\n')
+    .split('\n').map((l) => l.replace(/[ \t]+$/, '')).join('\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim()
     .slice(0, max);
@@ -153,7 +153,7 @@ export function cleanWritten(text: string): string {
   let t = text.trim();
   const fence = /^```[\w-]*\n([\s\S]*?)(\n```)?$/.exec(t);
   if (fence) t = fence[1]!.trim();
-  t = t.replace(/^#\s+[^\n]*\n+/, '');
+  t = t.replace(/^#[ \t][^\n]*\n+/, '');
   t = t.split('\n').filter((l, i, all) => !l.trim() || l !== all[i - 1]).join('\n');
   return cleanKnowledge(t, WRITTEN_MAX);
 }
@@ -176,12 +176,12 @@ export function splitSections(text: string): { body: string; answers: Map<number
     if (isAnswers(line)) section = 'answers';
     else if (isChanges(line)) section = 'changes';
     else if (section === 'answers') {
-      const m = /^\s*(?:[-*]\s*)?Q(\d+)\s*[:.)–-]\s*(.*)$/i.exec(line);
+      const m = /^\s*(?:[-*]\s*)?Q(\d+)\s*[:.)–-](.*)$/i.exec(line);
       if (!m) continue;
       const answer = m[2]!.trim();
       answers.set(Number(m[1]), !answer || /^(unknown|not (in|found|known|stated)|none|n\/a|null)\b/i.test(answer) ? null : answer.slice(0, 400));
     } else if (section === 'changes') {
-      const m = /^\s*(?:[-*]\s*)?C(\d+)\s*[:.)–-]\s*(.*)$/i.exec(line);
+      const m = /^\s*(?:[-*]\s*)?C(\d+)\s*[:.)–-](.*)$/i.exec(line);
       if (!m) continue;
       const said = m[2]!.trim();
       const used = /^(added|used|included|yes)\b/i.test(said);
@@ -516,7 +516,7 @@ export class KnowledgeWriter {
     live.step('thinking');
     live.log('claude', `Sent to ${model}`);
     live.tick(true);
-    const data = { today: day(new Date()), app: { name: app.name, repository: `${app.repo_owner}/${app.repo_name}` }, triage_md: k.auto_body, team_notes: notesOf(k) || null, changes: given.map(changeData) };
+    const data = { today: day(new Date()), app: { name: app.name, repository: `${app.repo_owner}/${app.repo_name}` }, triage_md: k.auto_body, team_notes: notesOf(k) || null, changes: given.map((c, i) => changeData(c, i)) };
     const res = await this.ai.writeText(key, model, SYSTEM_CHANGES, `Update the TRIAGE.md for ${app.name}. As JSON:\n${JSON.stringify(data, null, 1)}`, stream);
     live.tick(false);
     const text = res.cutOff ? res.text.slice(0, Math.max(0, res.text.lastIndexOf('\n'))) : res.text;
@@ -626,7 +626,7 @@ export class KnowledgeWriter {
       team_answers: (k?.team_answers ?? []).map(({ question, answer }) => ({ question, answer })),
       earlier_answers: (k?.auto_answers ?? []).filter((a) => a.answer).slice(0, 30),
       questions: asked.map((question, i) => ({ id: i + 1, question })),
-      recent_changes: given.map(changeData),
+      recent_changes: given.map((c, i) => changeData(c, i)),
     };
     const sources: KnowledgeSources = {
       readme: readme?.path || null,

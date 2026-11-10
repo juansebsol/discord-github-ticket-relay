@@ -14,4 +14,5 @@ CREATE TABLE repo_star_changes (
 ALTER TABLE download_sync RENAME COLUMN stars_loaded_at TO stars_started_at;  -- the first star count read
 ALTER TABLE download_sync RENAME COLUMN stars_until_at TO stars_slot_at;      -- the slot of the last one
 ALTER TABLE download_sync ADD COLUMN stars_error TEXT;
-UPDATE download_sync SET stars_started_at = NULL, stars_slot_at = NULL, stars_total = NULL;
+UPDATE download_sync SET stars_started_at = NULL, stars_slot_at = NULL, stars_total = NULL
+  WHERE stars_started_at IS NOT NULL OR stars_slot_at IS NOT NULL OR stars_total IS NOT NULL;

@@ -6,4 +6,4 @@ ALTER TABLE issue_index_repos ADD COLUMN pulls_checked_at INTEGER;
 ALTER TABLE issue_index_repos ADD COLUMN pulls_error TEXT;
 ALTER TABLE issue_index_repos ADD COLUMN pulls_lease_until_at INTEGER;
 -- The first catch-up read the issue list, which had none: read them again.
-UPDATE issue_index_repos SET pulls_loaded_at = NULL;
+UPDATE issue_index_repos SET pulls_loaded_at = NULL WHERE pulls_loaded_at IS NOT NULL;

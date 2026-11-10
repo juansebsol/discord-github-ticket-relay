@@ -108,7 +108,7 @@ describe('search and originals', () => {
     expect(q).not.toContain('NEAR(');
     const hits = await searchIndex(env.db, { repoIds: [repoId()], query: q, limit: 5 });
     expect(hits[0]!.number).toBe(1);
-    expect(hits[0]!.snippet).toContain('\u0001');
+    expect(hits[0]!.snippet).toContain('\uE000');
   });
 
   it('follows copies to the oldest open original, and only falls back to closed ones', () => {

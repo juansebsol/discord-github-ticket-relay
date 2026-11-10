@@ -14,7 +14,8 @@ CREATE TABLE workspace_ai (
 );
 INSERT INTO workspace_ai (workspace_id, key_enc, key_hint, key_added_by, key_added_at)
   SELECT workspace_id, api_key_enc, api_key_hint, api_key_added_by, api_key_added_at FROM triage_settings WHERE api_key_enc IS NOT NULL;
-UPDATE triage_settings SET api_key_enc = NULL, api_key_hint = NULL, api_key_added_by = NULL, api_key_added_at = NULL;
+UPDATE triage_settings SET api_key_enc = NULL, api_key_hint = NULL, api_key_added_by = NULL, api_key_added_at = NULL
+  WHERE api_key_enc IS NOT NULL OR api_key_hint IS NOT NULL OR api_key_added_by IS NOT NULL OR api_key_added_at IS NOT NULL;
 
 -- More telemetry per process (CPU, event loop delay, heap, GitHub rate limit), as JSON.
 ALTER TABLE process_status ADD COLUMN stats TEXT;

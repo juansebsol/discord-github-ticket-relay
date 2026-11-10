@@ -128,11 +128,11 @@ export type PingPanelState =
   | { state: 'published'; outdated: boolean; channelChanged: boolean; link: string | null };
 
 /** The posted message against the settings now. `live: false` skips asking Discord whether it still exists. */
-export async function checkPingPanel(deps: Deps, workspaceId: string, conn: DiscordConnectionRow | null, o: { live: boolean } = { live: true }): Promise<PingPanelState> {
+export async function checkPingPanel(deps: Deps, workspaceId: string, conn: DiscordConnectionRow | null, { live = true }: { live?: boolean } = {}): Promise<PingPanelState> {
   const panel = await getPingPanel(deps.db, workspaceId);
   if (!panel) return { state: 'not_published' };
-  if (!o.live && panel.status === 'missing') return { state: 'missing' };
-  if (deps.discord && o.live) {
+  if (!live && panel.status === 'missing') return { state: 'missing' };
+  if (deps.discord && live) {
     try {
       await deps.discord.getMessage(panel.channel_id, panel.message_id);
     } catch (err) {

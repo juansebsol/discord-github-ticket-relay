@@ -19,7 +19,7 @@ export type ProcessRole = 'web' | 'worker' | 'triage';
 export function hostMemory(): { total: number; available: number } {
   try {
     const info = readFileSync('/proc/meminfo', 'utf8');
-    const kb = (key: string) => Number(new RegExp(`^${key}:\\s+(\\d+)`, 'm').exec(info)?.[1] ?? NaN) * 1024;
+    const kb = (key: string) => Number(new RegExp(`^${key}:\\s+(\\d+)`, 'm').exec(info)?.[1] ?? Number.NaN) * 1024;
     const total = kb('MemTotal');
     const available = kb('MemAvailable');
     if (Number.isFinite(total) && Number.isFinite(available)) return { total, available };

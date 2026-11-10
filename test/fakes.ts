@@ -510,7 +510,7 @@ export class FakeGitHub {
       this.searchCalls++;
       const [owner, name] = (/repo:(\S+)/.exec(q)?.[1] ?? '/').split('/');
       const r = this.repoByName(owner!, name!);
-      const words = q.replace(/\S+:\S+/g, '').toLowerCase().split(/\s+/).filter(Boolean);
+      const words = q.toLowerCase().split(/\s+/).filter((w) => w && !w.slice(1, -1).includes(':'));
       const items = r && accessible(r) ? r.issues.filter((i) => words.some((w) => i.title.toLowerCase().includes(w))).map((i) => this.issueJson(r, i)) : [];
       return json(200, { total_count: items.length, items });
     }

@@ -31,10 +31,10 @@ const PAGE_SIZE = 50;
 
 type StateFilter = 'open' | 'closed' | 'all';
 
-/** FTS snippet markers (\u0001 … \u0002) become <mark> after escaping everything else. */
+/** FTS snippet markers (\uE000 … \uE001) become <mark> after escaping everything else. */
 function snippetHtml(s: string | null): SafeHtml | string {
   if (!s) return '';
-  return raw(escapeHtml(s).replace(/\u0001/g, '<mark>').replace(/\u0002/g, '</mark>'));
+  return raw(escapeHtml(s).replaceAll('\uE000', '<mark>').replaceAll('\uE001', '</mark>'));
 }
 
 function repoState(r: RepoStatus): SafeHtml {
@@ -137,7 +137,7 @@ export function registerIssueRoutes(app: FastifyInstance, web: Web): void {
       const own = issueTriage.get(key);
       const repo = repos.get(r.repo_id);
       // Only when the description itself matched (the title is already shown).
-      const snippet = 'snippet' in r && r.snippet?.includes('\u0001') ? r.snippet : null;
+      const snippet = 'snippet' in r && r.snippet?.includes('\uE000') ? r.snippet : null;
       return {
         repoId: r.repo_id,
         number: r.number,

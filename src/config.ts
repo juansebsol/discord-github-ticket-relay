@@ -106,6 +106,13 @@ function readPrivateKey(env: NodeJS.ProcessEnv): KeyResult {
   return result;
 }
 
+/** name@host.tld: one `@`, no spaces, and a dot inside the host. */
+function isEmail(s: string): boolean {
+  const at = s.indexOf('@');
+  const host = s.slice(at + 1);
+  return at > 0 && !/\s/.test(s) && !host.includes('@') && host.slice(1, -1).includes('.');
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const nodeEnv = (env.NODE_ENV === 'production' || env.NODE_ENV === 'test' ? env.NODE_ENV : 'development') as Config['nodeEnv'];
 
@@ -115,7 +122,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     : path.join(databasePath === ':memory:' ? APP_ROOT : path.dirname(databasePath), 'files');
 
   const port = Number(env.PORT ?? 3000);
-  const publicUrl = (env.PUBLIC_URL ?? `http://localhost:${port}`).replace(/\/+$/, '');
+  let publicUrl = env.PUBLIC_URL ?? `http://localhost:${port}`;
+  while (publicUrl.endsWith('/')) publicUrl = publicUrl.slice(0, -1);
   if (!/^https?:\/\//.test(publicUrl)) throw new ConfigError('PUBLIC_URL must start with http:// or https://');
 
   const keyB64 = env.ENCRYPTION_KEY;
@@ -188,7 +196,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     runTriage: (env.RUN_TRIAGE ?? env.RUN_WORKER) !== 'false',
     legal: {
       operatorName: env.LEGAL_OPERATOR_NAME?.trim() || null,
-      contactEmail: /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(env.LEGAL_CONTACT_EMAIL?.trim() ?? '') ? env.LEGAL_CONTACT_EMAIL!.trim() : null,
+      contactEmail: isEmail(env.LEGAL_CONTACT_EMAIL?.trim() ?? '') ? env.LEGAL_CONTACT_EMAIL!.trim() : null,
     },
   };
 }
