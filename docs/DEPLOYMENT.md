@@ -48,6 +48,9 @@ docker run -d \
   ghcr.io/storytold/discord-github-ticket-relay:latest
 ```
 
+The image has no `secrets/` folder: leave `GITHUB_APP_PRIVATE_KEY_FILE` empty and set
+`GITHUB_APP_PRIVATE_KEY` to the key as one line (`base64 -w0 sec.pem`).
+
 In Kubernetes or clustered setups, you can run all-in-one or scale workers independently:
 - **Web (Admin + Discord + OAuth):** `ENTRYPOINT ["node"] CMD ["dist/index.js"]` (set `RUN_WORKER=false` and `RUN_TRIAGE=false` if scaling workers in separate pods).
 - **Queue Workers:** `args: ["dist/worker.js"]`

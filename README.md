@@ -1,143 +1,136 @@
-<p align="center">
+<div align="center">
   <img src="docs/images/logo.png" alt="Ticket Relay logo" width="112" height="112">
-</p>
-
-<h1 align="center">Ticket Relay</h1>
-
-<p align="center">
-  Discord support tickets, filed as GitHub issues.<br>
-  <code>Node.js 24</code> · <code>TypeScript</code> · <code>Fastify</code> · <code>SQLite</code> · <code>Discord Interactions</code> · <code>GitHub Apps</code>
-</p>
-
-Members submit tickets from a panel in Discord. Each ticket is routed to the right repository
-and filed by a GitHub App. Reporters never need a GitHub account.
-
-<p align="center">
+  <h1>Ticket Relay</h1>
+  <p><strong>Discord support tickets, filed as GitHub issues.</strong></p>
+  <p>
+    Members open a ticket from a panel in your Discord server,<br>
+    and a GitHub App files it as an issue in the right repository.<br>
+    Reporters don't need a GitHub account.
+  </p>
   <img src="docs/images/discord-panel.png" alt="Ticket panel in Discord with an app picker" width="620">
-</p>
+</div>
 
 ## Features
 
-**Discord tickets**
+- **Ticket panel:** pick an app and a ticket type, fill in its form, attach screenshots. **My tickets** lets members follow what happens to theirs.
+- **Inbox:** every ticket with its status and GitHub link. Retry, link or close. Rate limits and duplicate protection built in.
+- **AI triage:** Claude suggests or applies priority, duplicates, labels and spam, using a knowledge file it keeps for each app.
+- **Moderation:** close, reply, label and mark duplicates from one queue, with a mod log and undo.
+- **Repo status and analytics:** open PRs and issues, the most reported bugs, downloads and stars over time.
+- **Discord extras:** announcements, release posts, a known-issues board, contributor roles from merged PRs.
+- **MCP:** Claude Code, Cursor, VS Code or Codex can work with tickets.
+- **Team:** owners, admins and moderators with access per page. Linked workspaces cover repositories in other GitHub organizations.
 
-- **Discord-native:** members open tickets from a panel in your server and get a private confirmation with the issue link. No GitHub account needed. With **My tickets** on (Discord tickets › Panel, off by default), the panel shows two buttons instead of the app menu: **Open a ticket**, and **My tickets**, where each member privately sees the tickets they sent and what's happening with each (in the known-issues board's words: looking into it, being worked on, fixed in v1.4…, plus needs more information and closed), and can pick one to see its story: filed, the same problem as an earlier report, a fix started or finished, released. Private repositories show no links. Admins can also let members **add details**, **add screenshots** or **close** one of their own open tickets from its page (each switched on separately in Panel): details and the close are posted on GitHub inside comments the admins write, screenshots join the issue's attachments, and a member's close is in the Mod log, where moderators can undo it.
-- **Ticket types and forms:** members pick a type (e.g. Bug report, Feature request); each adds its GitHub label and a `[Bug]` title prefix. Each type has its own Discord form with short-answer, paragraph and file-upload questions; answers appear as headings in the issue.
-- **Screenshots:** members attach PNG or JPG images (up to 10 MB per ticket). They're stored on your server with location data removed and embedded in the issue.
-- **Inbox:** every ticket with its status, triage and GitHub link; retry, link an existing issue or close, with search and filters.
-- **Spam and duplicates:** a per-member rate limit and duplicate window; a ticket is never filed twice, even when GitHub's reply is unclear.
-- **Files:** see what's stored, clean up files of closed or spam tickets by rule (or automatically once a day), and set a storage limit.
-
-**Tools**
-
-- **GitHub issues:** search every issue, open and closed, across your connected repositories, including the ones opened directly on GitHub. Kept up to date every 2 minutes, no webhooks needed.
-- **Repo status (optional):** every repository at a glance, like a team status board: open PRs and issues and the oldest open PR, the last commit, issue and PR, what happened in a window you pick (10 minutes to a week, since the last build, or all time: commits, PRs opened and merged, issues, people), and each latest build with its unreleased commits and downloads. Sort by any column; a totals row sums them up. Fix first ranks the open issues across the repositories by what they say (crash, hang, data loss beats "doesn't work"), who filed them, how many people pile on and how fresh they are, with the reasons beside each score. Most reported ranks the issues by how many Discord tickets are about them (a duplicate counts for its original; ones Claude suggested and nobody has reviewed yet are shown as waiting for review), over the last 7, 30 or 90 days or all time, with the tickets one click away, and says when an issue closed as fixed keeps being reported. Pull requests lists the open ones (the ones fixing the most reported issues first, with how many Discord tickets are about them), the merged ones waiting for a release, and the ones merged in the last 90 days; Fix first and Most reported show when someone's working on an issue or it's already fixed. Read in the background every 5 to 60 minutes with GitHub's GraphQL API, which has its own budget, so filing isn't affected. Off until you turn it on; you pick the repositories (your apps' ones to start with).
-- **Analytics (optional):** downloads recorded every 30 minutes from when you turn it on (GitHub only keeps running totals), per app, platform, processor, format and version, from 30 minutes to 12 months at a time (today in 30-minute steps by default; steps of 30m, 1h, 3h, 6h, 12h or a day), in your own time zone, or All: lifetime totals (GitHub's own download and star counts) with the same breakdowns. The main chart switches between downloads and stars: stars gained over time (the change in GitHub's star count, read every 30 minutes with the downloads from when you turn it on; a star taken back counts -1) and each app's star total. Next to them: tickets, issues opened and closed, pull requests merged and stars over the same time, each compared with the period before, and release health: Discord tickets while each release was the latest, per 1,000 of its downloads. Every chart has a table view.
-- **AI triage (optional):** Claude flags priority, duplicates, regressions, spam and more, and sorts tickets into your own custom labels. Each action can be off, a suggestion, or automatic above a confidence threshold, with separate settings for issues opened directly on GitHub.
-  - AI triage › Overview: every label on your open issues in one table, grouped by category and searchable (priority, triage's own labels, each custom label category with how many still have none of its labels and a backfill for them, and your team's other labels), each bar out of all open issues and linked to its issues on GitHub, next to what triage did over 7 days to all time: tickets and issues read per day, labels added, duplicates found, details asked for, what it closed, applied and still suggested by action, the priority it gave and how sure it was, what it skipped, what it cost, by app.
-  - AI triage › Custom labels: your own labels in categories (Kind: bug, parity, plugins, backlog; Topic; Platform…), each with a sentence on when to use it. Claude picks from each category for every ticket and never invents a label. Each label shows how many open issues have it.
-  - AI triage › Review lists everything with suggestions waiting, from Discord tickets and GitHub issues. Every ticket shows its triage state (To review, Partly applied, Applied…), and suggestions say exactly what applying them does.
-  - Apply or dismiss in bulk, e.g. all duplicates at 80%+ confidence.
-  - AI triage › Knowledge: Claude writes a TRIAGE.md for each app from its repository (README, changelog, docs, releases) and its issues, open and closed (known issues, recent fixes, what works as intended, common questions), and reads it with every ticket for that app. It can keep them up to date: you pick one interval (15 minutes to 90 days), and each time it comes around Claude updates the apps where something changed (issues opened or closed, merged pull requests, releases, its own questions) and skips the rest. What's merged into each repository (pull requests, commits pushed without one, releases; bots and chores left out) is checked every 15 minutes: tickets get the latest changes right away, Claude adds them to the TRIAGE.md without rewriting the rest, and each app's page lists them with what Claude added and what it left out. While it writes, a Live studio shows each app's TRIAGE.md appearing, with a log of what Claude read and the questions it answered, and lets you stop or skip; minimized, a small pill follows you to every page. Your team can add notes on top, which Claude never changes.
-  - When a fact would have made Claude surer, it asks. It answers its own questions from the repository when it can. Each app's page has tabs after its TRIAGE.md (All, Needs your team, Claude will look, Answered) listing the questions day by day under the ticket each came from; your team answers right there, and Claude reads those answers with every ticket for that app. Questions are for the team only.
-  - Being worked on and Already fixed (off by default): Claude also compares each ticket with the repository's open pull requests and the ones merged in the last 90 days, including the ones that say which issue they're for ("for #3592"). A ticket an open pull request works on gets your label and comment ("This is being worked on in #3597."), next to the duplicate when it's one; a ticket a merged pull request (or a commit pushed without one) already fixed says whether that's in a release yet ("it's in v1.4.3", "it will be in the next release"). A fix that didn't hold stays a Regression. Pull requests are read from GitHub's pull request list every 10 minutes (usually one call per repository); a public repository's need no extra permission, a private one's need Pull requests: Read.
-  - Optionally, Claude also looks at the screenshots members attach (off by default).
-  - Re-run triage on older tickets and compare settings before applying anything.
-  - Backfill custom labels (Re-run › Custom labels only): Claude reads open tickets and issues, including the ones triage already handled, with what triage found before, the labels they have and their app's TRIAGE.md, and picks labels from the categories you choose, or just the labels you tick (one you've just added, say). Open ones missing those labels, or every open one. It only adds labels: no comments, nothing closed, labels never removed, triage left as it was. Preview first, then add the ones Claude was sure of, or every label it picked.
-  - AI triage › Activity shows what it's doing live, with a log kept 90 days.
-  - It runs in its own worker with a monthly limit and keeps GitHub API headroom for filing, so filing never depends on it.
-  - If Claude stops (out of credits, a rejected key, the monthly limit), every page shows an alert until it's fixed. Out of credits, it checks again every 5 minutes and carries on by itself.
-- **Moderation (optional):** off until an admin turns it on. **Ticket management** lists open Discord tickets and issues opened on GitHub (All open, Repeat bugs, Fixed but still open, Needs info and quiet for 14 days, Spam, Old, Closed by mods), filtered by app and source, searchable by reference, number, link or words. Open one to see its whole history in one place (the Discord ticket, Ticket Relay's activity, triage, and the GitHub conversation with labels, closes and pull requests mentioning it), what triage found (the original it duplicates, with the PR fixing it and its release), similar issues and the reporter's other tickets, with Open in Discord and Open on GitHub. Close it for a reason (fixed, duplicate, not planned, can't reproduce, no reply, spam), reopen it, mark or unmark a duplicate, post a saved reply or change labels; several at once, or a whole group of duplicates, close in the background. Keys: J/K to move, C to close, D to close as a duplicate, R to reply; the next one opens after a close. Closes and replies can be undone for 15 minutes. **Mod log**: everything moderators did, with their notes. **Replies & reasons**: admins write each reason's label and comment and the saved replies, so whatever the app posts on GitHub is your admins' wording.
-- **MCP for coding agents (optional):** off until an admin turns it on. The team connects Claude Code, Cursor, VS Code or Codex to `/mcp` with a personal token (shown once, stored hashed, one per device, expiring, revocable, Read & write or Read only), and their agent works with tickets as them: find tickets with filters and sorting (app, priority, labels, lists like Repeat bugs, claimed, has a PR, how many reported it), count them per app, priority, label or week, read a ticket with its text, comments, history, triage's verdict, repeats, screenshots and PRs, find what's related to a ticket, a PR or an error message (PRs for a bug, tickets for a change), read PRs and releases, the app's Knowledge and the Mod log, claim tickets ("I'm on it", kept in Ticket Relay), and, if allowed, close, reopen, mark duplicates, change labels and post saved replies, logged in the Mod log as through MCP. Each tool is a switch per moderator in Members & permissions, in Read and Write groups, apart from the pages; admins and owners have them all. Ready-made prompts: pick up a ticket, fix one, which tickets my branch fixes, is it fixed, my standup, clean up. A Docs tab explains it all.
-- **Announcements:** write a message and the bot posts it in the channels you pick: text with Discord formatting, an optional card (a title, text and a coloured edge), up to 5 link buttons and an optional role ping (never @everyone). A live preview follows as you write. Save it as a draft, post it, then change it later (the messages are edited in place, no one is pinged again) or delete it from Discord, everywhere at once; it becomes a draft again. In an announcement channel it's also published to the servers that follow it.
-- **Bot features (optional):** extra things the bot does in your Discord, each off until you turn it on. Bot features lists them, each with a switch to turn it on or off and a gear that opens it. The **known-issues board**: one message in a channel you pick, kept up to date with the problems members report most (Discord tickets, duplicates counted for their original) and what's happening with each: looking into it, being worked on (an open pull request), fixed and coming in the next update, or fixed in a release ("update to get it"). You choose the apps, the period, how many reports an issue needs, how many are shown and how long fixed ones stay; pin an issue, hide one, show it under a friendlier title or add a workaround under it; every text and status is yours to word; a button opens the ticket panel's channel. Private repositories are left out unless you include them (then without links). The message is edited in place, only when something changes. **GitHub releases**: each app's new GitHub releases posted in a Discord channel. Claude rewrites the release notes for the people using the app (or they're posted as written on GitHub), and you can edit them before they go out. Review first keeps new releases waiting under Posts until someone posts them; Automatic posts them as soon as the notes are written. The message, its title and text are templates. The buttons under it are your own: each has a label and a link, which can be any web address, the release on GitHub, or one of the release's files found by name (`{file:*-windows-x64.msi}`), for every app or one; a release without that file just doesn't get the button, and Settings shows what each link finds in the latest release. The release notes button can be renamed or turned off. Pre-releases are left out unless you include them; each app can have its own channel. Pings are off until you choose a role (one for every app, or an app's own, or none), and a "Get update pings" message lets members give themselves the role and drop it again. Releases are checked every 5 minutes with GitHub's GraphQL API; you can also announce an older release by hand, edit or delete a post afterwards, and send a test post. Off until you turn it on; only releases published after that are announced.
-- **Contributor roles:** a second panel where members sign in with GitHub and get a role based on their merged PRs or commits across all your apps, e.g. Junior Contributor at 1, Contributor at 10. Merged PRs are counted from the pull requests the app keeps (read again just before each check, so one merged a moment ago counts), which works for public repositories without the Pull requests permission.
-- **Server health:** processes, memory, disk, queues, GitHub API usage and alerts, with a Dev mode so restarts while you deploy aren't counted as crashes.
-
-**Team**
-
-- **Roles:** owners, admins and moderators; several workspaces on one install.
-- **Linked workspaces:** for an app whose repository lives in another GitHub organization. It gets its own workspace, with its own GitHub connection, apps, tickets, AI triage and analytics, and shares your Discord server: its apps join your ticket panel (or get one of their own), and My tickets shows members their tickets from both. Your **global admins** are its admins and your **global moderators** its moderators; it can also have admins and moderators of its own (an outside team runs its workspace, invites its own moderators, and never sees the rest of yours or the server's pages). An install link lets the organization's owner install the GitHub App without an account.
-- **Moderators:** start with the tickets inbox and contributor verifications, view only. Admins give each one no access, view or edit on every page of every tool (tickets, issues, AI triage, moderation, contributor roles, Apps & repositories, server health), a whole tool at once or page by page, and each MCP tool for their coding agent on or off.
-
-**Reliable and secure**
-
-- Duplicate and rate-limit protection, retries, and queues that survive restarts.
-- Credentials stay on the server; stored tokens, the Claude key and ticket text are encrypted.
-
-## Screenshots
-
-**Overview:** tickets needing attention, stats for each tool and the latest tickets.
+Optional features stay off until an admin turns them on.
 
 ![Admin console overview](docs/images/admin-overview.png)
 
-## Quick start
-
-```bash
-npm install
-cp .env.example .env    # PUBLIC_URL, ENCRYPTION_KEY
-npm run dev             # http://localhost:3000
-```
-
-Set `DEV_LOGIN=true` to use the console locally without Discord credentials.
-
 ## Self-hosting
 
-One host, PM2 and a TLS reverse proxy. No external database: state is a single SQLite file.
-Serverless platforms such as Vercel are not supported.
+You need a server with a domain, a Discord application and a GitHub App. All state lives in one
+SQLite file, so there's no database to run.
+
+### 1. Create the Discord application and GitHub App
+
+Follow [docs/PROVIDER_SETUP.md](docs/PROVIDER_SETUP.md). It takes about 10 minutes. Replace `tickets.example.com` with your domain:
+
+| Setting | Value |
+|---|---|
+| Discord › General › Interactions Endpoint URL | `https://tickets.example.com/discord/interactions` (set once the app is running) |
+| Discord › OAuth2 › Redirect | `https://tickets.example.com/oauth/discord/callback` |
+| GitHub App › Callback URL (must be first) | `https://tickets.example.com/oauth/github/callback` |
+| GitHub App › Webhook URL (optional) | `https://tickets.example.com/github/webhook` |
+| GitHub App › Permissions | Issues: read & write, Metadata: read. Optional: Pull requests and Contents read-only |
+
+### 2. Get the code and configure
+
+```bash
+git clone https://github.com/storytold/discord-github-ticket-relay.git
+cd discord-github-ticket-relay
+cp .env.example .env
+```
+
+| Variable | |
+|---|---|
+| `PUBLIC_URL` | `https://tickets.example.com` |
+| `ENCRYPTION_KEY` | `openssl rand -base64 32`. Never change it: it decrypts stored data |
+| `DISCORD_*` | `APPLICATION_ID`, `PUBLIC_KEY`, `CLIENT_SECRET`, `BOT_TOKEN` |
+| `GITHUB_*` | `APP_ID`, `APP_SLUG`, `CLIENT_ID`, `CLIENT_SECRET`, optional `WEBHOOK_SECRET` |
+| `GITHUB_APP_PRIVATE_KEY_FILE` | `./secrets/sec.pem` (the key from the GitHub App page) |
+| `PLATFORM_ADMIN_DISCORD_IDS` | Your Discord user ID, so only you can create workspaces |
+| `TRUST_PROXY` | `true` behind a reverse proxy |
+
+Everything else is set up in the console. Optional variables are in [`.env.example`](.env.example).
+
+### 3. Run
+
+**Docker:** runs everything in one container. The database and files go in the `/app/data` volume.
+
+```bash
+docker run -d --name ticket-relay --restart unless-stopped \
+  -p 127.0.0.1:3000:3000 -v ticket-relay-data:/app/data --env-file .env \
+  ghcr.io/storytold/discord-github-ticket-relay:latest
+```
+
+There's no `secrets/` folder in the container, so pass the key as one line instead: leave
+`GITHUB_APP_PRIVATE_KEY_FILE` empty and set `GITHUB_APP_PRIVATE_KEY` to the output of
+`base64 -w0 sec.pem`.
+
+**Or Node 22+ with PM2:** runs web, queue workers and triage as separate processes.
 
 ```bash
 npm ci && npm run build
-cp .env.example .env               # PUBLIC_URL, ENCRYPTION_KEY, provider credentials
-pm2 start ecosystem.config.cjs     # web (1) + queue workers (2) + triage (1); migrations run on boot
-pm2 save && pm2 startup
+npm install -g pm2
+pm2 start ecosystem.config.cjs && pm2 save && pm2 startup
 ```
 
-Then:
+Set `HOST=127.0.0.1` so port 3000 isn't public.
 
-1. Proxy HTTPS to port `3000` (set `HOST=127.0.0.1` so the port isn't public).
-2. Register the Discord application and the GitHub App: [docs/PROVIDER_SETUP.md](docs/PROVIDER_SETUP.md).
-3. Open `PUBLIC_URL`, sign in with Discord and follow the setup steps.
+### 4. Add HTTPS
 
-Processes, operations, backups and scaling: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+Point your domain at the server and proxy it to port 3000. With Caddy, which gets the certificate by itself:
 
-## Configuration
+```
+tickets.example.com {
+    reverse_proxy 127.0.0.1:3000
+}
+```
 
-| Variable | Description |
+Check it with `curl https://tickets.example.com/healthz`. Then set Discord's Interactions Endpoint URL.
+
+### 5. Sign in
+
+Open your domain and sign in with Discord. Follow the setup steps: GitHub, Discord, then Apps &
+repositories. Finally, publish the panel from **Discord tickets › Panel**. The **Deployment** page
+shows whether Discord and GitHub are working.
+
+### Updating and backups
+
+| | |
 |---|---|
-| `DATABASE_PATH` | SQLite file (default `./data/ticket-relay.db`) |
-| `FILES_DIR` | Files attached to tickets (default `./data/files`, next to the database) |
-| `PUBLIC_URL` | Public HTTPS origin |
-| `ENCRYPTION_KEY` | `openssl rand -base64 32`; keep it stable |
-| `DISCORD_*` | `APPLICATION_ID`, `PUBLIC_KEY`, `CLIENT_SECRET`, `BOT_TOKEN` |
-| `GITHUB_*` | `APP_ID`, `APP_SLUG`, `CLIENT_ID`, `CLIENT_SECRET`, optional `WEBHOOK_SECRET` |
-| `GITHUB_APP_PRIVATE_KEY_FILE` | `./secrets/sec.pem` (git-ignored; see [`secrets/`](secrets/README.md)) |
-| `PLATFORM_ADMIN_DISCORD_IDS` | Discord user IDs allowed to create workspaces |
-| `ANTHROPIC_API_KEY` | Optional fallback Claude key for AI triage; workspaces normally add their own in Settings |
+| Update (PM2) | `git pull && npm ci && npm run build && pm2 reload ecosystem.config.cjs` |
+| Update (Docker) | `docker pull` the image, then recreate the container |
+| Back up | the `data/` folder (database and attached files), with your `.env` |
 
-Optional variables are listed in [`.env.example`](.env.example). Everything else is configured
-in the console.
+Migrations run on start. A backup is useless without its `ENCRYPTION_KEY`. Scaling, logs and
+online backups are covered in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
-## Scripts
+## Development
 
-| Command | |
-|---|---|
-| `npm run dev` | Dev server with reload |
-| `npm run build` · `npm start` | Production build and run |
-| `npm run start:worker` | Queue worker process |
-| `npm run start:triage` | Triage and issue-sync worker |
-| `npm run migrate` | Apply migrations (also runs on boot) |
-| `npm run typecheck` | Type-check source and tests |
-| `npm test` | Test suite (self-contained; uses a temporary SQLite file) |
+```bash
+npm install
+cp .env.example .env    # set ENCRYPTION_KEY and DEV_LOGIN=true
+npm run dev             # http://localhost:3000
+npm test
+```
+
+`DEV_LOGIN=true` signs you in without Discord, in development only.
 
 ## Docs
 
-- [Provider setup](docs/PROVIDER_SETUP.md): Discord application and GitHub App registration
-- [Deployment](docs/DEPLOYMENT.md): runtime, scaling, retention, operations
+- [Provider setup](docs/PROVIDER_SETUP.md): registering the Discord application and GitHub App
+- [Deployment](docs/DEPLOYMENT.md): processes, scaling, backups, retention, operations
 - [Architecture](docs/ARCHITECTURE.md): ticket lifecycle, endpoints, schema, security
-
-## Scope
-
-Not included: GitHub ↔ Discord comment sync, status updates to members after filing (the console shows each issue's live state), private ticket channels.
 
 ## License
 
