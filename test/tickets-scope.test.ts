@@ -22,9 +22,9 @@ const postJson = (who: Admin, url: string, fields: Record<string, string> = {}) 
   payload: new URLSearchParams({ _csrf: who.csrf, ...fields }).toString(),
 });
 
-/** Where the page's POST forms send things (sign out aside). */
+/** Where the page's POST forms send things (sign out and the switcher's New linked workspace aside: they're on every page). */
 function postTargets(body: string): string[] {
-  return [...body.matchAll(/<form\b[^>]*\bmethod="post"[^>]*\baction="([^"]+)"/g)].map((m) => m[1]!).filter((a) => a !== '/logout');
+  return [...body.matchAll(/<form\b[^>]*\bmethod="post"[^>]*\baction="([^"]+)"/g)].map((m) => m[1]!).filter((a) => a !== '/logout' && !a.endsWith('/settings/linked'));
 }
 
 async function join(role: 'admin' | 'moderator', name: string, access?: MemberAccess['access']): Promise<Admin> {

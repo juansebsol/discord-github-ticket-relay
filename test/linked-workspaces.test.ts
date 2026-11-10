@@ -102,6 +102,14 @@ describe('Linked workspaces: who is in them', () => {
     expect(res.headers.location).toBe(`/w/${made.id}`);
     expect(made).toMatchObject({ parent_id: main.workspace.id, on_main_panel: true });
     await expect(createLinkedWorkspace(env.db, made, 'Deeper')).rejects.toThrow('can’t have linked workspaces of its own');
+    // The workspace switcher offers it too, to the main's owner and admins, from a linked workspace as well.
+    for (const w of [main.workspace.id, made.id]) {
+      const page = await env.server.inject({ method: 'GET', url: `/w/${w}`, ...get(main.owner) });
+      expect(page.body).toContain('New linked workspace…');
+      expect(page.body).toContain(`action="/w/${main.workspace.id}/settings/linked"`);
+    }
+    const globalMod = await join('moderator', { global: true });
+    expect((await env.server.inject({ method: 'GET', url: `/w/${made.id}`, ...get(globalMod) })).body).not.toContain('New linked workspace…');
     const settings = await env.server.inject({ method: 'GET', url: `/w/${main.workspace.id}/settings`, ...get(main.owner) });
     expect(settings.body).toContain('Linked workspaces');
     expect(settings.body).toContain('GitHub: mailcraft-org');

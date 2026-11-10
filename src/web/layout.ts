@@ -7,7 +7,7 @@ import type { Membership } from '../domain/workspaces.js';
 import { AREA_KEYS, can, canUseMcp, ROLE_LABELS, TOOL_NAMES, type MemberAccess } from '../domain/permissions.js';
 import { areaHref, firstPage, TOOL_ICONS, type ToolName } from './routes/tool.js';
 import type { Role, UserRow, WorkspaceRow } from '../domain/types.js';
-import { avatar, csrfField, discordAvatar, icon, iconBtn, initials, menu, notice, type IconName } from './ui.js';
+import { avatar, csrfField, dialog, discordAvatar, icon, iconBtn, initials, menu, notice, submitBtn, type IconName } from './ui.js';
 import { knowledgeLive } from './knowledge-live.js';
 
 export type StepState = 'done' | 'todo' | 'problem';
@@ -148,12 +148,17 @@ export function layout(ctx: PageContext, opts: { title: string; active: string; 
     : html``;
 
   const linkedTo = ws?.parent_id ? (ctx.memberships ?? []).find((m) => m.workspace.id === ws.parent_id)?.workspace.name ?? 'its main workspace' : null;
+  // New linked workspace: made under the main (this one, or this linked workspace's), by its owner and admins.
+  const mainId = ws ? ws.parent_id ?? ws.id : null;
+  const mainAccess = (ctx.memberships ?? []).find((m) => m.workspace.id === mainId);
+  const canAddLinked = Boolean(mainAccess && !mainAccess.workspace.parent_id && can(mainAccess, 'manage'));
   const wsButton = ws
     ? menu(
         [
           // A linked workspace sits under its main, marked with an arrow.
           ...(ctx.memberships ?? []).map((m) => ({ href: `/w/${m.workspace.id}`, label: m.workspace.name, current: m.workspace.id === ws.id, ...(m.workspace.parent_id && (ctx.memberships ?? []).some((x) => x.workspace.id === m.workspace.parent_id) ? { icon: 'corner-down-right' as const } : {}) })),
           'sep',
+          canAddLinked ? { dialog: 'new-linked', label: 'New linked workspace…', icon: 'plus' as const } : null,
           { href: '/workspaces', label: 'All workspaces' },
         ],
         {
@@ -195,10 +200,24 @@ ${ws && access ? html`<div id="alert-dock" data-dock-src="${base}/alerts" data-d
 ${ws && access && p?.knowledgeRun && can(access, 'triage.knowledge.view') ? knowledgeLive({ base, csrf: ctx.csrf, wid: ws.id, edit: can(access, 'triage.knowledge.edit') }) : ''}
 ${toastsFor(ctx.flash)}
 ${CONFIRM_DIALOG}
+${canAddLinked && mainAccess ? newLinkedDialog(mainAccess.workspace, ctx.csrf) : ''}
 ${ICON_TEMPLATES}
 </body>
 </html>`;
   return page.value;
+}
+
+/** The switcher's "New linked workspace…": its name, then it opens (Settings › Linked workspaces lists them all). */
+function newLinkedDialog(main: WorkspaceRow, csrf: string): SafeHtml {
+  return dialog('new-linked', {
+    title: 'New linked workspace',
+    action: `/w/${main.id}/settings/linked`,
+    csrf,
+    body: html`<div class="field"><label for="new-linked-name">Name</label>
+      <input id="new-linked-name" type="text" class="full" name="name" required maxlength="80" placeholder="For example, the app or team">
+      <div class="hint">For apps whose repositories are in another GitHub organization. It gets its own GitHub connection, apps, tickets, AI triage and analytics, and uses ${main.name}’s Discord server. ${main.name}’s admins and global moderators are in it automatically.</div></div>`,
+    submit: submitBtn('Create', { variant: 'primary', icon: 'plus', loading: 'Creating…' }),
+  });
 }
 
 function badge(n: number, tone: 'warn' | 'accent' = 'warn', title = `${String(n)} need attention`): SafeHtml {
