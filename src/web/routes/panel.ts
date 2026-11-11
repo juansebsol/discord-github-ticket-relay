@@ -1,10 +1,10 @@
 import type { FastifyInstance } from 'fastify';
-import { DEFAULT_NOTICE, DEFAULT_PANEL_INTRO, DEFAULT_PANEL_INTRO_BUTTONS, DEFAULT_PANEL_INTRO_GROUPS, DEFAULT_PANEL_TITLE, defaultPanelIntro, GROUP_TITLE_MAX, MORE_APPS_VALUE, visibilityNotice } from '../../discord/messages.js';
+import { DEFAULT_NOTICE, DEFAULT_PANEL_INTRO, DEFAULT_PANEL_INTRO_BUTTONS, DEFAULT_PANEL_INTRO_GROUPS, DEFAULT_PANEL_TITLE, defaultPanelIntro, GROUP_NOTE_MAX, GROUP_TITLE_MAX, MORE_APPS_VALUE, type PanelGroup, visibilityNotice } from '../../discord/messages.js';
 import { DEFAULT_MEMBER_TEXT, MAX_NEW_FILES, MEMBER_CLOSE, MEMBER_LIMITS, MEMBER_TEXT_KEYS, memberActions, memberActionsToStore, type MemberTextKey } from '../../domain/member-actions.js';
 import { myTicketDetail, myTicketsPage, statusWords, type MemberTicket } from '../../domain/my-tickets.js';
 import { formFor } from '../../domain/forms.js';
 import { inspectGuild } from '../../domain/discord-checks.js';
-import { listLinked, mainOf, setGroupTitles, setOnMainPanel } from '../../domain/linked.js';
+import { listLinked, mainOf, setOnMainPanel, setPanelGroups } from '../../domain/linked.js';
 import { checkPanel, linkedGroupTitle, mainGroupTitle, panelContent, panelGroupsOf, panelPayloadFor, publishPanel, unpublishPanel } from '../../domain/panel.js';
 import { can, type MemberAccess } from '../../domain/permissions.js';
 import { getApp, getDiscordConnection, getGitHubConnection, getPanel, listApps, setTicketsChannel } from '../../domain/store.js';
@@ -74,6 +74,11 @@ function cleanGroupTitle(value: unknown, fallback: string): string | null {
   return v && v !== fallback ? v : null;
 }
 
+/** A group button's optional description, on one line; null when it's empty. */
+function cleanGroupNote(value: unknown): string | null {
+  return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, GROUP_NOTE_MAX) || null;
+}
+
 /** Example tickets for the My tickets preview, for the first app (or "Your app"). */
 function exampleTickets(app: { name: string; repo_owner: string; repo_name: string } | undefined): MemberTicket[] {
   const day = 86_400_000;
@@ -135,8 +140,10 @@ export function registerPanelRoutes(app: FastifyInstance, web: Web): void {
     const title = panelWs.panel_title?.trim() || DEFAULT_PANEL_TITLE;
     const intro = panelWs.panel_intro?.trim() || defaultPanelIntro(panelWs.my_tickets, Boolean(groups));
     // The preview has the menu and the buttons, so the My tickets switch can show either while it's changed.
+    // The buttons' descriptions are drawn apart (they follow their fields), so they're left out here.
+    const unnoted = content.family.map((w, i) => (i ? w : { ...w, panel_main_note: null, panel_linked_note: null }));
     const layout = (on: boolean) => {
-      const { payload } = panelPayloadFor({ ...panelWs, my_tickets: on }, content.apps, content.hasTypes, content.family);
+      const { payload } = panelPayloadFor({ ...panelWs, my_tickets: on, panel_main_note: null, panel_linked_note: null }, content.apps, content.hasTypes, unnoted);
       const own = panelWs.panel_intro?.trim() || defaultPanelIntro(on, Boolean(groups));
       type Option = { label: string; value: string; description?: string };
       const selects: Option[][] = [];
@@ -221,7 +228,7 @@ export function registerPanelRoutes(app: FastifyInstance, web: Web): void {
           <div class="section-h"><div><h3>Where members open tickets</h3><div class="desc">${ws.name} uses ${main.name}’s Discord server.</div></div></div>
           <input type="hidden" name="panel_home_sent" value="1">
           <div class="choices" role="radiogroup" aria-label="Where members open tickets">
-            ${homeChoice('main', `On ${main.name}’s panel`, `Members find its apps behind the linked workspaces’ button there, next to ${main.name}’s own. The panel’s channel, text, button names and My tickets switch are set on ${main.name}’s Panel page.`)}
+            ${homeChoice('main', `On ${main.name}’s panel`, `Members find its apps behind the linked workspaces’ button there, next to ${main.name}’s own. The panel’s channel, text, buttons and My tickets switch are set on ${main.name}’s Panel page.`)}
             ${homeChoice('own', 'Its own panel', `A panel just for ${ws.name}’s apps, in a channel of ${main.name}’s server.`)}
           </div>
         </div>`
@@ -233,15 +240,22 @@ export function registerPanelRoutes(app: FastifyInstance, web: Web): void {
       return `${names.length} app${names.length === 1 ? '' : 's'}: ${names.slice(0, 4).join(', ')}${names.length > 4 ? ` and ${names.length - 4} more` : ''}`;
     };
     const othersWithApps = others.filter((l) => otherApps.some((a) => a.workspace_id === l.id));
+    // A button's optional description: in the panel's text, or the private Open a ticket message.
+    const noteField = (key: PanelGroup['key'], example: string) => textField({
+      id: `group_${key}_note`, label: 'Description', value: (key === 'main' ? ws.panel_main_note : ws.panel_linked_note)?.trim() ?? '', max: GROUP_NOTE_MAX,
+      placeholder: `Optional. ${example}`, defaultValue: '', preview: `pv-note-${key} pv-cnote-${key}`, md: true, attrs: raw('data-preview-optional'),
+    });
     const linkedDefault = linkedGroupTitle({ panel_linked_title: null }, othersWithApps.length ? othersWithApps : others);
     const alsoHere = others.length
       ? html`<div class="section" id="buttons">
-          <div class="section-h"><div><h3>Buttons</h3><div class="desc">Apps from linked workspaces are on this panel too. Members press the button for ${ws.name}’s apps or the linked workspaces’, then pick the app from its list. Each app files tickets in its own workspace.${groups ? '' : ' Until both have enabled apps, the panel keeps one menu.'}</div></div>
-            ${edit ? html`<button type="button" class="btn ghost sm" data-reset-fields="group_main group_linked"><span class="lead">${icon('undo-2', 14)}</span><span class="lbl">Reset names</span></button>` : ''}</div>
+          <div class="section-h"><div><h3>Buttons</h3><div class="desc">Apps from linked workspaces are on this panel too. Members press the button for ${ws.name}’s apps or the linked workspaces’, then pick the app from its list. A description, if you add one, is shown with its button’s name to say which is which. Each app files tickets in its own workspace.${groups ? '' : ' Until both have enabled apps, the panel keeps one menu.'}</div></div>
+            ${edit ? html`<button type="button" class="btn ghost sm" data-reset-fields="group_main group_main_note group_linked group_linked_note"><span class="lead">${icon('undo-2', 14)}</span><span class="lbl">Reset to default</span></button>` : ''}</div>
           <div class="fields">
-            ${textField({ id: 'group_main', label: `Button for ${ws.name}’s apps`, value: mainGroupTitle(ws), max: GROUP_TITLE_MAX, placeholder: ws.name, defaultValue: ws.name, preview: 'pv-grp-main pv-step-main', hint: appNames([ws.id]) })}
-            ${textField({ id: 'group_linked', label: 'Button for linked workspaces’ apps', value: ws.panel_linked_title?.trim() || linkedDefault, max: GROUP_TITLE_MAX, placeholder: linkedDefault, defaultValue: linkedDefault, preview: 'pv-grp-linked pv-step-linked',
+            ${textField({ id: 'group_main', label: `Button for ${ws.name}’s apps`, value: mainGroupTitle(ws), max: GROUP_TITLE_MAX, placeholder: ws.name, defaultValue: ws.name, preview: 'pv-grp-main pv-step-main pv-nname-main pv-cgrp-main pv-cstep-main pv-cnname-main', hint: appNames([ws.id]) })}
+            ${noteField('main', 'For example: Made by our team')}
+            ${textField({ id: 'group_linked', label: 'Button for linked workspaces’ apps', value: ws.panel_linked_title?.trim() || linkedDefault, max: GROUP_TITLE_MAX, placeholder: linkedDefault, defaultValue: linkedDefault, preview: 'pv-grp-linked pv-step-linked pv-nname-linked pv-cgrp-linked pv-cstep-linked pv-cnname-linked',
               hint: html`${appNames(others.map((l) => l.id))} · ${others.map((l, i) => html`${i ? ', ' : ''}<a href="/w/${l.id}/tickets/panel">${l.name}’s Panel page</a>`)}` })}
+            ${noteField('linked', 'For example: Made by the community')}
           </div>
         </div>`
       : '';
@@ -339,6 +353,13 @@ export function registerPanelRoutes(app: FastifyInstance, web: Web): void {
       const first = `<strong>${escapeHtml(groups[0].title)}</strong> or <strong>${escapeHtml(groups[1].title)}</strong>`;
       menuSteps = raw(menuSteps.value.replace(first, `<strong id="pv-step-main">${escapeHtml(groups[0].title)}</strong> or <strong id="pv-step-linked">${escapeHtml(groups[1].title)}</strong>`));
     }
+    // The buttons' descriptions, each line hidden while its field is empty: in the panel's text, or
+    // after "Press A or B" in the private Open a ticket message ('c').
+    const noteLines = (c: '' | 'c') => {
+      if (!groups) return '';
+      const lines = groups.map((g) => html`<span data-pv-line="group_${g.key}_note" ${g.note ? '' : raw('hidden')}><strong id="pv-${c}nname-${g.key}">${g.title}</strong>: <span id="pv-${c}note-${g.key}">${discordMd(g.note ?? '')}</span><br></span>`);
+      return html`<span data-pv-lines ${groups.some((g) => g.note) ? '' : raw('hidden')}>${c ? html`<br><br>` : ''}${lines}${c ? '' : html`<br>`}</span>`;
+    };
     const perGroup = (groups ?? []).map((g) => `${g.title} (${g.apps.length} app${g.apps.length === 1 ? '' : 's'})`).join(' and ');
     const optionList = (options: { label: string; value: string; description?: string }[]) => options.length
       ? html`<div class="dp-options">${options.map((o) => html`<div class="dp-option"><strong>${o.label}</strong>${o.description ? html`<span>${o.description}</span>` : ''}${o.value === MORE_APPS_VALUE || o.value.startsWith(`${MORE_APPS_VALUE}:`) ? html`<span>Opens a private, page-by-page list</span>` : ''}</div>`)}</div>`
@@ -354,7 +375,7 @@ export function registerPanelRoutes(app: FastifyInstance, web: Web): void {
         <div class="panel-preview">
           ${previewCaption(channelName, messageLink)}
           ${botMessage(bot, html`
-            <div class="dp-embed"><h4 id="pv-title">${title}</h4><p><span id="pv-intro">${discordMd(intro)}</span><br><br><span ${shows(false)}>${menuSteps}</span><span ${shows(true)}>${discordMd(buttons.rest)}</span></p></div>
+            <div class="dp-embed"><h4 id="pv-title">${title}</h4><p><span id="pv-intro">${discordMd(intro)}</span><br><br>${groups ? html`<span ${shows(false)}>${noteLines('')}</span>` : ''}<span ${shows(false)}>${menuSteps}</span><span ${shows(true)}>${discordMd(buttons.rest)}</span></p></div>
             <div ${shows(false)}>
               ${groups
                 ? html`<div class="dp-buttons"><span class="dp-button blurple" id="pv-grp-main">${groups[0].title}</span><span class="dp-button blurple" id="pv-grp-linked">${groups[1].title}</span></div>`
@@ -363,6 +384,12 @@ export function registerPanelRoutes(app: FastifyInstance, web: Web): void {
             <div class="dp-buttons" ${shows(true)}><span class="dp-button blurple">Open a ticket</span><span class="dp-button grey">My tickets</span></div>`, 'Preview of the ticket panel in Discord')}
           <p class="dp-note" ${shows(false)}>${enabledApps.length ? `${groups ? `Each button opens its list privately: ${perGroup}.` : `The menu lists ${appCount}.`}${content.hasTypes ? ' Members pick a ticket type next.' : ''}` : 'No enabled apps yet, so the menu is empty.'}</p>
           <p class="dp-note" ${shows(true)}>${enabledApps.length > 1 ? (groups ? `Open a ticket shows the two buttons privately, then the list: ${perGroup}.` : `Open a ticket shows a private menu of ${appCount}.`) : enabledApps.length ? 'Open a ticket goes straight on: there’s one enabled app.' : 'No enabled apps yet.'}${content.hasTypes ? ' Members pick a ticket type next.' : ''}</p>
+          ${groups ? html`<div ${shows(true)}>
+            ${previewCaption(null, null, 'Open a ticket · ')}
+            ${botMessage(bot, html`<p class="dp-text">Press <strong id="pv-cstep-main">${groups[0].title}</strong> or <strong id="pv-cstep-linked">${groups[1].title}</strong>, then choose your app.${noteLines('c')}</p>
+              <div class="dp-buttons"><span class="dp-button blurple" id="pv-cgrp-main">${groups[0].title}</span><span class="dp-button blurple" id="pv-cgrp-linked">${groups[1].title}</span></div>
+              <div class="dp-ephemeral">${icon('eye', 14)}<span>Only you can see this</span></div>`, 'Preview of Open a ticket in Discord')}
+          </div>` : ''}
           <div ${shows(true)}>
             ${previewCaption(null, null, 'My tickets · ')}
             ${myTicketsPreview(bot, myTicketsPage(examples, 0, words))}
@@ -431,22 +458,30 @@ export function registerPanelRoutes(app: FastifyInstance, web: Web): void {
         await setMyTickets(deps.db, wid, body.my_tickets === '1');
         textChanged = true;
       }
-      // The group buttons' names (a main with linked workspaces on its panel).
-      let namesChanged = false;
-      if (!ws.parent_id && (body.group_main !== undefined || body.group_linked !== undefined)) {
+      // The group buttons' names and descriptions (a main with linked workspaces on its panel).
+      let groupsChanged = false;
+      if (!ws.parent_id && ['group_main', 'group_linked', 'group_main_note', 'group_linked_note'].some((k) => body[k] !== undefined)) {
         const content = await panelContent(deps, ws);
         const linked = content.family.slice(1);
         const withApps = linked.filter((l) => content.apps.some((a) => a.enabled && a.workspace_id === l.id));
-        const next = {
-          main: body.group_main !== undefined ? cleanGroupTitle(body.group_main, ws.name) : ws.panel_section_title?.trim() || null,
-          linked: body.group_linked !== undefined ? cleanGroupTitle(body.group_linked, linkedGroupTitle({ panel_linked_title: null }, withApps.length ? withApps : linked)) : ws.panel_linked_title?.trim() || null,
+        const was = {
+          main: ws.panel_section_title?.trim() || null,
+          linked: ws.panel_linked_title?.trim() || null,
+          mainNote: ws.panel_main_note?.trim() || null,
+          linkedNote: ws.panel_linked_note?.trim() || null,
         };
-        namesChanged = next.main !== (ws.panel_section_title?.trim() || null) || next.linked !== (ws.panel_linked_title?.trim() || null);
-        if (namesChanged) await setGroupTitles(deps.db, wid, next);
+        const next = {
+          main: body.group_main !== undefined ? cleanGroupTitle(body.group_main, ws.name) : was.main,
+          linked: body.group_linked !== undefined ? cleanGroupTitle(body.group_linked, linkedGroupTitle({ panel_linked_title: null }, withApps.length ? withApps : linked)) : was.linked,
+          mainNote: body.group_main_note !== undefined ? cleanGroupNote(body.group_main_note) : was.mainNote,
+          linkedNote: body.group_linked_note !== undefined ? cleanGroupNote(body.group_linked_note) : was.linkedNote,
+        };
+        groupsChanged = JSON.stringify(next) !== JSON.stringify(was);
+        if (groupsChanged) await setPanelGroups(deps.db, wid, next);
       }
       // They're on the panel message, or in the private Open a ticket message (right away) while My tickets is on.
-      const namesLive = namesChanged && ws.my_tickets;
-      if (namesChanged && !namesLive) textChanged = true;
+      const groupsLive = groupsChanged && ws.my_tickets;
+      if (groupsChanged && !groupsLive) textChanged = true;
       // The notice isn't part of the panel message: it's used from the next ticket on.
       let noticeChanged = false;
       if (body.notice_public !== undefined || body.notice_private !== undefined) {
@@ -492,8 +527,8 @@ export function registerPanelRoutes(app: FastifyInstance, web: Web): void {
           recreated: `The old panel was deleted, so a new one was posted${where}`,
           moved: `Panel moved${where}`,
         }[result]);
-      } else if (!textChanged && namesLive && !noticeChanged && !actionsChanged) {
-        setFlash(reply, 'success', 'Saved. Members see the new names when they press Open a ticket.');
+      } else if (!textChanged && groupsLive && !noticeChanged && !actionsChanged) {
+        setFlash(reply, 'success', 'Saved. Members see the buttons’ changes when they press Open a ticket.');
       } else if (!textChanged && (noticeChanged || actionsChanged)) {
         setFlash(reply, 'success', !actionsChanged
           ? 'Notice saved. Members see it the next time they open a ticket.'

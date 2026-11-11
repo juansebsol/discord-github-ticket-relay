@@ -37,8 +37,8 @@ export function panelGroupsOf(family: WorkspaceRow[], apps: AppRow[]): [PanelGro
   const theirs = withApps.flatMap((l) => enabled.filter((a) => a.workspace_id === l.id));
   if (!mine.length || !theirs.length) return null;
   return [
-    { key: 'main', title: mainGroupTitle(main), apps: mine.map(panelApp) },
-    { key: 'linked', title: linkedGroupTitle(main, withApps), apps: theirs.map(panelApp) },
+    { key: 'main', title: mainGroupTitle(main), note: main.panel_main_note?.trim() || null, apps: mine.map(panelApp) },
+    { key: 'linked', title: linkedGroupTitle(main, withApps), note: main.panel_linked_note?.trim() || null, apps: theirs.map(panelApp) },
   ];
 }
 

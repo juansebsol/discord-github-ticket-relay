@@ -46,6 +46,9 @@ export interface WorkspaceRow {
   panel_section_title: string | null;
   /** …and the linked workspaces' button (null = the one linked workspace's name, or "Other apps"). */
   panel_linked_title: string | null;
+  /** Optional descriptions for those two buttons, shown with their names (null = none). */
+  panel_main_note: string | null;
+  panel_linked_note: string | null;
   /** A linked workspace's own panel channel, in its main's Discord server. */
   panel_channel_id: string | null;
   panel_channel_name: string | null;

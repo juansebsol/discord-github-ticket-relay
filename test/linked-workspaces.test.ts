@@ -336,6 +336,38 @@ describe('Linked workspaces: a button for the main’s apps and one for theirs',
     expect(inPlace.data.flags).toBeUndefined();
   });
 
+  it('shows a button’s description, when it has one, with its name', async () => {
+    const name = main.workspace.name.replace(/([\\*_~`|>#\[\]()-])/g, '\\$1');
+    await publishPanel(env.deps, main.workspace.id, null);
+    await save({ group_linked: 'Community Apps', group_main_note: '', group_linked_note: '  Made by   the **community** ' });
+    await fresh();
+    expect([main.workspace.panel_main_note, main.workspace.panel_linked_note]).toEqual([null, 'Made by the **community**']);
+    expect(await checkPanel(env.deps, main.workspace.id, { live: false })).toMatchObject({ state: 'published', outdated: true });
+    await publishPanel(env.deps, main.workspace.id, null);
+    const text = ([...env.discord.messages.values()].at(-1)!.payload as any).embeds[0].description as string;
+    expect(text).toContain('\n\n**Community Apps**: Made by the **community**\n\n**How it works**\n1. Press');
+    expect(text).not.toContain(`**${name}**:`);
+    // The Panel page shows it in the preview, where it follows the field.
+    const page = (await env.server.inject({ method: 'GET', url: `/w/${main.workspace.id}/tickets/panel`, ...get(main.owner) })).body;
+    expect(page).toContain('id="group_linked_note"');
+    expect(page).toContain('id="pv-note-linked">Made by the <strong>community</strong></span>');
+    expect(page).toContain('data-pv-line="group_main_note" hidden');
+
+    // With My tickets on: in the private Open a ticket message, right away.
+    await setMyTickets(env.db, main.workspace.id, true);
+    await publishPanel(env.deps, main.workspace.id, null);
+    const saved = await save({ group_main_note: 'Made by our team' });
+    expect(await checkPanel(env.deps, main.workspace.id, { live: false })).toMatchObject({ outdated: false });
+    expect(Buffer.from(saved.cookies.find((c) => c.name === 'tr_flash')!.value, 'base64url').toString()).toContain('when they press Open a ticket');
+    const chooser = (await click('tr:open')).json().data;
+    expect(chooser.content).toBe(`Press **${name}** or **Community Apps**, then choose your app.\n\n**${name}**: Made by our team\n**Community Apps**: Made by the **community**`);
+    // Cleared, they're gone.
+    await save({ group_main_note: ' ', group_linked_note: '' });
+    await fresh();
+    expect([main.workspace.panel_main_note, main.workspace.panel_linked_note]).toEqual([null, null]);
+    expect((await click('tr:open')).json().data.content).toBe(`Press **${name}** or **Community Apps**, then choose your app.`);
+  });
+
   it('keeps one menu when only one workspace has apps on the panel, and old panels’ menus still work', async () => {
     await env.db.query('UPDATE apps SET enabled = 0 WHERE workspace_id = $1', [linked.id]);
     await publishPanel(env.deps, main.workspace.id, null);

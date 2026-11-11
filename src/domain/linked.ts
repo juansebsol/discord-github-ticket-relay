@@ -45,9 +45,10 @@ export async function setOnMainPanel(q: Queryable, workspaceId: string, on: bool
   await q.query('UPDATE workspaces SET on_main_panel = $2, updated_at = now_ms() WHERE id = $1 AND parent_id IS NOT NULL', [workspaceId, on]);
 }
 
-/** A main's group button names on its panel: its own apps' and the linked workspaces' (null: the default). */
-export async function setGroupTitles(q: Queryable, mainId: string, titles: { main: string | null; linked: string | null }): Promise<void> {
-  await q.query('UPDATE workspaces SET panel_section_title = $2, panel_linked_title = $3, updated_at = now_ms() WHERE id = $1 AND parent_id IS NULL', [mainId, titles.main, titles.linked]);
+/** A main's group buttons on its panel: its own apps' and the linked workspaces', their names (null: the default) and descriptions (null: none). */
+export async function setPanelGroups(q: Queryable, mainId: string, g: { main: string | null; linked: string | null; mainNote: string | null; linkedNote: string | null }): Promise<void> {
+  await q.query('UPDATE workspaces SET panel_section_title = $2, panel_linked_title = $3, panel_main_note = $4, panel_linked_note = $5, updated_at = now_ms() WHERE id = $1 AND parent_id IS NULL',
+    [mainId, g.main, g.linked, g.mainNote, g.linkedNote]);
 }
 
 /** A linked workspace's own panel channel (in its main's server). */

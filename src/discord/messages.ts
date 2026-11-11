@@ -58,6 +58,8 @@ export const MORE_APPS_VALUE = '__more';
 export const SELECT_MAX = 25;
 /** A button label's limit in Discord. */
 export const GROUP_TITLE_MAX = 80;
+/** A group button's optional description, shown with its name. */
+export const GROUP_NOTE_MAX = 200;
 export const TITLE_MAX = 200;
 export const DESCRIPTION_MAX = 4000;
 
@@ -87,6 +89,8 @@ export type PanelGroupKey = 'main' | 'linked';
 export interface PanelGroup {
   key: PanelGroupKey;
   title: string;
+  /** What these apps are, shown with the button's name (Discord formatting works). */
+  note?: string | null;
   apps: PanelApp[];
 }
 
@@ -128,6 +132,11 @@ function groupNames(groups: [PanelGroup, PanelGroup]): string {
   return groups.map((g) => `**${escapeMarkdown(g.title)}**`).join(' or ');
 }
 
+/** "**Community Apps**: Made by the community." for each button with a description, one per line. */
+function groupNotes(groups: [PanelGroup, PanelGroup] | null): string[] {
+  return (groups ?? []).filter((g) => g.note?.trim()).map((g) => `**${escapeMarkdown(g.title)}**: ${g.note!.trim()}`);
+}
+
 function appOption(app: PanelApp) {
   return {
     label: truncate(app.name, 100),
@@ -151,8 +160,10 @@ export function buildPanelMessage(opts: PanelOptions) {
   const first = buttons
     ? `1. Press **Open a ticket**${opts.apps.length > 1 ? ' and choose your app' : ''}.`
     : groups ? `1. Press ${groupNames(groups)}, then choose your app.` : '1. Choose your app from the menu.';
+  const notes = groupNotes(groups);
   const description = [
     opts.intro?.trim() || defaultPanelIntro(buttons, Boolean(groups)),
+    ...(notes.length ? ['', ...notes] : []),
     '',
     '**How it works**',
     ...(opts.hasTypes
@@ -256,10 +267,11 @@ export function buildGroupPage(group: PanelGroup, requestedPage: number) {
   return buildPickerPage(group.apps, requestedPage, { select: CustomId.pickerSelect, page: (p) => CustomId.pickerPage(p, group.key) }, group.title);
 }
 
-/** Open a ticket on a panel with groups: their two buttons, privately. */
+/** Open a ticket on a panel with groups: their two buttons (and descriptions), privately. */
 export function buildGroupChooser(groups: [PanelGroup, PanelGroup]) {
+  const notes = groupNotes(groups);
   return {
-    content: `Press ${groupNames(groups)}, then choose your app.`,
+    content: [`Press ${groupNames(groups)}, then choose your app.`, ...(notes.length ? ['', ...notes] : [])].join('\n'),
     embeds: [],
     flags: EPHEMERAL,
     components: [groupButtons(groups, CustomId.groupPrivate)],

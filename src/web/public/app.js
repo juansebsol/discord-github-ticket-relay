@@ -655,11 +655,13 @@
   function syncField(el) {
     var counter = el.id && document.querySelector('[data-counter-for="' + el.id + '"]');
     if (counter) counter.textContent = el.value.length + ' / ' + el.getAttribute('maxlength');
-    // data-preview: the element (or several, ids separated by spaces) showing this field.
+    // data-preview: the element (or several, ids separated by spaces) showing this field. Empty, it
+    // shows the placeholder, unless the field is optional (data-preview-optional).
+    var optional = el.hasAttribute('data-preview-optional');
     (el.getAttribute('data-preview') || '').split(/\s+/).forEach(function (id) {
       var target = id && document.getElementById(id);
       if (!target) return;
-      var value = el.value.trim() ? el.value : (el.getAttribute('placeholder') || '');
+      var value = el.value.trim() || optional ? el.value : (el.getAttribute('placeholder') || '');
       if (target.hasAttribute('data-tpl')) {
         target.setAttribute('data-tpl', value);
         renderTpl(target);
@@ -671,6 +673,14 @@
         target.textContent = value;
       }
     });
+    // An optional field's lines in the preview (data-pv-line="<its id>") hide while it's empty, and
+    // their box (data-pv-lines) while all of its lines are hidden.
+    if (optional) {
+      $$('[data-pv-line="' + el.id + '"]').forEach(function (line) { line.hidden = !el.value.trim(); });
+      $$('[data-pv-lines]').forEach(function (box) {
+        box.hidden = $$('[data-pv-line]', box).every(function (line) { return line.hidden; });
+      });
+    }
   }
   $$('[data-preview],[maxlength][id]').forEach(function (el) {
     if (el.tagName !== 'INPUT' && el.tagName !== 'TEXTAREA') return;
